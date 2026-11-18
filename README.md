@@ -1,23 +1,30 @@
 # MyComfy
 
-本地视频生成平台的 Python 服务。用户可经 HTTP 注册、上传素材、选择策略版本并提交批次。Worker 在 MySQL 登记执行意图后向本机 ComfyUI 提交一次工作流。只有文件通过契约校验、发布到正式位置并完成登记，用户才会看到成功状态。
+本地视频生成平台。用户可通过 Python 服务提供的 HTTP API 注册、上传素材、选择策略版本并提交批次。Worker 在 MySQL 登记执行意图后向本机 ComfyUI 提交一次工作流。只有文件通过契约校验、发布到正式位置并完成登记，用户才会看到成功状态。
 
 ## 目录与阅读顺序
 
 ```text
-src/mycomfy/
-├── cli.py、config.py、errors.py  命令入口、运行配置、共用错误
-├── api/                        HTTP 应用、监听、认证、分页与 SSE
-├── generation/                 批次受理、策略版本、任务状态与 Worker
-├── engine/                     ComfyUI 部署、进程守护、协议适配与进度采样
-├── artifacts/                  文件读写、媒体校验与发布恢复
-├── database/                   数据库会话、ORM 模型及迁移入口
-└── ops/                        容量控制、只读监控与成套备份
-migrations/                     Alembic 数据库版本
-tests/{unit,integration,e2e}/   单元、集成和端到端测试
+MyComfy/
+├── src/mycomfy/                  Python 服务与命令入口
+│   ├── api/                      HTTP 应用、认证与 SSE
+│   ├── generation/               批次、策略、任务状态与 Worker
+│   ├── engine/                   ComfyUI 部署、进程管理与协议适配
+│   ├── artifacts/                文件读写、媒体校验与发布
+│   ├── database/                 数据库会话、模型与迁移入口
+│   └── ops/                      容量、监控与备份
+├── web/
+│   ├── client/                   C 端网页
+│   └── admin/                    本机管理网页
+├── migrations/                   Alembic 数据库版本
+├── scripts/                      测试与验收命令
+├── tests/{unit,integration,e2e}/  单元、集成和端到端测试
+└── docs/                         部署、运维与验收
 ```
 
-可以跟随一次视频请求读代码。
+两个网页目录已建立，页面和构建配置待开发。C 端网页使用用户 API，管理网页使用本机只读监控 API。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md)
+
+后端可以跟随一次视频请求读代码。
 
 1. 用户登录并提交 `POST /api/v1/batches`。`app.py` 挂载路由和审计中间件，受理前校验页面会话及归属。[HTTP 入口](src/mycomfy/api/app.py) · [认证](src/mycomfy/api/auth.py)
 2. `admit_batch` 核对幂等键、策略版本和输入素材，把批次、任务与初始事件一并写入 MySQL。[批次受理](src/mycomfy/generation/jobs.py) · [业务表](src/mycomfy/database/models.py)

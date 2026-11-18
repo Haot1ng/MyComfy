@@ -3,8 +3,9 @@
 import argparse
 import sys
 
+from mycomfy.database.schema import migrate, require_current_schema
+
 from .config import Settings
-from .schema import migrate, require_current_schema
 
 
 def main(argv=None):
@@ -12,11 +13,11 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     # 部署与引擎管理有自己的子命令，原样传递参数以保留各自的帮助信息。
     if args and args[0] == "deploy":
-        from .deploy import main as deploy_main
+        from mycomfy.engine.deploy import main as deploy_main
 
         return deploy_main(args[1:])
     if args and args[0] == "runtime":
-        from .runtime import main as runtime_main
+        from mycomfy.engine.runtime import main as runtime_main
 
         return runtime_main(args[1:])
 
@@ -40,12 +41,12 @@ def main(argv=None):
         return
     require_current_schema(settings.database_url)
     if selected.command == "worker":
-        from .worker import run_worker
+        from mycomfy.generation.worker import run_worker
 
         return run_worker(settings, once=selected.once)
 
     if selected.command == "api":
-        from .serve import api_server
+        from mycomfy.api.server import api_server
 
         with api_server(settings, selected.host, selected.port, selected.local_port) as (
             server,
@@ -59,7 +60,7 @@ def main(argv=None):
 
     import uvicorn
 
-    from .api import create_app
+    from mycomfy.api.app import create_app
 
     # 单独诊断入口只接受本机直连，端口选择不改变其绑定地址。
     uvicorn.run(

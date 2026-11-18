@@ -2,9 +2,9 @@ import os
 
 from alembic import context
 
-from mycomfy import ops_models  # noqa: F401  注册容量表，纳入 Alembic 结构对比。
-from mycomfy.db import make_sessions
-from mycomfy.models import Base
+from mycomfy.database import capacity_models  # noqa: F401  注册容量表，纳入 Alembic 结构对比。
+from mycomfy.database.models import Base
+from mycomfy.database.session import make_sessions
 
 url = context.config.attributes.get("database_url") or os.environ["MYCOMFY_DATABASE_URL"]
 

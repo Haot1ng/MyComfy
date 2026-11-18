@@ -7,8 +7,8 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from mycomfy.db import make_sessions
-from mycomfy.schema import migrate
+from mycomfy.database.schema import migrate
+from mycomfy.database.session import make_sessions
 
 
 @pytest.fixture

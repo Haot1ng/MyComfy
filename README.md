@@ -2,6 +2,29 @@
 
 本地视频生成平台的 Python 服务。用户可经 HTTP 注册、上传素材、选择策略版本并提交批次。Worker 在 MySQL 登记执行意图后向本机 ComfyUI 提交一次工作流。只有文件通过契约校验、发布到正式位置并完成登记，用户才会看到成功状态。
 
+## 目录与阅读顺序
+
+```text
+src/mycomfy/
+├── cli.py、config.py、errors.py  命令入口、运行配置、共用错误
+├── api/                        HTTP 应用、监听、认证、分页与 SSE
+├── generation/                 批次受理、策略版本、任务状态与 Worker
+├── engine/                     ComfyUI 部署、进程守护、协议适配与进度采样
+├── artifacts/                  文件读写、媒体校验与发布恢复
+├── database/                   数据库会话、ORM 模型及迁移入口
+└── ops/                        容量控制、只读监控与成套备份
+migrations/                     Alembic 数据库版本
+tests/{unit,integration,e2e}/   单元、集成和端到端测试
+```
+
+可以跟随一次视频请求读代码。
+
+1. 用户登录并提交 `POST /api/v1/batches`。`app.py` 挂载路由和审计中间件，受理前校验页面会话及归属。[HTTP 入口](src/mycomfy/api/app.py) · [认证](src/mycomfy/api/auth.py)
+2. `admit_batch` 核对幂等键、策略版本和输入素材，把批次、任务与初始事件一并写入 MySQL。[批次受理](src/mycomfy/generation/jobs.py) · [业务表](src/mycomfy/database/models.py)
+3. Worker 领取空闲槽位，保存提交授权，再由 Adapter 向 ComfyUI 发送工作流。回执丢失时从这里跟踪原执行和实例代次。[调度与核对](src/mycomfy/generation/worker.py) · [引擎协议](src/mycomfy/engine/adapter.py)
+4. 引擎完成后，`register_outputs` 登记发布意图，发布器校验和归档文件。当所有必需产物可读时，事务写入任务成功状态。[发布与恢复](src/mycomfy/artifacts/publication.py)
+5. 用户通过 `GET /api/v1/assets/{id}/content` 读取完整或指定范围的视频字节。重新连接时，页面从上次游标补取事件，离线期间产生的终态通知可从通知列表读取。[文件读取](src/mycomfy/artifacts/storage.py) · [事件与通知](src/mycomfy/api/events.py)
+
 ## 云端开发
 
 使用 Python 3.12、uv、FFmpeg 与 ffprobe。Linux 上的进程管理使用文件锁和进程树信息。完整集成测试还需要 Docker。
@@ -15,7 +38,7 @@ uv run --locked python scripts/test_mysql.py
 最后一条命令在回环端口启动临时 MySQL 8.4，为每条数据库集成用例创建独立库，完成后回收容器。所有云端测试可在 CPU 上运行。其中一条跨模块测试会故意丢弃引擎提交回执，重建 Worker，并核对两个可解码 MP4 的完整下载和 Range 内容。可单独运行这条用例。
 
 ```bash
-uv run --locked python scripts/test_mysql.py -q tests/test_cloud_delivery.py
+uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 ```
 
 ## 启动服务

@@ -8,8 +8,8 @@ from unittest.mock import Mock
 import pytest
 from referencing.exceptions import Unresolvable
 
-from mycomfy.state import canonical_digest
-from mycomfy.strategy import check_schema_references, compatible, configured_for
+from mycomfy.generation.state import canonical_digest
+from mycomfy.generation.strategy import check_schema_references, compatible, configured_for
 
 
 def test_batch_digest_is_stable_and_preserves_task_order():

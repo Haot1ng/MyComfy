@@ -46,10 +46,10 @@ uv run mycomfy runtime drain --instance "$INSTANCE_ID" --generation "$GENERATION
 3. 在应用环境中设置源库的 `MYCOMFY_DATABASE_URL` 后，创建并核验本组备份。示例使用本地路径占位。
 
 ```bash
-uv run python -m mycomfy.backup create /backup/2026-11-18 \
+uv run python -m mycomfy.ops.backup create /backup/2026-11-18 \
   --root data=/srv/mycomfy/data --root work=/srv/mycomfy/engine \
   --root manifests=/srv/mycomfy/config
-uv run python -m mycomfy.backup verify /backup/2026-11-18
+uv run python -m mycomfy.ops.backup verify /backup/2026-11-18
 ```
 
 备份独立保存迁移版本、每表行数、恢复点、各文件的路径、字节数和 SHA-256。备份成功及完整核验后再恢复对外服务。本地文件系统上先同步文件和目录项，再原子发布清单并同步备份父目录。恢复时在提交数据库前先同步复制后的文件树。断电验收还取决于备份介质和磁盘的写缓存行为、MySQL 持久化设置和停写点是否成立，需在部署上演练。备份频率、保留代数、备份介质访问权和恢复目标随实际部署登记。
@@ -61,8 +61,8 @@ uv run python -m mycomfy.backup verify /backup/2026-11-18
 
 ```bash
 uv run mycomfy migrate
-uv run python -m mycomfy.backup restore /backup/2026-11-18 /srv/restore/trial
-uv run python -m mycomfy.backup reconcile-files /srv/restore/trial/data
+uv run python -m mycomfy.ops.backup restore /backup/2026-11-18 /srv/restore/trial
+uv run python -m mycomfy.ops.backup reconcile-files /srv/restore/trial/data
 ```
 
 3. 在恢复目录验证策略工作流、环境清单、文件归属、取消后可见性及恢复的发布记录。核对旧进程树和槽位后再启动对应代次。将应用的文件根和引擎清单重定位到恢复环境，并重新设置容量配置及凭据权限。

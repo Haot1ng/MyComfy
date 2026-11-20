@@ -4,7 +4,7 @@
 
 ## 配置工作流依赖
 
-在宿主机的 `deploy.config.json` 中编辑 `engine`。模板固定 ComfyUI `v0.33.0`，以及 Linux x86_64、Python 3.12 的 PyTorch `2.11.0+cu130`、torchvision `0.26.0+cu130` 和 torchaudio `2.11.0+cu130`。宿主机需要支持 CUDA 13.0 的 NVIDIA 驱动。更换运行环境时，请一起核对轮子索引、三个包的版本和驱动要求。[配置模板](../deploy.config.example.json) · [ComfyUI 版本](https://github.com/Comfy-Org/ComfyUI/tree/v0.33.0#installing) · [PyTorch 版本组合](https://pytorch.org/get-started/previous-versions/)
+新检出的仓库直接使用 `deploy.config.example.json`。模板固定 ComfyUI `v0.33.0`，以及 Linux x86_64、Python 3.12 的 PyTorch `2.11.0+cu130`、torchvision `0.26.0+cu130` 和 torchaudio `2.11.0+cu130`。宿主机需要支持 CUDA 13.0 的 NVIDIA 驱动。要调整模型或运行环境，可将模板复制为 `deploy.config.json`，在副本中编辑 `engine`。[配置模板](../deploy.config.example.json) · [ComfyUI 版本](https://github.com/Comfy-Org/ComfyUI/tree/v0.33.0#installing) · [PyTorch 版本组合](https://pytorch.org/get-started/previous-versions/)
 
 默认的 `engine.models` 包含 MiniMax H3 文生视频和图生视频共用的扩散模型、文本编码器、视频 VAE、音频 VAE，以及可选的 8 步 Turbo LoRA。首次部署引擎会从 Comfy-Org 的固定快照下载这五个文件，共约 42 GB，并校验各自的 SHA-256。两份工作流使用 ComfyUI 内置节点和普通文本提示词，均可保留 `engine.nodes` 为空。图生视频还需要用户提交首帧图片。[官方模型文件](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/4b53a35191437de05370da548e59aeabe2a5a09a) · [文生视频工作流](https://github.com/Comfy-Org/workflow_templates/blob/ea7faae6999fb31338f43408ff4a575bd3f7d9a0/templates/video_minimax_h3_t2v.json) · [图生视频工作流](https://github.com/Comfy-Org/workflow_templates/blob/ea7faae6999fb31338f43408ff4a575bd3f7d9a0/templates/video_minimax_h3_i2v.json)
 
@@ -22,7 +22,7 @@
 
 **发布到工作台时**，为要提供的 H3 工作流导出 ComfyUI API 格式，绑定提示词及图生视频所需的图片输入，在策略的 `requirements.models` 中声明实际使用的模型标识和摘要。通过本机维护接口发布策略版本后，用户即可在工作台选择它。[策略发布接口](web-api.md#本机维护)
 
-同一台 GPU 主机上运行 `python3 scripts/deploy.py --single-host`，脚本会启动本机 Docker 的 MySQL、Redis 及全部应用服务。首次部署时在模板中填写两项数据库密码。若将顶层 `single_host` 设为 `true`，日常部署直接运行 `python3 scripts/deploy.py` 即可。使用外部数据库时，保留 `single_host` 默认值 `false`，待数据库就绪后运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。[数据库与分机地址配置](../README.md#已有部署与分机部署)
+在 GPU 主机运行 `python3 scripts/deploy.py --single-host` 即可启动本机 Docker 的 MySQL、Redis 及全部应用服务。仓库模板将数据库端口与网页端口绑定到本机，两个数据库服务的密码均为字符串 `123456`。如果在自定义配置中将顶层 `single_host` 设为 `true`，日常部署直接运行 `python3 scripts/deploy.py` 即可。使用外部数据库时，保留 `single_host` 默认值 `false`，待数据库就绪后运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。[配置读取顺序与分机部署](../README.md#已有部署与分机部署)
 
 安装引擎时，临时容器会检出 ComfyUI 和节点，读取各自的 `requirements.txt`，生成带哈希的依赖锁并安装。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。
 

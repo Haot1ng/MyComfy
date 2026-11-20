@@ -52,22 +52,22 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 
 ### 全栈 Docker Compose（Linux / Windows WSL 2）
 
-**部署只需维护一份 `deploy.config.json`，入口是 `python3 scripts/deploy.py`。** 在 Linux 或 WSL 终端运行，需要 Python 3 和 Docker Compose 2.30.0 或更新版本。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**。全栈部署还需要 Docker 能访问 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit，Windows 使用支持 WSL 的 NVIDIA 驱动。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
+**在同一台 GPU 机器上部署**，需要 Python 3、Docker Compose 2.30.0 或更新版本，以及可在容器中使用的 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用支持 WSL 的 NVIDIA 驱动和 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
 
-**首次填写配置**。在项目根目录复制模板，并用编辑器打开生成的 `deploy.config.json`。该文件保存本机密码，默认由 Git 忽略。
-
-```bash
-umask 077
-cp -n deploy.config.example.json deploy.config.json
-```
-
-**同一台 GPU 机器上一键部署。** 在 `deploy.config.json` 中填写 `mysql.password` 和 `redis.password`，保留模板中的回环地址 `127.0.0.1`。模板已配置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。确认显卡驱动支持模板选用的 PyTorch 版本后，在项目根目录运行以下命令。
+**首次部署**可在新检出的仓库根目录直接运行以下命令。脚本读取仓库自带的 `deploy.config.example.json`，MySQL 和 Redis 的默认密码都是字符串 `123456`，数据库和网页端口仅绑定本机 `127.0.0.1`。模板预置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。
 
 ```bash
 python3 scripts/deploy.py --single-host
 ```
 
-这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。单机模式将数据库端口发布在回环地址。业务端通过 `127.0.0.1` 和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，按默认端口可在本机打开工作台 `http://127.0.0.1:8000/` 和监控页 `http://127.0.0.1:8001/`。[配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，可在本机打开工作台 `http://127.0.0.1:8000/` 和监控页 `http://127.0.0.1:8001/`。[配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+
+**需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
+
+```bash
+umask 077
+cp -n deploy.config.example.json deploy.config.json
+```
 
 | JSON 字段 | 填写内容 |
 | --- | --- |
@@ -84,7 +84,7 @@ python3 scripts/deploy.py --single-host
 
 **已有独立 MySQL 和 Redis** 时，保留模板的 `"single_host": false`，在 JSON 中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
 
-**先体验网页**时，只填写数据库连接参数。使用本机配套数据库时，先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `"single_host": true` 仍决定这些服务连接本机数据库。
+**先体验网页**时，可直接使用模板的本机数据库参数。先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `"single_host": true` 仍决定这些服务连接本机数据库。
 
 | 服务 | 容器职责 |
 | --- | --- |
@@ -122,7 +122,11 @@ python3 scripts/deploy.py --single-host
 
 默认情况下，`mysql.host` 填写私网地址时，GPU 容器也连接该地址及 `ports.mysql`。填写回环地址时，默认按项目自带的单机数据库处理，GPU 容器通过同一 Compose 网络连接 `mysql:3306`。如果 GPU 容器需要走另一条路（例如宿主机的独立数据库或私网隧道），填写从容器可达的 `mysql.engine_host` 和 `mysql.engine_port`。
 
-已有 `.env`、`deployment.json` 和 GPU 依赖锁的部署可继续使用这些文件。在仓库根目录没有 `deploy.config.json` 时，脚本读取旧配置。也可以用 `--single-host` 启动同机完整栈，或用 `--db-only` 单独启动数据库。切换到 JSON 时，填入原账号、密码、端口和持久目录。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
+#### 配置读取顺序
+
+1. 显式传入 `--config 文件路径` 时，使用指定文件。如果文件不存在，脚本直接读取仓库的 `deploy.config.example.json`，其中的相对路径均以仓库根目录为基准。
+2. 省略 `--config` 时，优先读取仓库根目录已有的 `deploy.config.json`。如果没有该文件，但存在旧版 `.env` 或部署目录已有 `deployment.json`，则沿用旧版部署流程。
+3. 仓库中只有模板时，直接使用模板。已有旧版配置的机器也可显式运行 `python3 scripts/deploy.py --config deploy.config.example.json --single-host` 选用模板。沿用现有 MySQL 数据卷时，配置中的凭据须与库内账号匹配。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
 
 ### 从 Python 环境启动
 

@@ -3,12 +3,12 @@
   "mysql": {
     "host": "127.0.0.1",
     "user": "mycomfy",
-    "password": ""
+    "password": "123456"
   },
   "redis": {
     "host": "127.0.0.1",
     "user": "mycomfy_cache",
-    "password": ""
+    "password": "123456"
   },
   "paths": {
     "data": "var/data",

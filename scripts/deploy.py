@@ -13,6 +13,24 @@ from pathlib import Path
 from deployment_config import legacy_single_host_environment, read_config
 
 
+def select_config(repo, requested):
+    """选择指定或本机 JSON。新部署使用仓库模板，已有旧版部署返回 None。"""
+    path = requested.resolve() if requested is not None else repo / "deploy.config.json"
+    if path.exists():
+        return path
+
+    if requested is None:
+        # 已有部署可能只在数据库机保存 .env，或在 GPU 机使用预制引擎清单。
+        deployment = repo / (os.environ.get("MYCOMFY_DEPLOYMENT_DIR") or "var/deployment")
+        if (repo / ".env").is_file() or (deployment / "deployment.json").is_file():
+            return None
+
+    # 模板相对路径以仓库为基准。提示写到 stderr，保持 Compose 的标准输出可供解析。
+    template = repo / "deploy.config.example.json"
+    print(f"未找到配置 {path}，使用默认模板 {template}。", file=sys.stderr)
+    return template
+
+
 def bind_source(service, target):
     """按容器内的挂载点找到 Compose 实际使用的宿主目录。"""
     for mount in service["volumes"]:
@@ -43,7 +61,7 @@ def main():
     """读取一份部署配置，按所选模式构建镜像、部署引擎并等待服务就绪。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, help="部署参数文件，默认使用仓库根目录的 deploy.config.json"
+        "--config", type=Path, help="部署参数文件，默认查找 deploy.config.json，缺失时使用仓库模板"
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -61,13 +79,13 @@ def main():
     )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
-    config_path = args.config.resolve() if args.config else repo / "deploy.config.json"
+    config_path = select_config(repo, args.config)
     process_env = {**os.environ, "PWD": str(repo)}
     compose = ["docker", "compose"]
     recipe = None
     single_host = args.single_host
 
-    if args.config or config_path.exists():
+    if config_path is not None:
         # 配置文件提供 Compose 凭据，单独的引擎参数通过 stdin 传给安装器。
         settings, recipe, single_host = read_config(
             config_path,
@@ -132,8 +150,8 @@ def main():
         deployment.mkdir(mode=0o700, parents=True, exist_ok=True)
         if recipe is None and not (deployment / "deployment.json").is_file():
             raise ValueError(
-                f"新部署请填写 {repo / 'deploy.config.json'}，模板是 deploy.config.example.json。"
-                f"已有项目可继续使用 {deployment / 'deployment.json'} 及其依赖锁。"
+                f"旧版部署缺少 {deployment / 'deployment.json'}。"
+                "使用默认 H3 模板可在部署命令中指定 --config deploy.config.example.json。"
             )
         build += ["engine", "worker"]
         start += ["engine", "worker"]

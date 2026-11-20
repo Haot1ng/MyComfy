@@ -61,7 +61,7 @@ umask 077
 cp -n deploy.config.example.json deploy.config.json
 ```
 
-**同一台 GPU 机器上一键部署。** 在 `deploy.config.json` 中填写 `mysql.password` 和 `redis.password`，保留模板中的回环地址 `127.0.0.1`，按显卡和工作流填写 `engine`。保存后在项目根目录运行以下命令。
+**同一台 GPU 机器上一键部署。** 在 `deploy.config.json` 中填写 `mysql.password` 和 `redis.password`，保留模板中的回环地址 `127.0.0.1`。模板已配置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。确认显卡驱动支持模板选用的 PyTorch 版本后，在项目根目录运行以下命令。
 
 ```bash
 python3 scripts/deploy.py --single-host
@@ -78,8 +78,8 @@ python3 scripts/deploy.py --single-host
 | `mysql.user`、`mysql.password` | MySQL 应用账号和密码。随附容器在空数据卷上创建 `mycomfy` 库并初始化所填账号，初始化凭据请避开单引号和反斜杠。复用已有数据卷时填写已有凭据。 |
 | `redis.user`、`redis.password` | Redis 缓存账号和密码。两个服务的密码均填原值，由脚本编码连接串。 |
 | `engine.comfyui` | ComfyUI 仓库地址与发布标签或 40 位 Git 提交号。 |
-| `engine.pytorch` | CUDA 轮子索引，以及目标环境需要的 torch、torchvision、torchaudio 精确版本。模板示例为 Linux x86_64、Python 3.12、CUDA 12.6，请按显卡驱动和工作流选取匹配组合。 |
-| `engine.nodes`、`engine.models` | 填写工作流使用的自定义节点及模型。模板中的两项为空。生成实际视频前需补齐工作流依赖，并发布相应策略。 |
+| `engine.pytorch` | 模板在 Linux x86_64、Python 3.12 下使用 PyTorch `2.11.0+cu130`，目标机需要支持 CUDA 13.0 的 NVIDIA 驱动。 |
+| `engine.nodes`、`engine.models` | 默认 H3 工作流使用 ComfyUI 内置节点。五个模型文件均固定下载地址和 SHA-256。要让用户在工作台选择文生或图生视频，还需发布相应的业务策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
 
 **已有独立 MySQL 和 Redis** 时，保留模板的 `"single_host": false`，在 JSON 中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)

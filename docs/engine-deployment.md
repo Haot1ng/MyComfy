@@ -4,28 +4,23 @@
 
 ## 配置工作流依赖
 
-在宿主机的 `deploy.config.json` 中编辑 `engine`。模板使用 ComfyUI 标签 `v0.3.59` 和 CUDA 12.6 的 PyTorch 2.7.1 组合，目标平台为 Linux x86_64 和 Python 3.12。使用其他显卡、驱动或工作流时，请用适配的轮子索引与版本号。精确版本包括轮子的本地版本后缀，例如 `2.7.1+cu126`。[配置模板](../deploy.config.example.json) · [ComfyUI 版本](https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.3.59) · [PyTorch 版本组合](https://pytorch.org/get-started/previous-versions/)
+在宿主机的 `deploy.config.json` 中编辑 `engine`。模板固定 ComfyUI `v0.33.0`，以及 Linux x86_64、Python 3.12 的 PyTorch `2.11.0+cu130`、torchvision `0.26.0+cu130` 和 torchaudio `2.11.0+cu130`。宿主机需要支持 CUDA 13.0 的 NVIDIA 驱动。更换运行环境时，请一起核对轮子索引、三个包的版本和驱动要求。[配置模板](../deploy.config.example.json) · [ComfyUI 版本](https://github.com/Comfy-Org/ComfyUI/tree/v0.33.0#installing) · [PyTorch 版本组合](https://pytorch.org/get-started/previous-versions/)
 
-假设工作流使用一个本地模型和 VideoHelperSuite 节点，可将 `engine.nodes`、`engine.models` 替换为以下字段。请将占位提交号换成你使用的节点版本，并将模型文件放到 `var/deployment/model-import/video.safetensors`。
+默认的 `engine.models` 包含 MiniMax H3 文生视频和图生视频共用的扩散模型、文本编码器、视频 VAE、音频 VAE，以及可选的 8 步 Turbo LoRA。首次部署引擎会从 Comfy-Org 的固定快照下载这五个文件，共约 42 GB，并校验各自的 SHA-256。两份工作流使用 ComfyUI 内置节点和普通文本提示词，均可保留 `engine.nodes` 为空。图生视频还需要用户提交首帧图片。[官方模型文件](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/4b53a35191437de05370da548e59aeabe2a5a09a) · [文生视频工作流](https://github.com/Comfy-Org/workflow_templates/blob/ea7faae6999fb31338f43408ff4a575bd3f7d9a0/templates/video_minimax_h3_t2v.json) · [图生视频工作流](https://github.com/Comfy-Org/workflow_templates/blob/ea7faae6999fb31338f43408ff4a575bd3f7d9a0/templates/video_minimax_h3_i2v.json)
+
+**已有模型文件时**，例如已下载音频 VAE，可将文件放到 `var/deployment/model-import/`，只修改 `engine.models.h3-audio-vae` 的 `source`，保留原有 `path`、摘要和其余四项模型。修改后的单项如下。
 
 ~~~json
 {
-  "nodes": {
-    "VideoHelperSuite": {
-      "url": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git",
-      "version": "<已验证的40位Git提交号>"
-    }
-  },
-  "models": {
-    "video-checkpoint": {
-      "source": "model-import/video.safetensors",
-      "path": "checkpoints/video.safetensors"
-    }
-  }
+  "source": "model-import/minimax_h3_audio_vae_fp32.safetensors",
+  "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+  "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
 }
 ~~~
 
-本地 `source` 从 `paths.deployment` 指定的目录读取，脚本自动计算 SHA-256。若提供 `sha256`，脚本会核验文件与指定摘要一致。HTTPS 来源必填上游发布的 64 位小写 `sha256`。`path` 是引擎模型目录内的目标路径，首级是模型分类。模型标识（例中的 `video-checkpoint`）对应策略的 `requirements.models`。
+**更换工作流时**，按新工作流加载的文件修改 `engine.models`。远程模型的 `source` 填 HTTPS 地址，`sha256` 填对应的 64 位小写摘要。本地模型的 `source` 填相对于 `paths.deployment` 的路径，脚本会自动计算摘要，提供了 `sha256` 就会校验。`path` 填 ComfyUI 模型目录中的相对路径，分类和文件名要与工作流一致。若使用额外节点，在 `engine.nodes` 中为每个节点包填写仓库 `url` 和固定的 `version`。
+
+**发布到工作台时**，为要提供的 H3 工作流导出 ComfyUI API 格式，绑定提示词及图生视频所需的图片输入，在策略的 `requirements.models` 中声明实际使用的模型标识和摘要。通过本机维护接口发布策略版本后，用户即可在工作台选择它。[策略发布接口](web-api.md#本机维护)
 
 同一台 GPU 主机上运行 `python3 scripts/deploy.py --single-host`，脚本会启动本机 Docker 的 MySQL、Redis 及全部应用服务。首次部署时在模板中填写两项数据库密码。若将顶层 `single_host` 设为 `true`，日常部署直接运行 `python3 scripts/deploy.py` 即可。使用外部数据库时，保留 `single_host` 默认值 `false`，待数据库就绪后运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。[数据库与分机地址配置](../README.md#已有部署与分机部署)
 
@@ -69,7 +64,7 @@ python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime re
 python3 scripts/deploy.py --compose logs --tail 100 engine worker
 ~~~
 
-`ready` 在至少一个当前配置的代次有有效心跳、端口归属正确且 ComfyUI 响应时成功。正式验收需要用实际模型、固定工作流和已发布策略提交任务并下载视频。[目标机生成验收](gpu-acceptance.md)
+`ready` 在至少一个当前配置的代次有有效心跳、端口归属正确且 ComfyUI 响应时成功。要验证 H3 在目标显卡上能生成视频，分别用已发布的文生、图生策略提交一个短样本，图生样本上传首帧。核验两个视频均可下载、播放，并记录实际显存峰值与耗时。[目标机生成验收](gpu-acceptance.md)
 
 升级前逐实例排空，使用监控页上显示的实例 ID 和当前代次。下面的示例对应 gpu0 的第一代。待在途执行结算、原进程树退出后，更新 JSON 中的版本并执行部署脚本。若控制台正在等待已暂停实例就绪，可在另一终端按当前代次恢复实例。
 

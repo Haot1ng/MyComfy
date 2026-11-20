@@ -29,6 +29,8 @@ mycomfy = "mycomfy.cli:main"
 
 [tool.hatch.build.targets.wheel.force-include]
 "migrations" = "mycomfy/migrations"
+"web/client" = "mycomfy/web/client"
+"web/admin" = "mycomfy/web/admin"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

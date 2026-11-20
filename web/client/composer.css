@@ -1,0 +1,36 @@
+.composer { min-width: 0; }
+.composer .cmp-heading { margin: 0 0 1.5rem; }
+.composer h1, .composer h2, .composer h3 { margin: 0; }
+.composer h2 { font-size: 1.05rem; }
+.composer .cmp-layout { padding: 0; border: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, .42fr); align-items: start; gap: 1.1rem; min-width: 0; }
+.composer .cmp-task-list { display: grid; gap: 1rem; min-width: 0; }
+.composer .cmp-task, .composer .cmp-summary, .composer .cmp-pending { padding: clamp(1rem, 2.4vw, 1.6rem); min-width: 0; }
+.composer .cmp-task { display: grid; gap: 1rem; }
+.composer .cmp-task-header, .composer .cmp-total { display: flex; gap: .75rem; justify-content: space-between; align-items: center; }
+.composer .cmp-task-header .btn { font-size: .78rem; padding: .35rem .6rem; }
+.composer .cmp-selectors { display: grid; grid-template-columns: minmax(0, 2fr) minmax(6rem, 1fr); gap: .7rem; }
+.composer .cmp-field { display: grid; align-content: start; gap: .45rem; min-width: 0; font-weight: 550; font-size: .87rem; }
+.composer .cmp-field :is(select,textarea,input) { width: 100%; max-width: 100%; min-width: 0; border-radius: .55rem; background: #fff; border: 1px solid #dcdbe3; padding: .65rem .75rem; font: inherit; font-weight: 400; color: #25232f; box-sizing: border-box; }
+.composer .cmp-field textarea { resize: vertical; min-height: 3rem; }
+.composer .cmp-field input[type=file] { border-style: dashed; background: #f9f8fc; font-size: .8rem; }
+.composer .cmp-field input::file-selector-button { color: #5f3eb0; border: 0; border-radius: .3rem; padding: .35rem .6rem; margin-right: .5rem; font: inherit; background: #eae3fe; cursor: pointer; }
+.composer .cmp-field [aria-invalid=true] { border-color: #b64634; }
+.composer .cmp-required,.composer .cmp-issue { color: #a33d33; }
+.composer .cmp-version { padding: .15rem 0 .85rem; border-bottom: 1px solid #e8e6ec; color: #65616d; font-size: .8rem; overflow-wrap: anywhere; }
+.composer .cmp-version summary { cursor: pointer; width: fit-content; }
+.composer .cmp-version pre { white-space: pre-wrap; word-break: break-word; }
+.composer .cmp-summary { display: grid; gap: 1rem; position: sticky; top: 1rem; }
+.composer .cmp-total strong { font-size: 1.4rem; }
+.composer .cmp-summary ol { margin: 0; padding: .65rem 0 .65rem 1.5rem; border-block: 1px solid #e8e6ec; font-size: .85rem; overflow-wrap: anywhere; }
+.composer .cmp-summary li { padding: .2rem 0; }
+.composer .cmp-add { width: 100%; border-style: dashed; }
+.composer .cmp-alert { margin: 0 0 .8rem; border: 1px solid #eacdb7; border-radius: .6rem; background: #fff7ed; color: #79411a; padding: .75rem .9rem; font-size: .85rem; overflow-wrap: anywhere; }
+.composer .cmp-alert button { margin-left: .5rem; }
+.composer .cmp-pending { overflow-wrap: anywhere; }
+@media (max-width: 800px) {
+  .composer .cmp-layout { grid-template-columns: minmax(0, 1fr); }
+  .composer .cmp-summary { position: static; }
+}
+@media (max-width: 460px) {
+  .composer .cmp-selectors { grid-template-columns: 1fr; }
+}

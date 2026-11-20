@@ -216,13 +216,18 @@ def build_event_router(settings, sessions):
 
     @router.get("/events")
     def open_stream(
-        request: Request, session_generation: str | None = None, after: str | None = None
+        request: Request,
+        session_generation: str | None = None,
+        after: str | None = None,
+        page_user: str | None = None,
     ):
         """校验页面代次和恢复游标后创建绑定会话的 SSE 响应。"""
         if session_generation is None:
             raise invalid_session()
         with sessions() as db:
-            user, session = authenticate(db, request, generation=session_generation)
+            user, session = authenticate(
+                db, request, generation=session_generation, page_user=page_user
+            )
             request.state.actor = user.id
             cursor = stream_cursor(
                 request.headers.get("last-event-id"),

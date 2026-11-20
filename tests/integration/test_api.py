@@ -174,8 +174,17 @@ def test_batch_replays_ownership_and_partial_errors(clients, mysql_sessions):
     partial = user.get(url, headers={"Range": "bytes=1-4"})
     assert partial.status_code == 206 and partial.content == sample[1:5]
     assert user.get(url, headers={"Range": "bytes=1000-"}).status_code == 416
+    owner = user.get("/api/v1/me").json()
+    binding = {"page_user": owner["user_id"], "session_generation": owner["session_generation"]}
+    assert user.get(url, params=binding).status_code == 200
+    assert user.get(url, params={**binding, "session_generation": "0"}).status_code == 401
 
     bob = login(user, "bob")
+    # 两个账号首个会话的代次相同。旧页签不得在 Cookie 变化后取得新账号的快照或事件。
+    assert bob["X-Session-Generation"] == owner["session_generation"]
+    assert user.get("/api/v1/jobs", headers={"X-Page-User": owner["user_id"]}).status_code == 401
+    assert user.get("/api/v1/events", params={**binding, "after": "0"}).status_code == 401
+    assert user.get(url, params=binding).status_code == 401
     assert user.get(url, headers={"Range": "bytes=1-4"}).status_code == 404
     task = {"client_task_key": "1", "strategy_version_id": version, "inputs": {"text": "风景"}}
     bad = {
@@ -245,7 +254,8 @@ def test_public_local_boundary_and_version_concurrency(clients):
     assert all(r.status_code == 201 for r in responses), [r.text for r in responses]
     assert {r.json()["version"] for r in responses} == {1, 2}
     login(user, "reader")
-    assert user.get("/api/v1/strategies").json()["items"][0]["version"] == 2
+    latest = user.get("/api/v1/strategies").json()["items"][0]
+    assert latest["version"] == 2 and latest["asset_fields"] == ["image"]
     history = user.get("/api/v1/strategies/clip/versions?limit=1").json()
     tail = user.get(
         "/api/v1/strategies/clip/versions", params={"cursor": history["next_cursor"]}

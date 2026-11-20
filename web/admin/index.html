@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <title>MyComfy · 本机监控</title>
+  <link rel="stylesheet" href="./admin.css">
+  <link rel="stylesheet" href="./overview.css">
+  <script type="module" src="./admin.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳至内容</a>
+  <div class="shell">
+    <aside>
+      <a class="brand" href="#/overview" aria-label="MyComfy 监控总览"><span class="brandmark" aria-hidden="true"><i></i><i></i><i></i></span>MyComfy</a>
+      <nav id="nav" aria-label="监控视图"></nav>
+      <div class="access"><span class="pin" aria-hidden="true"></span>本机只读</div>
+    </aside>
+    <main id="content" tabindex="-1">
+      <header class="topbar">
+        <span class="crumb">本机监控 <span aria-hidden="true">/</span> <strong id="location">运行总览</strong></span>
+        <div class="toolbar">
+          <label id="auto-label"><input id="auto" type="checkbox" checked>自动刷新</label>
+          <button id="reload" type="button"><span aria-hidden="true">↻</span> 刷新</button>
+        </div>
+      </header>
+      <div class="workspace">
+        <div class="pagehead"><h1 id="title">运行总览</h1><span id="updated" class="timestamp" aria-live="off"></span></div>
+        <div id="notice" role="status"></div>
+        <div id="filters"></div>
+        <section id="data" aria-labelledby="title"></section>
+        <noscript>启用 JavaScript 后可查询本机监控接口。</noscript>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

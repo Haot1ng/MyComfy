@@ -66,6 +66,29 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                 with httpx.Client(timeout=3, trust_env=False) as client:
                     monitor = "/local/v1/monitor/overview"
                     publish = "/local/v1/strategy-versions"
+                    user_page = client.get(public + "/", headers=forged)
+                    local_page = client.get(local + "/")
+                    assert user_page.status_code == local_page.status_code == 200
+                    assert user_page.content != local_page.content
+                    assert client.get(public + "/index.html").content == user_page.content
+                    assert client.get(local + "/index.html").content == local_page.content
+                    assert user_page.headers["content-type"].startswith("text/html")
+                    assert "javascript" in client.get(public + "/app.js").headers["content-type"]
+                    assert "javascript" in client.get(local + "/admin.js").headers["content-type"]
+                    assert client.head(public + "/").headers["etag"] == user_page.headers["etag"]
+                    assert (
+                        client.get(
+                            public + "/", headers={"If-None-Match": user_page.headers["etag"]}
+                        ).status_code
+                        == 304
+                    )
+                    assert client.get(public + "/admin.js", headers=forged).status_code == 404
+                    assert client.get(local + "/app.js").status_code == 404
+                    assert client.get(local + "/README.md").status_code == 404
+                    assert (
+                        client.get(local + "/", headers={"Host": "elsewhere.example"}).status_code
+                        == 403
+                    )
                     assert client.get(public + monitor, headers=forged).status_code == 404
                     assert client.post(public + publish, headers=forged, json={}).status_code == 404
                     assert client.get(public + "/api/v1/me").status_code == 401

@@ -18,7 +18,7 @@ from mycomfy.database.session import db_now, new_id, timestamp
 from mycomfy.errors import ApiError, not_found
 
 from .state import TERMINAL, advance, canonical_digest, emit
-from .strategy import configured_for, json_pointer
+from .strategy import asset_field_names, configured_for, json_pointer
 
 ClientKey = Annotated[str, Field(min_length=1, max_length=200)]
 
@@ -109,8 +109,7 @@ def admit_batch(db, user, request, max_tasks, store, capacity=None):
             elif error.validator != "additionalProperties" or error.absolute_path:
                 issue(path, "SCHEMA_INVALID")
         references = set()
-        asset_fields = {b["input"] for b in strategy.content["bindings"] if b["kind"] == "asset"}
-        for name in asset_fields & inputs.keys():
+        for name in asset_field_names(strategy) & inputs.keys():
             ids = inputs[name]
             for offset, asset_id in enumerate(asset_ids(ids)):
                 asset = db.get(Asset, asset_id) if isinstance(asset_id, str) else None

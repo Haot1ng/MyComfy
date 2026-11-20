@@ -45,6 +45,7 @@ from mycomfy.ops.capacity import Capacity
 from . import auth
 from .events import build_event_router, event_dispatcher
 from .pagination import invalid_cursor, page, read_position
+from .web import install_web_routes
 
 logger = logging.getLogger(__name__)
 Limit = Annotated[int, Query(ge=1, le=100)]
@@ -298,15 +299,19 @@ def create_app(settings, *, local=False, sessions=None):
                 "HTTP handler %s failed for %s", type(exc).__name__, request.state.request_id
             )
             response = _error(request, ApiError(500, "INTERNAL_ERROR", "Unexpected server error"))
-        try:
-            await run_in_threadpool(finish_audit, request, response.status_code)
-        except SQLAlchemyError:
-            logger.error("Audit unavailable for %s", request.state.request_id)
+        if getattr(request.state, "web_asset", False):
+            response.headers["Cache-Control"] = "no-cache"
+        else:
+            try:
+                await run_in_threadpool(finish_audit, request, response.status_code)
+            except SQLAlchemyError:
+                logger.error("Audit unavailable for %s", request.state.request_id)
+            response.headers["Cache-Control"] = "no-store"
         response.headers["X-Request-ID"] = request.state.request_id
-        response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
+    install_web_routes(app, local=local)
     if local:
         from mycomfy.ops.monitor import build_monitor_router
 
@@ -593,13 +598,19 @@ def _public_routes(settings, sessions, store, capacity):
             return jobs.asset_payload(jobs.get_asset(db, asset_id, user.id))
 
     @router.get("/assets/{asset_id}/content")
-    def content(asset_id: str, request: Request, download: Annotated[int, Query(ge=0, le=1)] = 0):
+    def content(
+        asset_id: str,
+        request: Request,
+        download: Annotated[int, Query(ge=0, le=1)] = 0,
+        page_user: str | None = None,
+        session_generation: str | None = None,
+    ):
         """对本次预览、下载或范围读取重新验证文件访问权。"""
 
         def authorized_asset():
             """在短事务中检查当前会话、资源归属和最新的取消后可见规则。"""
             with sessions() as db:
-                user, _ = _session(db, request)
+                user, _ = _session(db, request, page_user=page_user, generation=session_generation)
                 asset = jobs.get_asset(db, asset_id, user.id)
                 request.state.target = asset.id
                 return asset

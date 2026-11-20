@@ -147,7 +147,7 @@ def login(db, username, password, source, seconds):
         return rotate_session(db, user, seconds)
 
 
-def authenticate(db, request, *, write=False, allow_revoked=False, generation=None):
+def authenticate(db, request, *, write=False, allow_revoked=False, generation=None, page_user=None):
     """校验 Cookie、有效期及当前会话指针，并对写请求复核页签代次和 CSRF。"""
     token = request.cookies.get(COOKIE)
     if not token or len(token) > 64:
@@ -158,16 +158,21 @@ def authenticate(db, request, *, write=False, allow_revoked=False, generation=No
     user = db.get(User, session.user_id, with_for_update=write, populate_existing=True)
     # 用户锁可能等到另一次登录提交后才取得，必须刷新旧会话的撤销状态。
     db.refresh(session)
+    # 账号之间的代次可相同。页签在 fetch 请求头或媒体、事件 URL 中附带打开时的身份。
+    for expected in (page_user, request.headers.get("x-page-user")):
+        if expected is not None and expected != user.id:
+            raise invalid_session()
+    header_generation = request.headers.get("x-session-generation")
+    for expected in (generation, header_generation):
+        if expected is not None and expected != str(session.generation):
+            raise invalid_session()
     if write:
-        generation = request.headers.get("x-session-generation", "")
-        if str(session.generation) != generation:
+        if header_generation is None:
             raise invalid_session()
         if not hmac.compare_digest(
             request.headers.get("x-csrf-token", "").encode(), session.csrf_token.encode()
         ):
             raise ApiError(403, "CSRF_REJECTED", "CSRF token is invalid")
-    if generation is not None and str(session.generation) != generation:
-        raise invalid_session()
     if session.revoked_at and allow_revoked:
         return user, session
     if (

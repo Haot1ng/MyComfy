@@ -1,6 +1,6 @@
 # MyComfy
 
-本地视频生成平台。用户可通过 Python 服务提供的 HTTP API 注册、上传素材、选择策略版本并提交批次。Worker 在 MySQL 登记执行意图后向本机 ComfyUI 提交一次工作流。只有文件通过契约校验、发布到正式位置并完成登记，用户才会看到成功状态。
+本地视频生成平台。用户可在网页工作台注册、上传素材、选择策略版本并提交批次，维护人员可在本机监控页追踪运行状态。Worker 在 MySQL 登记执行意图后向本机 ComfyUI 提交一次工作流。只有文件通过契约校验、发布到正式位置并完成登记，用户才会看到成功状态。
 
 ## 目录与阅读顺序
 
@@ -22,7 +22,7 @@ MyComfy/
 └── docs/                         部署、运维与验收
 ```
 
-两个网页目录已建立，页面和构建配置待开发。C 端网页使用用户 API，管理网页使用本机只读监控 API。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md)
+两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读管理后台。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
 
 后端可以跟随一次视频请求读代码。
 
@@ -70,7 +70,7 @@ uv run --locked mycomfy runtime serve
 uv run --locked mycomfy worker
 ```
 
-用户 API 位于 `/api/v1`。同源反向代理转发业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。回环端口 8001 提供本机只读监控及维护操作。维护端点接受 `Authorization: Bearer <token>`。登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。
+用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。默认在服务所在机器打开 [本机监控](http://127.0.0.1:8001/) 可查看全局运行状态。该回环端口同时提供本机维护接口。维护端点接受 `Authorization: Bearer <token>`。登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。
 
 ## 部署和验收
 

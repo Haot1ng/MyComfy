@@ -266,6 +266,11 @@ def configured_for(db, strategy, instances=None):
     )
 
 
+def asset_field_names(version):
+    """从版本绑定取得表单中引用素材的字段，排除重复绑定的名称。"""
+    return {b["input"] for b in version.content["bindings"] if b["kind"] == "asset"}
+
+
 def strategy_payload(db, version):
     """构造策略版本摘要、表单及可受理性等用户可见字段。"""
     accepted = configured_for(db, version)
@@ -276,6 +281,7 @@ def strategy_payload(db, version):
         "name": version.name,
         "content_digest": version.content_digest,
         "input_schema": version.content["input_schema"],
+        "asset_fields": sorted(asset_field_names(version)),
         "accepting": accepted,
         "reason": None if accepted else "NO_COMPATIBLE_DEPLOYMENT",
         "expose_after_cancel": version.content["artifacts"]["expose_after_cancel"],

@@ -1,7 +1,7 @@
 # Linux 或 Docker Desktop WSL 2。core 的本机管理端口使用 host 网络；
 # engine 和 worker 使用同一个私有容器网络命名空间，ComfyUI 仅绑定该空间内的回环地址。
 x-app-environment: &app-environment
-  MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-mysql+pymysql://mycomfy:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@127.0.0.1:${MYCOMFY_MYSQL_PORT:-3306}/mycomfy}"
+  MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@127.0.0.1:${MYCOMFY_MYSQL_PORT:-3306}/mycomfy}"
   MYCOMFY_DATA_ROOT: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}"
 
 # 保留宿主绝对路径，发布器与运行管理可以重读数据库中记录的文件位置。
@@ -16,9 +16,19 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
+    command:
+      - sh
+      - -ec
+      - |
+        # 官方镜像以专用变量设置 root 的密码；普通账号由 MYSQL_USER 创建。
+        if [ "$$MYSQL_USER" = root ]; then
+          export MYSQL_ROOT_PASSWORD="$$MYSQL_PASSWORD"
+          unset MYSQL_RANDOM_ROOT_PASSWORD MYSQL_USER MYSQL_PASSWORD
+        fi
+        exec docker-entrypoint.sh mysqld
     environment:
       MYSQL_DATABASE: mycomfy
-      MYSQL_USER: mycomfy
+      MYSQL_USER: "${MYSQL_USER:-mycomfy}"
       MYSQL_PASSWORD: "${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}"
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
     ports:
@@ -26,7 +36,7 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 -u mycomfy mycomfy -e "SELECT 1" >/dev/null']
+      test: ["CMD-SHELL", 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 --user="$$MYSQL_USER" mycomfy -e "SELECT 1" >/dev/null']
       interval: 5s
       timeout: 4s
       retries: 20
@@ -35,13 +45,24 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--save", "", "--appendonly", "no"]
+    # 用密码摘要配置所选 ACL 用户。使用自定义用户时，关闭内置 default 账号。
+    command:
+      - sh
+      - -ec
+      - |
+        digest="$$(printf '%s' "$$REDISCLI_AUTH" | sha256sum)"
+        set -- --user "$$REDIS_USER" reset on "#$${digest%% *}" '~*' '&*' '+@all'
+        if [ "$$REDIS_USER" != default ]; then
+          set -- --user default off "$$@"
+        fi
+        exec docker-entrypoint.sh redis-server "$$@" --save '' --appendonly no
     environment:
+      REDIS_USER: "${REDIS_USER:-default}"
       REDISCLI_AUTH: "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"
     ports:
       - "127.0.0.1:${MYCOMFY_REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep -qx PONG"]
+      test: ["CMD-SHELL", 'redis-cli --user "$$REDIS_USER" ping | grep -qx PONG']
       interval: 10s
       timeout: 3s
       retries: 5
@@ -72,7 +93,7 @@ services:
       <<: *app-environment
       MYCOMFY_PUBLIC_ORIGIN: "${MYCOMFY_PUBLIC_ORIGIN:-http://127.0.0.1:${MYCOMFY_API_PORT:-8000}}"
       MYCOMFY_COOKIE_SECURE: "${MYCOMFY_COOKIE_SECURE:-false}"
-      MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:${MYCOMFY_REDIS_PORT:-6379}/0}"
+      MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://${REDIS_USER:-default}:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:${MYCOMFY_REDIS_PORT:-6379}/0}"
       MYCOMFY_MAINTENANCE_TOKEN_FILE: /run/mycomfy/maintenance-token
     volumes:
       - *data-mount
@@ -103,7 +124,7 @@ services:
     user: "${MYCOMFY_UID:-10001}:${MYCOMFY_GID:-10001}"
     environment:
       <<: *app-environment
-      MYCOMFY_DATABASE_URL: &engine-db "${MYCOMFY_ENGINE_DATABASE_URL:-${MYCOMFY_DATABASE_URL:-mysql+pymysql://mycomfy:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/mycomfy}}"
+      MYCOMFY_DATABASE_URL: &engine-db "${MYCOMFY_ENGINE_DATABASE_URL:-${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/mycomfy}}"
       # deploy 将检出、venv、模型与每个代次的工作目录写在同一个持久根目录。
       MYCOMFY_ENGINE_CONFIG: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}/engines/engines.json"
       HOME: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}/engines"

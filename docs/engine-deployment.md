@@ -32,7 +32,7 @@
 
 ## 容器运行与验收
 
-按首页的命令初始化并启动 Compose。部署命令在所选 GPU 上验证 `torch.cuda.is_available()`，将实际 CUDA、PyTorch 和 GPU 信息写入生成的清单。每个实例的 `gpu` 字段决定 ComfyUI 子进程使用哪张卡。实例端口由 Worker 在同一个容器网络命名空间内访问。
+宿主机运行 `python3 scripts/deploy.py` 即可部署全栈。脚本会在临时 `engine` 容器里执行 `mycomfy-deploy-engine`。如果已进入配好挂载的 `engine` 容器 Shell，也可以直接运行这条命令安装引擎，或用 `mycomfy-deploy-engine --check` 单独校验清单和依赖锁。安装时会在所选 GPU 上验证 `torch.cuda.is_available()`，将实际 CUDA、PyTorch 和 GPU 信息写入生成的清单。每个实例的 `gpu` 字段决定 ComfyUI 子进程使用哪张卡。实例端口由 Worker 在同一个容器网络命名空间内访问。
 
 ~~~sh
 docker compose exec engine nvidia-smi -L
@@ -42,7 +42,7 @@ docker compose logs --tail 100 engine worker
 
 `ready` 在至少一个当前配置的代次有有效心跳、端口归属正确且 ComfyUI 响应时成功。正式验收需要用实际模型、固定工作流和已发布策略提交任务并下载视频。[目标机生成验收](gpu-acceptance.md)
 
-升级前逐实例排空，使用监控页上显示的实例 ID 和当前代次。下面的示例对应 gpu0 的第一代。待在途执行结算、原进程树退出后，在容器中重新运行首页的部署命令更新清单，再恢复实例。管理命令在运行中的 engine 容器内执行，以便读取真实进程身份和退出凭据。
+升级前逐实例排空，使用监控页上显示的实例 ID 和当前代次。下面的示例对应 gpu0 的第一代。待在途执行结算、原进程树退出后，运行 `docker compose exec engine mycomfy-deploy-engine` 更新清单，再恢复实例。管理命令在运行中的 engine 容器内执行，以便读取真实进程身份和退出凭据。
 
 ~~~sh
 docker compose exec engine python -m mycomfy.cli runtime drain --instance gpu0 --generation 1

@@ -1,0 +1,45 @@
+{
+  "mysql": {
+    "user": "mycomfy",
+    "password": ""
+  },
+  "redis": {
+    "user": "mycomfy_cache",
+    "password": ""
+  },
+  "paths": {
+    "data": "var/data",
+    "config": "var/config",
+    "deployment": "var/deployment"
+  },
+  "ports": {
+    "mysql": 3306,
+    "redis": 6379,
+    "api": 8000,
+    "admin": 8001
+  },
+  "engine": {
+    "comfyui": {
+      "url": "https://github.com/Comfy-Org/ComfyUI.git",
+      "version": "v0.3.59"
+    },
+    "pytorch": {
+      "index_url": "https://download.pytorch.org/whl/cu126",
+      "torch": "2.7.1+cu126",
+      "torchvision": "0.22.1+cu126",
+      "torchaudio": "2.7.1+cu126"
+    },
+    "nodes": {},
+    "models": {},
+    "instances": [
+      {
+        "id": "gpu0",
+        "gpu": "0",
+        "port": 8188,
+        "observation_seconds": 120,
+        "timeout_seconds": 3600,
+        "reconcile_seconds": 120
+      }
+    ]
+  }
+}

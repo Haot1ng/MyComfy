@@ -2,9 +2,36 @@
 
 默认通过容器部署。engine 镜像携带 Git、编译工具、Python、venv 和 pip，GPU 设备与驱动库由宿主机注入。运行管理使用 Linux 的 pidfd、子进程和 /proc 信息，与 ComfyUI 运行在同一个容器。启动前准备数据库、持久目录和 GPU 后端的步骤见项目首页。[全栈 Compose](../README.md#启动服务)
 
+## 配置工作流依赖
+
+在宿主机的 `deploy.config.json` 中编辑 `engine`。模板使用 ComfyUI 标签 `v0.3.59` 和 CUDA 12.6 的 PyTorch 2.7.1 组合，目标平台为 Linux x86_64 和 Python 3.12。使用其他显卡、驱动或工作流时，请用适配的轮子索引与版本号。精确版本包括轮子的本地版本后缀，例如 `2.7.1+cu126`。[配置模板](../deploy.config.example.json) · [ComfyUI 版本](https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.3.59) · [PyTorch 版本组合](https://pytorch.org/get-started/previous-versions/)
+
+假设工作流使用一个本地模型和 VideoHelperSuite 节点，可将 `engine.nodes`、`engine.models` 替换为以下字段。请将占位提交号换成你使用的节点版本，并将模型文件放到 `var/deployment/model-import/video.safetensors`。
+
+~~~json
+{
+  "nodes": {
+    "VideoHelperSuite": {
+      "url": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git",
+      "version": "<已验证的40位Git提交号>"
+    }
+  },
+  "models": {
+    "video-checkpoint": {
+      "source": "model-import/video.safetensors",
+      "path": "checkpoints/video.safetensors"
+    }
+  }
+}
+~~~
+
+本地 `source` 从 `paths.deployment` 指定的目录读取，脚本自动计算 SHA-256。若提供 `sha256`，脚本会核验文件与指定摘要一致。HTTPS 来源必填上游发布的 64 位小写 `sha256`。`path` 是引擎模型目录内的目标路径，首级是模型分类。模型标识（例中的 `video-checkpoint`）对应策略的 `requirements.models`。
+
+运行 `python3 scripts/deploy.py` 时，引擎容器检出 ComfyUI 和节点，读取各自的 `requirements.txt`，将指定的 PyTorch 包及相关依赖解析为带哈希的锁文件，再用它安装独立环境。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。宿主机使用完整配置连接 MySQL、Redis，引擎安装器只接收部署引擎所需的字段。
+
 ## 安装清单
 
-将下例保存为 `var/deployment/deployment.json`，填入实际引擎及节点的 40 位 Git 提交号、模型和依赖锁的 SHA-256、引擎容器可见的 GPU 编号或 GPU UUID。模型来源支持 HTTPS 和相对于清单的文件。例如，`video.safetensors` 放在该目录的 `model-import/` 下，容器通过 `/deployment/model-import/` 读取。models 的键为策略 requirements.models 所用标识，path 的首级目录为 ComfyUI 模型分类。nodes 的键会成为 custom_nodes 下的目录名。以下秒数是初始配置示例。
+以下格式供已有 `.env` 和预制依赖锁的部署使用。旧版入口读取 `var/deployment/deployment.json`，其中包含实际引擎及节点的 40 位提交号、模型和锁文件的 SHA-256、引擎容器可见的 GPU 编号或 GPU UUID。相对文件路径以此清单所在目录为基准。
 
 ~~~json
 {
@@ -32,27 +59,27 @@
 
 ## 容器运行与验收
 
-宿主机运行 `python3 scripts/deploy.py` 即可部署全栈。脚本会在临时 `engine` 容器里执行 `mycomfy-deploy-engine`。如果已进入配好挂载的 `engine` 容器 Shell，也可以直接运行这条命令安装引擎，或用 `mycomfy-deploy-engine --check` 单独校验清单和依赖锁。安装时会在所选 GPU 上验证 `torch.cuda.is_available()`，将实际 CUDA、PyTorch 和 GPU 信息写入生成的清单。每个实例的 `gpu` 字段决定 ComfyUI 子进程使用哪张卡。实例端口由 Worker 在同一个容器网络命名空间内访问。
+使用统一 JSON 时，运维命令可通过部署入口的 `--compose` 运行，这会用同一份配置连接现有服务。若使用自定义配置路径，把 `--config 文件路径` 放在 `--compose` 之前。安装阶段会在所选 GPU 上验证 `torch.cuda.is_available()`，将实际 CUDA、PyTorch 和 GPU 信息写入实例清单。Worker 在同一个容器网络命名空间内访问实例端口。
 
 ~~~sh
-docker compose exec engine nvidia-smi -L
-docker compose exec engine python -m mycomfy.cli runtime ready
-docker compose logs --tail 100 engine worker
+python3 scripts/deploy.py --compose exec engine nvidia-smi -L
+python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime ready
+python3 scripts/deploy.py --compose logs --tail 100 engine worker
 ~~~
 
 `ready` 在至少一个当前配置的代次有有效心跳、端口归属正确且 ComfyUI 响应时成功。正式验收需要用实际模型、固定工作流和已发布策略提交任务并下载视频。[目标机生成验收](gpu-acceptance.md)
 
-升级前逐实例排空，使用监控页上显示的实例 ID 和当前代次。下面的示例对应 gpu0 的第一代。待在途执行结算、原进程树退出后，运行 `docker compose exec engine mycomfy-deploy-engine` 更新清单，再恢复实例。管理命令在运行中的 engine 容器内执行，以便读取真实进程身份和退出凭据。
+升级前逐实例排空，使用监控页上显示的实例 ID 和当前代次。下面的示例对应 gpu0 的第一代。待在途执行结算、原进程树退出后，更新 JSON 中的版本并执行部署脚本。若控制台正在等待已暂停实例就绪，可在另一终端按当前代次恢复实例。
 
 ~~~sh
-docker compose exec engine python -m mycomfy.cli runtime drain --instance gpu0 --generation 1
+python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime drain --instance gpu0 --generation 1
 # 完成排空、部署和核对后，按当前代次恢复。
-docker compose exec engine python -m mycomfy.cli runtime resume --instance gpu0 --generation 1
+python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime resume --instance gpu0 --generation 1
 ~~~
 
 Compose 正常停止 engine 时会请求各代次退出并等待落盘凭据。强制终止或掉电后，缺失退出凭据的实例可能进入隔离。核对实际执行、进程与文件后，再在原 engine 服务内执行 `runtime resolve`。[运维说明](operations.md)
 
-从已有宿主机引擎切换时，先在原运行管理中排空实例，等候其任务结算和 `ended.json`，再停止原管理进程。保留数据库及原代次目录，按容器内路径重新部署清单。对于已暂停的实例，先用 `docker compose up -d` 启动服务，在 engine 容器内核对并 `resume` 当前代次，随后用 `runtime ready` 确认接单。
+从已有宿主机引擎切换时，先在原运行管理中排空实例，等候其任务结算和 `ended.json`，再停止原管理进程。保留数据库及原代次目录，按容器内路径重新部署清单。对于已暂停的实例，先用 `python3 scripts/deploy.py --compose up -d` 启动服务，在 engine 容器内核对并 `resume` 当前代次，随后用 `runtime ready` 确认接单。沿用旧版 `.env` 的部署可直接执行相同的 `docker compose` 命令，在 engine 容器中运行 `mycomfy-deploy-engine --check` 校验预制清单和依赖锁。
 
 ## 在宿主机直接运行
 

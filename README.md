@@ -58,6 +58,8 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 | `MYCOMFY_DATA_ROOT` | API 与 Worker 共用的正式文件和运行数据目录 |
 | `MYCOMFY_PUBLIC_ORIGIN` | 用户网页与用户 API 的同源 HTTPS 地址 |
 | `MYCOMFY_MAINTENANCE_TOKEN_FILE` | 本机维护 API 的令牌文件路径 |
+| `MYCOMFY_REDIS_URL` | 可选。写请求会话预检使用的 Redis 连接串，支持 ACL 用户名、密码和 TLS |
+| `MYCOMFY_SESSION_CACHE_TTL_SECONDS` | 预检缓存的最长保留时间，默认 60 秒，且不超过会话剩余有效期 |
 | `MYCOMFY_ENGINE_CONFIG` | 自动部署生成的 `engines.json` 路径 |
 | `MYCOMFY_CAPACITY_CONFIG` | 部署方实测后填写的卷水位、队列与用户配额配置 |
 

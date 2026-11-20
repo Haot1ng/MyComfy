@@ -3,13 +3,19 @@
 import struct
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import func, select
 
+from mycomfy.api import auth
 from mycomfy.api.app import create_app
 from mycomfy.api.auth import COOKIE
+from mycomfy.api.permissions import Permission
+from mycomfy.api.session_cache import KEY_PREFIX
 from mycomfy.config import Settings
 from mycomfy.database.models import Audit, Batch, EngineInstance, Job, SourceEvent
 
@@ -21,8 +27,11 @@ MAINTENANCE = {"Authorization": "Bearer test-maintenance"}
 
 
 @pytest.fixture
-def clients(mysql_sessions, tmp_path):
+def clients(mysql_sessions, tmp_path, request):
     """以独立监听地址启动用户和本机应用，并注册离线兼容的引擎配置。"""
+    redis_url = getattr(request, "param", None)
+    if redis_url:
+        request.getfixturevalue("redis_probe")
     secret = tmp_path / "maintenance-token"
     secret.write_text("test-maintenance")
     secret.chmod(0o600)
@@ -33,6 +42,7 @@ def clients(mysql_sessions, tmp_path):
         maintenance_token_file=secret,
         max_upload_bytes=2048,
         poll_seconds=0.1,
+        redis_url=redis_url,
     )
     with mysql_sessions.begin() as db:
         db.add(EngineInstance(id="engine", generation=1, manifest={}, runtime={}, accepting=False))
@@ -157,6 +167,180 @@ def test_session_replacement_and_password_reset(clients, mysql_sessions):
     with mysql_sessions() as db:
         audit = db.get(Audit, reset.headers["X-Request-ID"])
         assert audit.actor == "local-maintenance" and audit.target == me["user_id"]
+
+
+@pytest.fixture
+def redis_probe(monkeypatch):
+    """模拟 Redis 命中和删除超时，保留实际会话缓存代码。"""
+    entries = {}
+    client = Mock(spec=Redis)
+    client.get.side_effect = entries.get
+    client.set.side_effect = lambda key, value, *, ex: entries.__setitem__(key, value)
+    client.delete.side_effect = lambda key: entries.pop(key, None)
+    monkeypatch.setattr(Redis, "from_url", Mock(return_value=client))
+    return client, entries
+
+
+@pytest.mark.parametrize("clients", ["redis://localhost/0"], indirect=True)
+def test_session_cache_precheck_and_read_repair(clients, redis_probe):
+    """缓存命中只省去预检查库，撤销后仍由 MySQL 拒绝并回删旧键。"""
+    user, _ = clients
+    redis, entries = redis_probe
+    old = login(user, "cache-user")
+    old_cookie = user.cookies[COOKIE]
+    old_key = KEY_PREFIX + auth.digest(old_cookie)
+    body = {"client_batch_key": "cache-probe", "tasks": []}
+
+    with patch.object(auth, "authenticate", wraps=auth.authenticate) as authenticate:
+        # 空批次故意在业务校验时失败，以便只测到鉴权边界。
+        assert user.post("/api/v1/batches", headers=old, json=body).status_code == 422
+        assert authenticate.call_count == 2
+        assert old_key in entries
+        assert redis.set.call_args.kwargs["ex"] == 60
+        assert old["X-CSRF-Token"] not in entries[old_key]
+        authenticate.reset_mock()
+        assert user.post("/api/v1/batches", headers=old, json=body).status_code == 422
+        assert authenticate.call_count == 1
+        authenticate.reset_mock()
+        # 页签身份不同，即使缓存命中且代次和 CSRF 都匹配，也在预检阶段拒绝。
+        wrong_page = {**old, "X-Page-User": "another-user"}
+        assert user.post("/api/v1/batches", headers=wrong_page, json=body).status_code == 401
+        assert authenticate.call_count == 0
+        assert old_key in entries
+
+    delete = redis.delete.side_effect
+    redis.delete.side_effect = RedisConnectionError("simulated timeout after login")
+    current = login(user, "cache-user", register=False)
+    current_key = KEY_PREFIX + auth.digest(user.cookies[COOKIE])
+    assert old_key in entries
+    assert current_key not in entries
+    redis.delete.side_effect = delete
+
+    with patch.object(auth, "authenticate", wraps=auth.authenticate) as authenticate:
+        # 旧缓存仍会命中，写事务必须可靠地拒绝旧 Cookie 并触发缓存修复。
+        response = user.post(
+            "/api/v1/batches", headers={**old, "Cookie": f"{COOKIE}={old_cookie}"}, json=body
+        )
+        assert response.status_code == 401
+        assert authenticate.call_count == 1
+        assert old_key not in entries
+
+    assert user.post("/api/v1/batches", headers=current, json=body).status_code == 422
+    assert current_key in entries
+    # 旧页共享新 Cookie 时，代次错误不能误删当前会话对应的缓存键。
+    assert user.post("/api/v1/batches", headers=old, json=body).status_code == 401
+    assert current_key in entries
+
+
+@pytest.mark.parametrize("clients", ["redis://localhost/0"], indirect=True)
+def test_session_cache_unavailable_falls_back_to_mysql(clients, redis_probe):
+    """Redis 访问失败时，写请求仍执行数据库预检和最终复核。"""
+    user, _ = clients
+    redis, _ = redis_probe
+    redis.get.side_effect = RedisConnectionError("simulated outage")
+    redis.set.side_effect = RedisConnectionError("simulated outage")
+    headers = login(user, "cache-fallback")
+    body = {"client_batch_key": "cache-fallback", "tasks": []}
+    with patch.object(auth, "authenticate", wraps=auth.authenticate) as authenticate:
+        assert user.post("/api/v1/batches", headers=headers, json=body).status_code == 422
+        assert authenticate.call_count == 2
+
+
+@pytest.mark.parametrize("clients", [None, "redis://localhost/0"], indirect=True)
+def test_user_group_permissions_gate_the_same_actions_as_the_frontend(clients, mysql_sessions):
+    """账户继承默认授权，可组合多个组，并在现有会话上立即执行权限变更。"""
+    user, local = clients
+    headers = login(user, "group-user")
+    me = user.get("/api/v1/me").json()
+    user_id = me["user_id"]
+    membership = f"/local/v1/users/{user_id}/groups"
+    assert me["groups"] == [{"key": "standard", "name": "标准用户"}]
+    assert me["permissions"] == sorted(Permission)
+    assert local.get("/local/v1/groups").status_code == 403
+    assert local.put(membership, json={"group_keys": []}).status_code == 403
+    assert user.get("/local/v1/groups", headers=MAINTENANCE).status_code == 404
+    listed = local.get("/local/v1/users", headers=MAINTENANCE).json()["items"]
+    assert {"user_id": user_id, "username": "group-user"} in listed
+
+    for key, name, permissions in (
+        ("viewer", "浏览组", ["jobs.view", "notifications.view"]),
+        ("creator", "生成组", ["jobs.submit", "strategies.view", "assets.upload"]),
+    ):
+        group = {"key": key, "name": name, "permissions": permissions}
+        assert local.post("/local/v1/groups", json=group, headers=MAINTENANCE).status_code == 201
+    invalid = local.post(
+        "/local/v1/groups",
+        json={"key": "invalid", "name": "无效组", "permissions": ["users.manage"]},
+        headers=MAINTENANCE,
+    )
+    assert invalid.status_code == 422
+
+    version_id = publish(local).json()["strategy_version_id"]
+    payload = {
+        "client_batch_key": "group-permissions",
+        "tasks": [
+            {
+                "client_task_key": "clip",
+                "strategy_version_id": version_id,
+                "inputs": {"text": "test"},
+            }
+        ],
+    }
+    response = local.put(membership, json={"group_keys": ["viewer"]}, headers=MAINTENANCE)
+    assert response.status_code == 200
+    assert user.get("/api/v1/me").json()["permissions"] == ["jobs.view", "notifications.view"]
+    assert user.get("/api/v1/jobs").status_code == 200
+    assert user.get("/api/v1/notifications").status_code == 200
+    assert user.get("/api/v1/strategies").status_code == 403
+    denied = user.post("/api/v1/batches", headers=headers, json=payload)
+    assert denied.status_code == 403 and denied.json()["error"]["code"] == "PERMISSION_DENIED"
+    assert (
+        user.post(
+            "/api/v1/assets", headers=headers, files={"file": ("sample.png", png_sample())}
+        ).status_code
+        == 403
+    )
+    with mysql_sessions() as db:
+        assert db.scalar(select(func.count()).select_from(Batch)) == 0
+
+    combined = local.put(
+        membership, json={"group_keys": ["viewer", "creator"]}, headers=MAINTENANCE
+    ).json()
+    assert {group["key"] for group in combined["groups"]} == {"viewer", "creator"}
+    assert combined["permissions"] == [
+        "assets.upload",
+        "jobs.submit",
+        "jobs.view",
+        "notifications.view",
+        "strategies.view",
+    ]
+    admitted = user.post("/api/v1/batches", headers=headers, json=payload)
+    assert admitted.status_code == 202
+    job_id = admitted.json()["tasks"][0]["job_id"]
+    assert user.get(f"/api/v1/jobs/{job_id}").status_code == 200
+    assert user.post(f"/api/v1/jobs/{job_id}/cancel", headers=headers).status_code == 403
+    upload = user.post(
+        "/api/v1/assets", headers=headers, files={"file": ("sample.png", png_sample())}
+    )
+    assert upload.status_code == 201
+    asset = upload.json()["asset_id"]
+    assert user.get(f"/api/v1/assets/{asset}/content").status_code == 403
+
+    updated = local.put(
+        "/local/v1/groups/creator",
+        json={"name": "暂停提交", "permissions": []},
+        headers=MAINTENANCE,
+    )
+    assert updated.status_code == 200
+    assert user.post("/api/v1/batches", headers=headers, json=payload).status_code == 403
+    assert user.get("/api/v1/me").json()["permissions"] == ["jobs.view", "notifications.view"]
+    missing = local.put(membership, json={"group_keys": ["missing"]}, headers=MAINTENANCE)
+    assert missing.status_code == 422
+    assert user.get("/api/v1/jobs").status_code == 200
+    assert local.put(membership, json={"group_keys": []}, headers=MAINTENANCE).status_code == 200
+    assert user.get("/api/v1/events/cursor").status_code == 403
+    assert user.get("/api/v1/notifications").status_code == 403
+    assert user.get("/api/v1/me").json()["permissions"] == []
 
 
 def test_batch_replays_ownership_and_partial_errors(clients, mysql_sessions):

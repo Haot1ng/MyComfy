@@ -295,7 +295,7 @@ export function mountComposer(host, ctx) {
   }
 
   async function upload(task, f, files) {
-    if (!files.length || busy || uploading || pending) return;
+    if (!ctx.can('assets.upload') || !files.length || busy || uploading || pending) return;
     uploading = { task, field: f.name };
     message = '';
     task.errors = task.errors.filter(e => e.field !== f.name);
@@ -334,7 +334,7 @@ export function mountComposer(host, ctx) {
     }
     wrapper.append(label);
     if (f.schema.description) wrapper.append(node('small', 'muted', f.schema.description));
-    if (f.mode.startsWith('asset')) {
+    if (f.mode.startsWith('asset') && ctx.can('assets.upload')) {
       const picker = node('input');
       picker.type = 'file';
       picker.multiple = f.mode !== 'asset';
@@ -429,7 +429,7 @@ export function mountComposer(host, ctx) {
   }
 
   async function send() {
-    if (busy || uploading) return;
+    if (!ctx.can('jobs.submit') || busy || uploading) return;
     if (!pending) {
       tasks.forEach(t => { t.errors = []; });
       const items = tasks.map(t => ({ client_task_key: t.id, strategy_version_id: t.version.strategy_version_id, inputs: taskInputs(t) }));
@@ -451,7 +451,12 @@ export function mountComposer(host, ctx) {
       if (!result?.batch_id) throw new Error('未收到批次 ID');
       setPending(storageKey, null);
       pending = null;
-      ctx.navigate('/batch/' + encodeURIComponent(result.batch_id));
+      if (ctx.can('jobs.view')) ctx.navigate('/batch/' + encodeURIComponent(result.batch_id));
+      else {
+        batchKey = key();
+        message = '批次已受理 · ' + result.batch_id;
+        if (!tasks.length) await loadEditor();
+      }
     } catch (error) {
       if (!active) return;
       if ([400, 409, 413, 415, 422, 429].includes(error.status) || ['GLOBAL_QUEUE_FULL', 'VOLUME_LOW'].includes(error.code)) {
@@ -485,7 +490,7 @@ export function mountComposer(host, ctx) {
       panel.setAttribute('role', 'status');
       panel.append(node('h2', '', busy ? '正在提交批次…' : '待确认的批次'));
       panel.append(node('p', 'muted', pending.tasks.length + ' 项任务 · ' + pending.client_batch_key));
-      if (!busy) panel.append(button('核对提交结果', send, true));
+      if (!busy && ctx.can('jobs.submit')) panel.append(button('核对提交结果', send, true));
       root.append(panel);
       return;
     }
@@ -521,9 +526,11 @@ export function mountComposer(host, ctx) {
     const items = node('ol');
     for (const task of tasks) items.append(node('li', '', task.version.name + ' · v' + task.version.version));
     summary.append(items);
-    const submit = button('提交批次', send, true);
-    submit.disabled = !tasks.length || tasks.some(t => !t.version.accepting);
-    summary.append(submit);
+    if (ctx.can('jobs.submit')) {
+      const submit = button('提交批次', send, true);
+      submit.disabled = !tasks.length || tasks.some(t => !t.version.accepting);
+      summary.append(submit);
+    }
     form.append(list, summary);
     root.append(form);
   }

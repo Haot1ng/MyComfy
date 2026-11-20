@@ -1,6 +1,7 @@
 import {createSession, request} from "./session.js";
 import {mountComposer} from "./composer.js";
 import {mountHistory} from "./history.js";
+import {canVisitPage, hasPermission} from "./access.mjs";
 
 const root = document.getElementById("app");
 const tabKey = "mycomfy.tab";
@@ -9,6 +10,7 @@ const sections = [
   ["/home", "工作台", "home"], ["/create", "创建批次", "create"], ["/jobs", "任务记录", "jobs"],
   ["/notifications", "站内通知", "bell"], ["/account", "账户设置", "account"],
 ];
+const protectedPages = {"/create": "generate", "/jobs": "jobs", "/notifications": "notifications"};
 const states = {
   QUEUED: "排队中", EXECUTING: "执行中", RECOVERING: "正在核对", RETRY_WAIT: "等待重试",
   PUBLISHING: "发布中", SUCCEEDED: "已成功", FAILED: "已失败", CANCELLED: "已取消",
@@ -41,6 +43,18 @@ function identity(value) {
 
 function sameSession(a, b) {
   return a && b && a.user_id === b.user_id && a.session_generation === b.session_generation;
+}
+
+/** 同时用于导航和直接打开页面，账户设置始终对登录用户开放。 */
+function canVisit(path) {
+  const page = protectedPages[path];
+  return !page || canVisitPage(user, page);
+}
+
+/** 为当前页签读取分组和权限，确认凭据轮换后读取的是同一个新会话。 */
+function loadProfile(session) {
+  const headers = session ? {"X-Page-User": session.user_id, "X-Session-Generation": session.session_generation} : {};
+  return request("/me", {headers});
 }
 
 function closeView() {
@@ -80,6 +94,7 @@ function messageFor(error) {
     INVALID_PASSWORD: "新密码需要 8 至 1024 个字符。",
     INVALID_USERNAME: "请输入有效用户名。",
     SESSION_INVALID: "会话已失效，请重新登录。",
+    PERMISSION_DENIED: "当前分组没有此操作的权限。",
     ORIGIN_REJECTED: "网页来源与服务配置不一致，请从配置的工作台地址访问。",
   };
   const message = known[error.code] || (error instanceof TypeError ? "无法连接服务，请检查网络后重试。" : error.message);
@@ -141,7 +156,8 @@ function showAuth(register, notice = "", name = "") {
         showAuth(false, "注册成功，请登录。", credentials.username);
         root.querySelector('[name="password"]').focus();
       } else {
-        openSession(await request("/sessions", {method: "POST", body: credentials}), true);
+        const next = await request("/sessions", {method: "POST", body: credentials});
+        openSession(await loadProfile(next), true);
       }
     } catch (error) { status.textContent = messageFor(error); }
     finally {
@@ -149,6 +165,18 @@ function showAuth(register, notice = "", name = "") {
       modes.forEach(button => button.disabled = false);
     }
   };
+}
+
+/** 复用当前页签会话读取最新权限，忽略跨会话返回的结果。 */
+async function refreshAccess() {
+  const client = connection;
+  if (!client || accountPending) return;
+  try {
+    const profile = await client.api("/me");
+    if (client !== connection) return;
+    if (JSON.stringify(profile.permissions) !== JSON.stringify(user.permissions)) openSession(profile, false);
+    else user = profile;
+  } catch { /* The session client handles expired credentials. */ }
 }
 
 function openSession(next, announce) {
@@ -159,7 +187,7 @@ function openSession(next, announce) {
   const generation = ++stopGeneration;
   pin(identity(user));
   if (announce) channel?.postMessage({kind: "opened", identity: identity(user)});
-  connection = createSession(user, () => endSession("会话已失效，请重新登录。"));
+  connection = createSession(user, () => endSession("会话已失效，请重新登录。"), refreshAccess);
   root.innerHTML = '<div class="studio-shell"><aside class="rail"><a class="brand" href="#/home" aria-label="MyComfy 工作台">' +
     logo + '</a><nav aria-label="工作台导航"></nav><div class="rail-foot"><span class="live-dot"></span>' +
     '<span id="live-state" role="status"></span></div></aside><div class="workspace"><header class="topbar">' +
@@ -170,6 +198,7 @@ function openSession(next, announce) {
   root.querySelector(".user-name").textContent = user.username;
   const nav = root.querySelector("nav");
   for (const [path, label, icon] of sections) {
+    if (!canVisit(path)) continue;
     const link = document.createElement("a");
     link.href = "#" + path;
     link.innerHTML = '<i aria-hidden="true" class="nav-icon icon-' + icon + '"></i><span>' + label + '</span>';
@@ -188,6 +217,7 @@ function openSession(next, announce) {
 
 let badgeRequest = 0;
 async function refreshBadge() {
+  if (!canVisit("/notifications")) return;
   const revision = ++badgeRequest;
   const result = await connection.api("/notifications?unread=true&limit=1");
   const dot = root.querySelector(".unread-dot");
@@ -195,6 +225,11 @@ async function refreshBadge() {
 }
 
 function startSync(generation) {
+  if (!canVisit("/jobs")) {
+    root.querySelector(".rail-foot").hidden = true;
+    void refreshBadge().catch(() => {});
+    return;
+  }
   connection.startEvents(async () => {
     await routeReady;
     if (generation !== stopGeneration) return;
@@ -222,8 +257,9 @@ function accountView(host) {
     const generation = stopGeneration;
     // Abort old reads before the server changes the Cookie. The write survives route changes.
     connection.dispose();
-    connection = createSession(user, () => endSession("会话已失效，请重新登录。"));
+    connection = createSession(user, () => endSession("会话已失效，请重新登录。"), refreshAccess);
     host.querySelectorAll("button").forEach(button => button.disabled = true);
+    let passwordChanged = false;
     try {
       if (logout) {
         await connection.api("/sessions/current", {method: "DELETE"});
@@ -234,13 +270,16 @@ function accountView(host) {
         const next = await connection.api("/me/password", {
           method: "POST", body: {current_password: form.elements.old.value, new_password: form.elements.next.value},
         });
+        passwordChanged = true;
+        const profile = await loadProfile(next);
         if (generation !== stopGeneration) return;
-        openSession(next, true);
+        openSession(profile, true);
         const feedback = root.querySelector(".form-status");
         if (feedback) feedback.textContent = "密码已更新。";
       }
     } catch (error) {
       if (generation === stopGeneration) {
+        if (passwordChanged) { endSession("密码已更新，请重新登录。"); return; }
         status.textContent = messageFor(error);
         accountPending = false;
         if (location.hash !== "#/account") routeReady = renderRoute();
@@ -255,11 +294,13 @@ function accountView(host) {
 
 function homeView(host, ctx) {
   host.innerHTML = '<header class="page-title"><h1>工作台</h1></header><section class="home-cover">' +
-    '<div><h2>视频创作空间</h2><p>选择工作流、上传素材，开始一批新的生成任务。</p><a href="#/create" class="cover-action">创建批次 <span aria-hidden="true">↗</span></a></div></section>' +
-    '<section class="card recent"><header><h2>最近任务</h2><a href="#/jobs">全部任务 <span aria-hidden="true">→</span></a></header><div class="recent-list">正在读取任务…</div></section>';
+    '<div><h2>视频创作空间</h2>' + (canVisit("/create") ?
+      '<p>选择工作流和素材，开始一批新的生成任务。</p><a href="#/create" class="cover-action">创建批次 <span aria-hidden="true">↗</span></a>' : '') + '</div></section>' +
+    (canVisit("/jobs") ? '<section class="card recent"><header><h2>最近任务</h2><a href="#/jobs">全部任务 <span aria-hidden="true">→</span></a></header><div class="recent-list">正在读取任务…</div></section>' : '');
   const list = host.querySelector(".recent-list");
   let revision = 0;
   async function refresh() {
+    if (!list) return;
     const id = ++revision;
     try {
       const {items} = await ctx.api("/jobs?limit=5");
@@ -298,7 +339,7 @@ async function renderRoute() {
   const path = location.hash.slice(1) || "/home";
   const parent = /^\/(?:job|batch)\//.test(path) ? "/jobs" : path;
   const section = sections.find(([key]) => key === parent);
-  if (!section) { location.replace("#/home"); return; }
+  if (!section || !canVisit(parent)) { location.replace("#/home"); return; }
   const label = section[1];
   document.title = label + " · MyComfy";
   root.querySelector("#location").textContent = label;
@@ -311,6 +352,7 @@ async function renderRoute() {
   const client = connection;
   const ctx = {
     session: user, signal: controller.signal, navigate, mediaUrl: client.mediaUrl,
+    can: permission => hasPermission(user, permission),
     onNotificationsChanged: () => refreshBadge().catch(() => {}),
     api: (path, options = {}) => client.api(path, {
       ...options, signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal,
@@ -342,12 +384,12 @@ async function renderRoute() {
 
 window.addEventListener("hashchange", () => { if (user && !accountPending) routeReady = renderRoute(); });
 window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+window.addEventListener("focus", () => { void refreshAccess(); });
 async function boot() {
   const previous = readPin();
   if (previous?.signedOut) { showAuth(false); return; }
   try {
-    const headers = previous ? {"X-Page-User": previous.user_id, "X-Session-Generation": previous.session_generation} : {};
-    const me = await request("/me", {headers});
+    const me = await loadProfile(previous);
     if (previous && !sameSession(previous, me)) { endSession("此页签的会话已替换，请重新登录。"); return; }
     openSession(me, false);
   } catch (error) {

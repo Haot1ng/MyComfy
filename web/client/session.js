@@ -29,7 +29,8 @@ export async function request(path, options = {}) {
   return data;
 }
 
-export function createSession(session, onInvalid) {
+/** 管理绑定到单个页签会话的请求、媒体和事件连接。 */
+export function createSession(session, onInvalid, onPermissionsChanged = () => {}) {
   const lifetime = new AbortController();
   let stopStream = () => {};
   function dispose() {
@@ -54,6 +55,7 @@ export function createSession(session, onInvalid) {
       return await request(path, {...options, headers, signal});
     } catch (error) {
       if (!signal.aborted && error.code === "SESSION_INVALID") invalidate();
+      if (!signal.aborted && error.code === "PERMISSION_DENIED") onPermissionsChanged();
       throw error;
     }
   }
@@ -131,6 +133,11 @@ export function createSession(session, onInvalid) {
         stream = source;
         source.onopen = () => { if (current()) { delay = 1000; onStatus("实时同步"); } };
         source.addEventListener("session.revoked", () => { if (current()) invalidate(); });
+        source.addEventListener("permissions.changed", () => {
+          if (!current()) return;
+          onPermissionsChanged();
+          reconnect(true);
+        });
         for (const type of jobEvents) source.addEventListener(type, changed);
         source.onerror = () => {
           if (stream === source) reconnect(source.readyState === EventSource.CLOSED);

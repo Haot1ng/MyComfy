@@ -17,6 +17,7 @@ from mycomfy.database.models import (
     SourceEvent,
     User,
     UserEvent,
+    UserGroupPermission,
     UserSequence,
     UserSession,
 )
@@ -25,6 +26,7 @@ from mycomfy.errors import ApiError, invalid_session, not_found
 
 from .auth import authenticate, check_origin
 from .pagination import decode_cursor, encode_cursor
+from .permissions import Permission, permission_query, require_permission
 
 log = logging.getLogger(__name__)
 TERMINAL_EVENTS = {"job.succeeded", "job.failed", "job.cancelled"}
@@ -113,23 +115,31 @@ def stream_cursor(last_event_id, after, watermark):
     )
 
 
-def active_session(sessions, user_id, session_id):
-    """用已绑定的服务端会话 ID 检查当前指针、撤销状态和到期时间。"""
+def stream_block_reason(sessions, user_id, session_id):
+    """检查流绑定的会话和组权限，区分重新登录与刷新权限的原因。"""
+    allowed = (
+        permission_query(user_id)
+        .where(UserGroupPermission.permission == Permission.VIEW_JOBS)
+        .exists()
+    )
     with sessions() as db:
-        return (
-            db.scalar(
-                select(UserSession.id)
-                .join(User, User.id == UserSession.user_id)
-                .where(
-                    UserSession.id == session_id,
-                    UserSession.user_id == user_id,
-                    User.current_session_id == session_id,
-                    UserSession.revoked_at.is_(None),
-                    UserSession.expires_at > db_now(db),
-                )
+        result = db.scalar(
+            select(allowed)
+            .select_from(UserSession)
+            .join(User, User.id == UserSession.user_id)
+            .where(
+                UserSession.id == session_id,
+                UserSession.user_id == user_id,
+                User.current_session_id == session_id,
+                UserSession.revoked_at.is_(None),
+                UserSession.expires_at > db_now(db),
             )
-            is not None
         )
+    if result is None:
+        return "session.revoked"
+    if not result:
+        return "permissions.changed"
+    return None
 
 
 def event_page(sessions, user_id, cursor):
@@ -151,22 +161,24 @@ def event_frame(kind, data, seq=None):
 
 
 async def user_stream(sessions, settings, user_id, session_id, cursor):
-    """从同一持久游标补发并跟进新事件，撤销会话后只发控制帧。"""
+    """持续补发任务事件，会话或组授权失效时发送控制帧并关闭流。"""
     heartbeat_at = monotonic()
     while True:
         page = await asyncio.to_thread(event_page, sessions, user_id, cursor)
         if page:
             for seq, kind, data in page:
-                if not await asyncio.to_thread(active_session, sessions, user_id, session_id):
-                    yield event_frame("session.revoked", {})
+                reason = await asyncio.to_thread(stream_block_reason, sessions, user_id, session_id)
+                if reason:
+                    yield event_frame(reason, {})
                     return
                 yield event_frame(kind, data, seq)
                 cursor = seq
             heartbeat_at = monotonic() + settings.sse_heartbeat_seconds
             continue
 
-        if not await asyncio.to_thread(active_session, sessions, user_id, session_id):
-            yield event_frame("session.revoked", {})
+        reason = await asyncio.to_thread(stream_block_reason, sessions, user_id, session_id)
+        if reason:
+            yield event_frame(reason, {})
             return
         if monotonic() >= heartbeat_at:
             yield ": heartbeat\n\n"
@@ -212,6 +224,7 @@ def build_event_router(settings, sessions):
         with sessions() as db:
             user, _ = authenticate(db, request)
             request.state.actor = user.id
+            require_permission(db, user.id, Permission.VIEW_JOBS)
             return {"user_seq": str(db.get(UserSequence, user.id).latest)}
 
     @router.get("/events")
@@ -229,6 +242,7 @@ def build_event_router(settings, sessions):
                 db, request, generation=session_generation, page_user=page_user
             )
             request.state.actor = user.id
+            require_permission(db, user.id, Permission.VIEW_JOBS)
             cursor = stream_cursor(
                 request.headers.get("last-event-id"),
                 after,
@@ -248,6 +262,7 @@ def build_event_router(settings, sessions):
         with sessions() as db:
             user, _ = authenticate(db, request)
             request.state.actor = user.id
+            require_permission(db, user.id, Permission.VIEW_NOTIFICATIONS)
             scope = ["notifications", user.id, unread, "seq_desc"]
             position = decode_cursor(cursor, scope)
             statement = select(Notification).where(Notification.user_id == user.id)
@@ -286,6 +301,7 @@ def build_event_router(settings, sessions):
         with sessions.begin() as db:
             user, _ = authenticate(db, request, write=True)
             request.state.actor = user.id
+            require_permission(db, user.id, Permission.MARK_NOTIFICATIONS_READ, write=True)
             row = db.scalar(
                 select(Notification)
                 .where(Notification.id == notification_id, Notification.user_id == user.id)

@@ -74,6 +74,9 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                     assert client.get(local + "/index.html").content == local_page.content
                     assert user_page.headers["content-type"].startswith("text/html")
                     assert "javascript" in client.get(public + "/app.js").headers["content-type"]
+                    assert (
+                        "javascript" in client.get(public + "/access.mjs").headers["content-type"]
+                    )
                     assert "javascript" in client.get(local + "/admin.js").headers["content-type"]
                     assert client.head(public + "/").headers["etag"] == user_page.headers["etag"]
                     assert (
@@ -84,6 +87,7 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                     )
                     assert client.get(public + "/admin.js", headers=forged).status_code == 404
                     assert client.get(local + "/app.js").status_code == 404
+                    assert client.get(local + "/access.mjs").status_code == 404
                     assert client.get(local + "/README.md").status_code == 404
                     assert (
                         client.get(local + "/", headers={"Host": "elsewhere.example"}).status_code

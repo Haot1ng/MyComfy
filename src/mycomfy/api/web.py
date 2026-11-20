@@ -6,6 +6,7 @@ from fastapi import Request
 from starlette.staticfiles import StaticFiles
 
 CLIENT_FILES = (
+    "access.mjs",
     "app.js",
     "session.js",
     "client.css",

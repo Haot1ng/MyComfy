@@ -39,6 +39,27 @@ class User(Base):
     current_session_id: Mapped[str | None] = mapped_column(ID)
 
 
+class UserGroup(Base):
+    __tablename__ = "user_groups"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+
+
+class UserGroupMember(Base):
+    __tablename__ = "user_group_members"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    group_key: Mapped[str] = mapped_column(ForeignKey("user_groups.key"), primary_key=True)
+
+
+class UserGroupPermission(Base):
+    __tablename__ = "user_group_permissions"
+
+    group_key: Mapped[str] = mapped_column(ForeignKey("user_groups.key"), primary_key=True)
+    permission: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
 class UserSession(Base):
     __tablename__ = "sessions"
 

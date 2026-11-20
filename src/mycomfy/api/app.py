@@ -37,14 +37,17 @@ from mycomfy.database.models import (
     UserSession,
 )
 from mycomfy.database.session import db_now, make_sessions, new_id
-from mycomfy.errors import ApiError, not_found
+from mycomfy.errors import ApiError, InvalidSession, not_found
 from mycomfy.generation import jobs
 from mycomfy.generation.strategy import json_pointer, sql_publish, strategy_payload
 from mycomfy.ops.capacity import Capacity
 
 from . import auth
 from .events import build_event_router, event_dispatcher
+from .group_admin import build_group_admin_router
 from .pagination import invalid_cursor, page, read_position
+from .permissions import Permission, access_profile, require_permission
+from .session_cache import SessionPrecheckCache
 from .web import install_web_routes
 
 logger = logging.getLogger(__name__)
@@ -158,10 +161,12 @@ def _audit(db, request, status):
     )
 
 
-def _session(db, request, **options):
-    """验证会话并为本次请求关联审计主体。"""
+def _session(db, request, *, permission=None, **options):
+    """验证会话、关联审计主体，并按路由要求核验组授权。"""
     user, session = auth.authenticate(db, request, **options)
     request.state.actor = user.id
+    if permission is not None:
+        require_permission(db, user.id, permission, write=options.get("write", False))
     return user, session
 
 
@@ -182,23 +187,40 @@ def create_app(settings, *, local=False, sessions=None):
     """按监听用途装配公开或本机应用，并注入会话工厂和容量策略。"""
     sessions = sessions if sessions is not None else make_sessions(settings.database_url)
     capacity = Capacity.from_settings(settings)
+    cache = (
+        SessionPrecheckCache(settings.redis_url, settings.session_cache_ttl_seconds)
+        if settings.redis_url
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(app):
         """启动时恢复容量预留，并在公开 API 生命周期内运行持久事件分发器。"""
-        await run_in_threadpool(capacity.initialize, sessions)
-        if local:
-            yield
-        else:
-            async with event_dispatcher(settings, sessions):
+        try:
+            await run_in_threadpool(capacity.initialize, sessions)
+            if local:
                 yield
+            else:
+                async with event_dispatcher(settings, sessions):
+                    yield
+        finally:
+            if cache is not None:
+                await run_in_threadpool(cache.close)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.sessions = sessions
 
     @app.exception_handler(ApiError)
     async def api_error(request, exc):
-        """将服务层抛出的业务异常转换为 HTTP 响应。"""
+        """转换业务异常，在数据库会话退出后修复已确认失效的缓存。"""
+        if (
+            cache is not None
+            and isinstance(exc, InvalidSession)
+            and exc.inactive_token_digest is not None
+            and exc.inactive_token_digest
+            == getattr(request.state, "prechecked_session_digest", None)
+        ):
+            await run_in_threadpool(cache.invalidate, exc.inactive_token_digest)
         return _error(request, exc)
 
     @app.exception_handler(RequestValidationError)
@@ -253,9 +275,22 @@ def create_app(settings, *, local=False, sessions=None):
                 _audit(db, request, status)
 
     def check_page_write(request):
-        """在解析私有写请求前先验证页面身份，业务提交仍须在同一事务中复核。"""
+        """优先从 Redis 预检写请求，未命中时读取 MySQL 并回填。"""
+        if cache is not None:
+            token_digest = auth.cookie_digest(request)
+            cached = cache.get(token_digest)
+            if cached is not None:
+                auth.check_page_binding(request, cached.user_id, cached.generation)
+                auth.check_write_headers(request, cached.generation, cached.csrf_digest)
+                request.state.actor = cached.user_id
+                request.state.prechecked_session_digest = token_digest
+                return
         with sessions() as db:
-            _session(db, request, write=True)
+            _, session = _session(db, request, write=True)
+        # 数据库预检会锁定用户行，结束事务后再尝试写缓存。
+        if cache is not None:
+            cache.remember(session)
+            request.state.prechecked_session_digest = session.token_digest
 
     @app.middleware("http")
     async def request_scope(request: Request, call_next):
@@ -267,7 +302,11 @@ def create_app(settings, *, local=False, sessions=None):
         try:
             if local:
                 _local_request(request)
-                if request.method == "POST" and path.startswith("/local/v1/"):
+                if path.startswith("/local/v1/") and (
+                    request.method not in {"GET", "HEAD", "OPTIONS"}
+                    or path.rstrip("/") in {"/local/v1/groups", "/local/v1/users"}
+                    or path.startswith(("/local/v1/groups/", "/local/v1/users/"))
+                ):
                     await run_in_threadpool(_maintenance, request, settings)
             elif path.startswith("/api/v1/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
                 auth.check_origin(request, settings.public_origin)
@@ -277,7 +316,7 @@ def create_app(settings, *, local=False, sessions=None):
                     or (path.startswith("/api/v1/jobs/") and path.endswith("/cancel"))
                 ):
                     await run_in_threadpool(check_page_write, request)
-            if request.method == "POST" and path.startswith(("/api/v1/", "/local/v1/")):
+            if request.method in {"POST", "PUT"} and path.startswith(("/api/v1/", "/local/v1/")):
                 if path == "/api/v1/assets":
                     if media_type != "multipart/form-data":
                         raise ApiError(
@@ -287,7 +326,7 @@ def create_app(settings, *, local=False, sessions=None):
                     raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json")
             response = await call_next(request)
         except ApiError as exc:
-            response = _error(request, exc)
+            response = await api_error(request, exc)
         except SQLAlchemyError:
             logger.error("Database operation failed for %s", request.state.request_id)
             response = _error(
@@ -315,16 +354,17 @@ def create_app(settings, *, local=False, sessions=None):
     if local:
         from mycomfy.ops.monitor import build_monitor_router
 
-        app.include_router(_local_routes(settings, sessions))
+        app.include_router(_local_routes(settings, sessions, cache))
+        app.include_router(build_group_admin_router(sessions, _audit))
         app.include_router(build_monitor_router(settings, sessions))
     else:
         store = LocalStore(settings.data_root)
-        app.include_router(_public_routes(settings, sessions, store, capacity))
+        app.include_router(_public_routes(settings, sessions, store, capacity, cache))
         app.include_router(build_event_router(settings, sessions))
     return app
 
 
-def _local_routes(settings, sessions):
+def _local_routes(settings, sessions, cache):
     """构造本机策略发布与维护重置密码路由。"""
     router = APIRouter(prefix="/local/v1")
 
@@ -347,6 +387,7 @@ def _local_routes(settings, sessions):
         """由本机维护者重置密码并在同一事务撤销旧会话。"""
         request.state.target = user_id[:48]
         new_hash = auth.password_hash(body.new_password)
+        retired_digest = None
         with sessions.begin() as db:
             user = db.get(User, user_id, with_for_update=True)
             if user is None:
@@ -354,14 +395,18 @@ def _local_routes(settings, sessions):
             user.password_hash = new_hash
             user.credential_version += 1
             if user.current_session_id:
-                auth.revoke_session(db, user, db.get(UserSession, user.current_session_id))
+                retired_digest = auth.revoke_session(
+                    db, user, db.get(UserSession, user.current_session_id)
+                )
             _audit(db, request, 204)
+        if cache is not None:
+            cache.invalidate(retired_digest)
         return Response(status_code=204)
 
     return router
 
 
-def _public_routes(settings, sessions, store, capacity):
+def _public_routes(settings, sessions, store, capacity, cache):
     """构造账号、策略、素材、任务及批次的用户 HTTP 路由。"""
     router = APIRouter(prefix="/api/v1")
 
@@ -378,26 +423,31 @@ def _public_routes(settings, sessions, store, capacity):
         """验证登录凭据，轮换当前会话并返回页面代次和 CSRF 令牌。"""
         source = request.client.host if request.client else "unknown"
         with sessions() as db:
-            payload, token = auth.login(
+            payload, token, retired_digest = auth.login(
                 db, body.username, body.password, source, settings.session_seconds
             )
+        if cache is not None:
+            cache.invalidate(retired_digest)
         request.state.actor = payload["user_id"]
         _cookie(response, settings, token)
         return payload
 
     @router.get("/me")
     def me(request: Request):
-        """读取与当前 Cookie 对应的用户和会话代次。"""
+        """返回当前会话，以及前端判断页面和按钮所需的分组与权限。"""
         with sessions() as db:
-            return auth.session_payload(*_session(db, request))
+            user, session = _session(db, request)
+            return {**auth.session_payload(user, session), **access_profile(db, user.id)}
 
     @router.delete("/sessions/current", status_code=204)
     def logout(request: Request):
         """只撤销已匹配的会话，允许旧退出请求幂等重放。"""
         with sessions.begin() as db:
             user, session = _session(db, request, write=True, allow_revoked=True)
-            auth.revoke_session(db, user, session)
+            retired_digest = auth.revoke_session(db, user, session)
             _audit(db, request, 204)
+        if cache is not None:
+            cache.invalidate(retired_digest)
         return Response(status_code=204)
 
     @router.post("/me/password")
@@ -416,8 +466,10 @@ def _public_routes(settings, sessions, store, capacity):
                 raise ApiError(401, "SESSION_INVALID", "Credentials have changed")
             user.password_hash = new_hash
             user.credential_version += 1
-            payload, token = auth.rotate_session(db, user, settings.session_seconds)
+            payload, token, retired_digest = auth.rotate_session(db, user, settings.session_seconds)
             _audit(db, request, 200)
+        if cache is not None:
+            cache.invalidate(retired_digest)
         _cookie(response, settings, token)
         return payload
 
@@ -425,7 +477,7 @@ def _public_routes(settings, sessions, store, capacity):
     def strategies(request: Request, limit: Limit = 50, cursor: str | None = None):
         """按系列键分页查询每个系列当前发布的最新版本。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.VIEW_STRATEGIES)
             scope = [user.id, "strategies", "strategy_key.asc"]
             pos = read_position(cursor, scope, str)
             query = (
@@ -448,7 +500,7 @@ def _public_routes(settings, sessions, store, capacity):
     def versions(key: str, request: Request, limit: Limit = 50, cursor: str | None = None):
         """按版本号倒序分页返回指定系列的历史版本。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.VIEW_STRATEGIES)
             scope = [user.id, "versions", key, "version.desc"]
             pos = read_position(cursor, scope, int)
             query = select(StrategyVersion).where(StrategyVersion.strategy_key == key)
@@ -467,7 +519,7 @@ def _public_routes(settings, sessions, store, capacity):
     def version(version_id: str, request: Request):
         """查询单个策略版本的 Schema、摘要及当前可受理性。"""
         with sessions() as db:
-            _session(db, request)
+            _session(db, request, permission=Permission.VIEW_STRATEGIES)
             row = db.get(StrategyVersion, version_id)
             if row is None:
                 raise not_found()
@@ -477,7 +529,7 @@ def _public_routes(settings, sessions, store, capacity):
     def submit(request: Request, body: jobs.BatchRequest):
         """原子受理整批任务并保存请求与批次之间的审计关联。"""
         with sessions.begin() as db:
-            user, _ = _session(db, request, write=True)
+            user, _ = _session(db, request, write=True, permission=Permission.SUBMIT_JOBS)
             payload = jobs.admit_batch(db, user, body, settings.max_batch_tasks, store, capacity)
             request.state.target = payload["batch_id"]
             _audit(db, request, 202)
@@ -487,7 +539,7 @@ def _public_routes(settings, sessions, store, capacity):
     def batch(batch_id: str, request: Request, limit: Limit = 50, cursor: str | None = None):
         """返回当前用户指定批次的状态汇总及按提交顺序排列的一页任务。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
             jobs.resource(db, Batch, batch_id, user.id)
             scope = [user.id, "batch", batch_id, "position.asc"]
             pos = read_position(cursor, scope, int)
@@ -524,7 +576,7 @@ def _public_routes(settings, sessions, store, capacity):
     ):
         """按状态和批次筛选用户任务，并用时间及唯一 ID 续读。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
             scope = [user.id, "jobs", state, batch_id, "created_at.desc,id.desc"]
             pos = read_position(cursor, scope, str, str)
             query = select(Job).where(Job.user_id == user.id)
@@ -555,14 +607,14 @@ def _public_routes(settings, sessions, store, capacity):
     def job_detail(job_id: str, request: Request):
         """返回用户可访问的任务状态、关联执行和可见文件。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
             return jobs.job_payload(db, jobs.resource(db, Job, job_id, user.id))
 
     @router.post("/jobs/{job_id}/cancel")
     def cancel(job_id: str, request: Request, body: Cancel | None = None):
         """为非终态任务原子登记取消，终态请求沿用已有结果。"""
         with sessions.begin() as db:
-            user, _ = _session(db, request, write=True)
+            user, _ = _session(db, request, write=True, permission=Permission.CANCEL_JOBS)
             result = jobs.cancel_job(db, job_id, user.id, body.reason if body else None)
             request.state.target = job_id
             _audit(db, request, 200)
@@ -572,7 +624,7 @@ def _public_routes(settings, sessions, store, capacity):
     def assets(job_id: str, request: Request, limit: Limit = 50, cursor: str | None = None):
         """按固定策略的取消后开放规则分页返回任务产物。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
             job = jobs.resource(db, Job, job_id, user.id)
             scope = [user.id, "assets", job_id, "id.asc"]
             pos = read_position(cursor, scope, str)
@@ -594,7 +646,7 @@ def _public_routes(settings, sessions, store, capacity):
     def asset_detail(asset_id: str, request: Request):
         """校验对象归属和任务开放规则后读取文件元数据。"""
         with sessions() as db:
-            user, _ = _session(db, request)
+            user, _ = _session(db, request, permission=Permission.DOWNLOAD_ASSETS)
             return jobs.asset_payload(jobs.get_asset(db, asset_id, user.id))
 
     @router.get("/assets/{asset_id}/content")
@@ -610,7 +662,13 @@ def _public_routes(settings, sessions, store, capacity):
         def authorized_asset():
             """在短事务中检查当前会话、资源归属和最新的取消后可见规则。"""
             with sessions() as db:
-                user, _ = _session(db, request, page_user=page_user, generation=session_generation)
+                user, _ = _session(
+                    db,
+                    request,
+                    permission=Permission.DOWNLOAD_ASSETS,
+                    page_user=page_user,
+                    generation=session_generation,
+                )
                 asset = jobs.get_asset(db, asset_id, user.id)
                 request.state.target = asset.id
                 return asset
@@ -645,7 +703,7 @@ async def _upload(request, sessions, store, capacity, settings):
     def authenticate_upload():
         """读取上传者身份并在接收文件前检查写权限。"""
         with sessions() as db:
-            user, _ = _session(db, request, write=True)
+            user, _ = _session(db, request, write=True, permission=Permission.UPLOAD_ASSETS)
             return user.id
 
     user_id = await run_in_threadpool(authenticate_upload)
@@ -678,7 +736,7 @@ async def _upload(request, sessions, store, capacity, settings):
         capacity.finish_spool(sessions, upload_owner)
         with store.prepare_upload(file.file, upper_bound, owner=upload_owner) as prepared:
             with sessions.begin() as db:
-                user, _ = _session(db, request, write=True)
+                user, _ = _session(db, request, write=True, permission=Permission.UPLOAD_ASSETS)
                 asset = prepared.register(db, user.id)
                 capacity.credit_upload(db, upload_owner, asset.size)
                 request.state.target = asset.id

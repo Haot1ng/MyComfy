@@ -13,6 +13,13 @@ def not_found():
     return ApiError(404, "NOT_FOUND", "Resource not found")
 
 
-def invalid_session():
-    """生成无效或过期会话共用的认证错误。"""
-    return ApiError(401, "SESSION_INVALID", "Session is invalid or expired")
+class InvalidSession(ApiError):
+    def __init__(self, inactive_token_digest: str | None = None):
+        """保留统一的 401 响应，并标记数据库已确认失效的令牌。"""
+        super().__init__(401, "SESSION_INVALID", "Session is invalid or expired")
+        self.inactive_token_digest = inactive_token_digest
+
+
+def invalid_session(inactive_token_digest: str | None = None):
+    """生成会话认证错误，可携带仅供服务端清理缓存的令牌摘要。"""
+    return InvalidSession(inactive_token_digest)

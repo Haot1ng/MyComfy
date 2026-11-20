@@ -92,7 +92,7 @@ function assetCard(asset, ctx) {
   const header = element("div", "hist-asset-head",
     element("div", null, element("strong", null, asset.role), element("p", "muted", info.join(" · "))));
   const card = element("article", "hist-asset", header);
-  if (asset.available && asset.content_url) {
+  if (asset.available && asset.content_url && ctx.can("assets.download")) {
     const url = new URL(ctx.mediaUrl(asset.content_url), location.origin);
     const download = element("a", "btn", asset.complete ? "下载" : "下载部分文件");
     const downloadUrl = new URL(url);
@@ -314,9 +314,9 @@ export async function mountHistory(host, ctx, path) {
       const item = element("li", note.read_at ? "hist-notice" : "hist-notice unread");
       const content = element("div", null, element("strong", null, title),
         element("p", "hist-secondary", dateText(note.created_at) + (note.read_at ? " · 已读" : " · 未读")));
-      if (note.data?.job_id) content.append(link(note.data.job_id, "/job/" + encodeURIComponent(note.data.job_id), ctx, "hist-id hist-link"));
+      if (note.data?.job_id && ctx.can("jobs.view")) content.append(link(note.data.job_id, "/job/" + encodeURIComponent(note.data.job_id), ctx, "hist-id hist-link"));
       item.append(content);
-      if (!note.read_at) {
+      if (!note.read_at && ctx.can("notifications.mark_read")) {
         const read = button("标为已读", () => markRead(note, read));
         read.disabled = unreadPending.has(note.notification_id);
         item.append(read);
@@ -362,7 +362,7 @@ export async function mountHistory(host, ctx, path) {
   }
 
   async function cancelJob() {
-    if (cancelPending || !currentJob || terminal.has(currentJob.state)) return;
+    if (!ctx.can("jobs.cancel") || cancelPending || !currentJob || terminal.has(currentJob.state)) return;
     cancelPending = true;
     confirmCancel = false;
     renderDetail(currentJob);
@@ -408,7 +408,7 @@ export async function mountHistory(host, ctx, path) {
       detailArea.append(element("label", "hist-progress", "执行进度 " + Math.round(meter.value * 100) + "%", meter));
     }
     if (windingDown(job)) detailArea.append(element("p", "hist-note", "取消已生效，原执行仍在收尾。"));
-    if (!terminal.has(job.state)) {
+    if (!terminal.has(job.state) && ctx.can("jobs.cancel")) {
       if (confirmCancel) {
         const confirm = element("div", "hist-confirm", element("span", null, "确认取消此任务？"),
           button("继续生成", () => { confirmCancel = false; renderDetail(job); }),

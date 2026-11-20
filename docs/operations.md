@@ -2,6 +2,31 @@
 
 用户网页和用户 API 通过同源 HTTPS 提供服务。反向代理转发用户 API 到业务端口。运行 `mycomfy api` 后，同一业务 API 进程同时监听用户端口与本机回环维护端口，两套生命周期分别启动事件分发和独立于监控页面的告警轮询。维护调用使用权限受限的令牌文件。通过进程托管器分别管理双监听 API、引擎管理和 Worker。仅诊断本机监听时可使用 `mycomfy local-api`。数据库迁移在启动服务前执行。
 
+## 会话预检缓存
+
+为 API 进程设置 `MYCOMFY_REDIS_URL` 即可启用。连接串包含地址、端口、数据库编号和可选的 ACL 用户名、密码。TLS 示例为 `rediss://USER:PASSWORD@REDIS_HOST:6379/0`。用户名和密码中的特殊字符需要 URL 编码，真实凭据通过部署环境变量提供。
+
+Redis 用于批次提交、任务取消和用户改密的中间件预检。缓存未命中或 Redis 访问失败时，预检回查 MySQL。只有通过数据库校验的会话才会写入 Redis，缓存最多保存 `MYCOMFY_SESSION_CACHE_TTL_SECONDS` 秒，默认 60 秒，且不超过会话剩余有效期。
+
+写事务再次以 MySQL 为准。登录换代、退出、改密和维护重置密码在提交事务后尽力清理旧缓存。如果删除失败，后续命中旧缓存的写请求会在 MySQL 确认会话失效后重试删除。页签代次或 CSRF 请求头不匹配时保留对应的会话缓存。对私有数据的读取仍在 MySQL 校验会话。
+
+## 用户分组
+
+迁移 `0004` 创建 `standard` 标准组，并把现有用户加入该组，保留升级前的功能访问。注册的用户也默认加入标准组。一个用户可属于多个组，权限按并集合并。分组列表为空时，用户仍可登录、查看自己的会话及改密，业务接口按权限拒绝。
+
+分组接口仅通过本机维护入口开放，每次调用使用维护 Bearer 凭据。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /local/v1/groups` | 读取分组、各组权限和可选权限清单 |
+| `POST /local/v1/groups` | 创建分组，传 `key`、`name`、`permissions` |
+| `PUT /local/v1/groups/{group_key}` | 更新组名和权限，传 `name`、`permissions` |
+| `GET /local/v1/users` | 分页查找账户 ID 和用户名 |
+| `GET /local/v1/users/{user_id}/groups` | 读取用户当前的组和生效权限 |
+| `PUT /local/v1/users/{user_id}/groups` | 传入 `group_keys`，替换该用户所属分组 |
+
+例如，创建 `viewer` 分组并授予 `jobs.view`，然后把用户的 `group_keys` 设置为 `["viewer"]`。该用户通过 `GET /api/v1/me` 获取新权限后能看到任务页面，提交或取消会收到 `403 PERMISSION_DENIED`。组权限保存在 MySQL，修改后即可影响现有会话的业务请求。C 端分组权限与本机维护凭据分别校验。[前端权限接入](../web/client/README.md)
+
 ## 监控与停止接单
 
 启动本机 API 后，访问 `GET /local/v1/monitor/overview` 查看排队数、最早等待时间、重试、隔离、发布积压、卷水位和告警。集合 `requests`、`batches`、`jobs`、`executions`、`instances`、`metrics` 和 `files` 支持列表及按 ID 查看详情。按执行筛选 `/local/v1/monitor/logs?execution_id=...` 可翻页读取引擎日志。执行详情保留实例代次、节点、预算和历史日志位置。采样过期时查看实例心跳与进程存活、HTTP 可达、可接单和实际占用各项。

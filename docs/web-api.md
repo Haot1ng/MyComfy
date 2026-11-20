@@ -59,11 +59,13 @@ API 默认业务端口为 `8000`，本机端口为 `127.0.0.1:8001`。两个监�
 | --- | --- | --- |
 | `POST /accounts` | `{username, password}` | `201 {user_id}`，随后调用登录。 |
 | `POST /sessions` | `{username, password}` | `200` 会话对象，设置会话 Cookie 并撤销该账号的旧会话。 |
-| `GET /me` | 会话 Cookie | `200` 当前会话对象，供初始化或核对页签身份。 |
+| `GET /me` | 会话 Cookie | `200` 当前会话对象，额外返回用户所属的 `groups` 及授权并集 `permissions`。 |
 | `DELETE /sessions/current` | 会话 Cookie、页签代次和 CSRF | `204`，撤销本次匹配的会话。 |
 | `POST /me/password` | `{current_password, new_password}` | `200` 新会话对象，设置轮换后的 Cookie。 |
 
 会话对象包含 `user_id`、`username`、`session_generation`、`csrf_token`。会话 Cookie 名为 `mycomfy_session`，生产环境使用 `HttpOnly`、`Secure`、`SameSite=Lax`。浏览器自动携带 Cookie。页签针对已知会话的 fetch 请求携带 `X-Page-User`（打开页签时的用户 ID）和 `X-Session-Generation`，写请求另需 `X-CSRF-Token`。服务端将页签身份与 Cookie 比对。已有 API 调用方可省略页签用户头，读取接口也可省略代次。
+
+前端使用 `permissions` 决定页面和按钮的可见性。业务接口重新校验当前授权，缺少对应权限时返回 `403 PERMISSION_DENIED`。[页面与操作的权限表](../web/client/README.md#按分组显示页面与按钮)
 
 注册用户名最多 100 字符，服务端按 NFKC 规范化、去除首尾空白并折叠大小写。注册、改密与维护重置的新密码要求 8 至 1024 字符。
 

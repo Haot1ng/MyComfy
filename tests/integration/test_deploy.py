@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -137,3 +138,103 @@ def test_partial_model_never_becomes_visible(tmp_path):
     source.write_bytes(b"complete")
     deploy.copy_model(model, target, tmp_path)
     assert target.read_bytes() == b"complete"
+
+
+def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, monkeypatch):
+    """验证标签漂移、模型更新和缓存损坏时分别使用正确的锁与清单。"""
+    from mycomfy.engine import recipe
+
+    source = tmp_path / "engine"
+    initial = create_repository(source, {"main.py": "", "requirements.txt": "torch\n"})
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            source,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "tag",
+            "-am",
+            "first",
+            "v1",
+        ],
+        check=True,
+    )
+    model = tmp_path / "video.bin"
+    model.write_bytes(b"original")
+    settings = recipe.Recipe.model_validate(
+        {
+            "comfyui": {"url": "engine", "version": "v1"},
+            "models": {"video": {"source": "video.bin", "path": "checkpoints/video.bin"}},
+            "pytorch": {
+                "index_url": "https://download.pytorch.org/whl/cu126",
+                "torch": "2.7.1+cu126",
+            },
+        }
+    )
+    root = tmp_path / "data"
+    calls = []
+
+    def write_test_lock(pytorch, requirements, target):
+        """记录参与解析的固定源码依赖，并写出供快照检测的测试锁。"""
+        calls.append((pytorch["torch"], [path.read_text() for path in requirements]))
+        target.write_text("# test lock\n")
+
+    monkeypatch.setattr(recipe, "generate_lock", write_test_lock)
+    first = recipe.materialize(settings, root, tmp_path)
+    original = deploy.Deployment.model_validate_json(first.read_bytes())
+    assert original.comfyui.commit == initial["commit"]
+    assert original.models["video"].sha256 == deploy.file_digest(model)
+    assert original.instances[0].id == "gpu0"
+
+    # 输入标签由发布者移动。已归档的解析仍使用第一次实际部署的提交。
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            source,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "second",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", source, "tag", "-f", "v1"], check=True)
+    assert recipe.materialize(settings, root, tmp_path) == first
+    model.write_bytes(b"updated")
+    second = recipe.materialize(settings, root, tmp_path)
+    updated = deploy.Deployment.model_validate_json(second.read_bytes())
+    assert second != first
+    assert updated.models["video"].sha256 == deploy.file_digest(model)
+    assert updated.comfyui == original.comfyui
+    assert updated.requirements_lock == original.requirements_lock
+    assert calls == [("2.7.1+cu126", ["torch\n"])]
+    Path(original.requirements_lock).write_text("tampered")
+    with pytest.raises(ValueError, match="依赖锁摘要不符"):
+        recipe.materialize(settings, root, tmp_path)
+
+
+def test_recipe_requires_remote_model_digest_before_resolving(tmp_path):
+    """HTTPS 模型缺少摘要时先报告配置错误，避免开始锁定仓库或发布配置。"""
+    from mycomfy.engine import recipe
+
+    settings = recipe.Recipe.model_validate(
+        {
+            "comfyui": {"url": "unavailable", "version": "v1"},
+            "pytorch": {
+                "index_url": "https://download.pytorch.org/whl/cu126",
+                "torch": "2.7.1+cu126",
+            },
+            "models": {"v": {"source": "https://example.invalid/v.bin", "path": "vae/v.bin"}},
+        }
+    )
+    with pytest.raises(ValueError, match="SHA-256"):
+        recipe.materialize(settings, tmp_path / "engines", tmp_path)
+    assert not (tmp_path / "engines").exists()

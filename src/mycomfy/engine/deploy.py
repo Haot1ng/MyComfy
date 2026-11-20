@@ -60,13 +60,10 @@ class InstanceSpec(TimeLimits):
     strategy_timeouts: dict[str, TimeLimits] = Field(default_factory=dict)
 
 
-class Deployment(Record):
-    comfyui: Repo
-    nodes: dict[Name, Repo] = Field(default_factory=dict)
+class EngineLayout(Record):
+    """引擎输入和已锁定清单共用的模型目录与实例布局。"""
+
     models: dict[Name, ModelFile]
-    python: str = sys.executable
-    requirements_lock: str
-    requirements_sha256: Sha256
     instances: list[InstanceSpec] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -80,6 +77,14 @@ class Deployment(Record):
             if len(values) != len(set(values)):
                 raise ValueError("实例标识、端口和模型路径必须各自唯一")
         return self
+
+
+class Deployment(EngineLayout):
+    comfyui: Repo
+    nodes: dict[Name, Repo] = Field(default_factory=dict)
+    python: str = sys.executable
+    requirements_lock: str
+    requirements_sha256: Sha256
 
 
 def file_digest(path):

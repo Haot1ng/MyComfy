@@ -1,16 +1,93 @@
 """使用真实 Linux 子进程验证启动、接管、日志和停机证据。"""
 
+import json
+import os
 import socket
+import subprocess
 import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from mycomfy.database.models import Base, EngineInstance
-from mycomfy.engine.runtime import EngineConfig, Manager, administrative_action, stop_generation
+from mycomfy.database.schema import migrate
+from mycomfy.engine.runtime import (
+    EngineConfig,
+    Manager,
+    administrative_action,
+    runtime_ready,
+    sample_gpu,
+    stop_generation,
+)
 from mycomfy.engine.supervisor import process_identity
+
+
+def test_container_shutdown_records_exit_and_allows_restart(tmp_path):
+    """验证容器服务收到 TERM 后会等待监护程序收割引擎，并可从持久状态启动下一代。"""
+    url = f"sqlite:///{tmp_path}/db.sqlite"
+    migrate(url)
+    sessions = sessionmaker(create_engine(url), expire_on_commit=False)
+    engine = tmp_path / "dummy.py"
+    engine.write_text("import time\ntime.sleep(60)\n")
+    config = EngineConfig(
+        id="gpu0",
+        gpu="0",
+        port=8188,
+        root=str(tmp_path / "instance"),
+        python=sys.executable,
+        entrypoint=str(engine),
+        manifest={},
+        observation_seconds=2,
+        timeout_seconds=10,
+        reconcile_seconds=3,
+    )
+    path = tmp_path / "engines.json"
+    path.write_text(json.dumps({"instances": [config.model_dump()]}))
+    env = {
+        **os.environ,
+        "MYCOMFY_DATABASE_URL": url,
+        "MYCOMFY_DATA_ROOT": str(tmp_path),
+        "MYCOMFY_ENGINE_CONFIG": str(path),
+    }
+    try:
+        for generation in (1, 2):
+            manager = subprocess.Popen(
+                [sys.executable, "-m", "mycomfy.engine.runtime", "serve", "--stop-engines-on-exit"],
+                env=env,
+            )
+            try:
+                # 等到监护程序实际创建了该代引擎子进程，再模拟 docker stop。
+                deadline = time.monotonic() + 12
+                while not list((tmp_path / "instance").glob(f"g{generation}-*/child.json")):
+                    assert manager.poll() is None and time.monotonic() < deadline
+                    time.sleep(0.05)
+            finally:
+                manager.terminate()
+                assert manager.wait(timeout=18) == 0
+            with sessions() as db:
+                row = db.get(EngineInstance, "gpu0")
+                assert row.generation == generation and not row.accepting
+                assert not row.quarantine_reason
+                directory = Path(row.runtime["run_dir"])
+            proof = json.loads((directory / "ended.json").read_text())
+            child = json.loads((directory / "child.json").read_text())
+            assert proof["generation"] == generation and proof["reason"] == "requested stop"
+            assert process_identity(child["pid"]) != child
+    finally:
+        sessions.kw["bind"].dispose()
+
+
+def test_gpu_sample_retains_supported_wsl_metrics(monkeypatch):
+    """部分驱动不提供利用率时仍然记录本次显存和本代峰值。"""
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *args, **kwargs: "0, GPU, 32, 128, [N/A]"
+    )
+    sample = sample_gpu("0", {"gpu_memory_peak_mib": 45, "gpu_utilization_percent": 12})
+    assert sample["gpu_memory_used_mib"] == 32 and sample["gpu_memory_total_mib"] == 128
+    assert sample["gpu_memory_peak_mib"] == 45 and "gpu_utilization_percent" not in sample
 
 
 def test_manager_adopts_generation_and_stops_detached_descendant(tmp_path):
@@ -63,6 +140,8 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             time.sleep(0.05)
         assert row.accepting and row.generation == 1
         assert row.runtime["pid"] == original.children["local"].pid
+        assert runtime_ready(sessions, configs)
+        assert not runtime_ready(sessions, {})
         assert not stop_generation(sessions, "local", 0)
         descendant = int((Path(row.runtime["state_dir"]) / "child-pid").read_text())
         identity = process_identity(descendant)
@@ -70,13 +149,19 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert "highly-private-value" not in Path(row.runtime["log_path"]).read_text()
         assert "已脱敏" in Path(row.runtime["log_path"]).read_text()
         with sessions.begin() as db:
-            db.get(EngineInstance, "local").active_execution_id = "active"
+            instance = db.get(EngineInstance, "local")
+            instance.active_execution_id = "active"
+            instance.heartbeat_at -= timedelta(minutes=1)
+        assert not runtime_ready(sessions, configs)
+        manager.tick(configs)
+        assert runtime_ready(sessions, configs)
         administrative_action(sessions, "drain", "local", 1, None)
         manager.tick(configs)
         with sessions.begin() as db:
             row = db.get(EngineInstance, "local")
             assert not row.accepting and row.runtime["process_alive"]
         assert stop_generation(sessions, "local", 1)
+        assert not runtime_ready(sessions, configs)
         assert process_identity(descendant) != identity
         manager.tick(configs)
         with sessions.begin() as db:

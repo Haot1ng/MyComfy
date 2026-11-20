@@ -6,12 +6,14 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import httpx
@@ -78,27 +80,43 @@ def ended(runtime, generation):
 
 def stop_generation(sessions, instance_id, generation, timeout=12):
     """关闭指定代次的接单，等待整棵进程树退出，保留原有槽位供 Worker 核对。"""
+    targets = select(EngineInstance).where(
+        EngineInstance.id == instance_id, EngineInstance.generation == generation
+    )
+    return _stop_generations(sessions, targets, timeout)
+
+
+def _stop_generations(sessions, targets, timeout=12):
+    """通知选定代次的监护程序停止，在同一个等待窗口内核验各自的退出凭据。"""
+    pending = {}
     with sessions.begin() as db:
-        row = db.get(EngineInstance, instance_id, with_for_update=True)
-        if not row or row.generation != generation or not row.runtime.get("run_dir"):
-            return False
-        row.accepting = False
-        row.runtime = {**row.runtime, "stop_requested": True}
-        runtime = dict(row.runtime)
-    # 文件只对该代次的监护程序生效；不会因操作系统重新分配 PID 而停止其他进程。
-    directory = Path(runtime["run_dir"])
-    if directory.exists():
-        (directory / "stop").touch(exist_ok=True)
+        for row in db.scalars(targets.with_for_update()):
+            if row.runtime.get("run_dir"):
+                row.accepting = False
+                row.runtime = {**row.runtime, "stop_requested": True}
+                pending[(row.id, row.generation)] = row.runtime
+    if not pending:
+        return False
+    # 各代次先收到自己的停止文件，避免多个 GPU 的退出时间串行累加。
+    for runtime in pending.values():
+        directory = Path(runtime["run_dir"])
+        if directory.exists():
+            (directory / "stop").touch(exist_ok=True)
     deadline = time.monotonic() + timeout
-    while not ended(runtime, generation) and time.monotonic() < deadline:
+    while True:
+        pending = {key: state for key, state in pending.items() if not ended(state, key[1])}
+        if not pending:
+            return True
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.1)
-    if ended(runtime, generation):
-        return True
+    # 保留尚未证实已退出的执行和槽位，交给后续恢复与人工核对。
     with sessions.begin() as db:
-        row = db.get(EngineInstance, instance_id, with_for_update=True)
-        if row and row.generation == generation:
-            row.quarantine_reason = "PROCESS_TREE_EXIT_UNCONFIRMED"
-            row.accepting = False
+        for instance_id, generation in pending:
+            row = db.get(EngineInstance, instance_id, with_for_update=True)
+            if row and row.generation == generation:
+                row.quarantine_reason = "PROCESS_TREE_EXIT_UNCONFIRMED"
+                row.accepting = False
     return False
 
 
@@ -121,6 +139,49 @@ def owns_port(pid, port):
     return False
 
 
+def probe_generation(runtime):
+    """核对实际监护进程、该树持有的端口与引擎健康响应，供运行管理和就绪探测共用。"""
+    identity = read_json(Path(runtime["run_dir"]) / "identity.json")
+    alive = bool(identity and process_identity(identity["pid"]) == identity)
+    reachable = False
+    port = int(runtime["base_url"].rsplit(":", 1)[-1])
+    if alive and owns_port(identity["pid"], port):
+        # 只访问通过进程树所有权核对的端口，避免把占用旧端口的其他服务当作新代次。
+        try:
+            with httpx.Client(trust_env=False, timeout=1) as client:
+                response = client.get(runtime["base_url"] + "/system_stats")
+                reachable = response.is_success and isinstance(response.json(), dict)
+        except (httpx.HTTPError, ValueError):
+            pass
+    return identity, alive, reachable
+
+
+def runtime_ready(sessions, configs):
+    """至少一个当前配置的代次有新鲜心跳且实际可访问时就绪，包括仍在生成的代次。"""
+    with sessions() as db:
+        now = db_now(db)
+        rows = db.scalars(
+            select(EngineInstance).where(
+                EngineInstance.configured,
+                EngineInstance.accepting,
+                EngineInstance.quarantine_reason.is_(None),
+            )
+        ).all()
+    for row in rows:
+        config = configs.get(row.id)
+        state = row.runtime
+        if (
+            config
+            and config_hash(config) == state.get("config_hash")
+            and row.heartbeat_at
+            and row.heartbeat_at >= now - timedelta(seconds=state.get("stale_seconds", 20))
+            and not ended(state, row.generation)
+            and probe_generation(state)[2]
+        ):
+            return True
+    return False
+
+
 def sample_gpu(gpu, previous):
     """采样 GPU 显存及使用率，保留本代次峰值和采样时间。"""
     try:
@@ -137,15 +198,24 @@ def sample_gpu(gpu, previous):
             stderr=subprocess.DEVNULL,
         )
         index, name, used, total, load = [p.strip() for p in query.strip().split(",")]
-        return {
+        sample = {
             "sampled_at": datetime.now(UTC).isoformat(),
             "gpu_index": index,
             "gpu_name": name,
-            "gpu_memory_used_mib": int(used),
-            "gpu_memory_total_mib": int(total),
-            "gpu_utilization_percent": int(load),
-            "gpu_memory_peak_mib": max(int(used), previous.get("gpu_memory_peak_mib", 0)),
         }
+        # WSL 等驱动可能只为部分指标返回数字，其余列显示 [N/A]。
+        for key, value in (
+            ("gpu_memory_used_mib", used),
+            ("gpu_memory_total_mib", total),
+            ("gpu_utilization_percent", load),
+        ):
+            if value.isdecimal():
+                sample[key] = int(value)
+        if used.isdecimal() or "gpu_memory_peak_mib" in previous:
+            sample["gpu_memory_peak_mib"] = max(
+                sample.get("gpu_memory_used_mib", 0), previous.get("gpu_memory_peak_mib", 0)
+            )
+        return sample
     except (OSError, subprocess.SubprocessError, ValueError):
         return previous
 
@@ -319,17 +389,7 @@ class Manager:
                 not config or paused or config_hash(config) != state["config_hash"]
             ) and not snapshot.active_execution_id:
                 stop_generation(self.sessions, snapshot.id, generation)
-            identity = read_json(directory / "identity.json")
-            alive = bool(identity and process_identity(identity["pid"]) == identity)
-            reachable = False
-            port = int(state["base_url"].rsplit(":", 1)[-1])
-            if alive and owns_port(identity["pid"], port):
-                try:
-                    with httpx.Client(trust_env=False, timeout=1) as client:
-                        response = client.get(state["base_url"] + "/system_stats")
-                        reachable = response.is_success and isinstance(response.json(), dict)
-                except (httpx.HTTPError, ValueError):
-                    pass
+            identity, alive, reachable = probe_generation(state)
         metrics = state.get("metrics", {})
         if config and time.time() - state.get("metrics_checked", 0) >= 15:
             metrics = sample_gpu(config.gpu, metrics)
@@ -409,11 +469,16 @@ def administrative_action(sessions, name, instance_id, generation, reason):
 def main(argv=None):
     """从命令行运行监护循环，或对实例执行具备代次校验的管理操作。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["serve", "apply", "drain", "resume", "resolve"])
+    parser.add_argument("action", choices=["serve", "ready", "apply", "drain", "resume", "resolve"])
     parser.add_argument("--instance")
     parser.add_argument("--generation", type=int)
     parser.add_argument("--reason")
+    parser.add_argument(
+        "--stop-engines-on-exit", action="store_true", help="容器停机时等待受管引擎进程树退出"
+    )
     args = parser.parse_args(argv)
+    if args.stop_engines_on_exit and args.action != "serve":
+        parser.error("--stop-engines-on-exit 仅用于 serve")
     settings = Settings.from_env()
     require_current_schema(settings.database_url)
     sessions = make_sessions(settings.database_url)
@@ -424,6 +489,11 @@ def main(argv=None):
         return
     if settings.engine_config is None:
         parser.error("需要 MYCOMFY_ENGINE_CONFIG")
+    if args.action == "ready":
+        # 探测单独运行，不会和正在管理引擎的进程竞争 runtime.lock。
+        if not runtime_ready(sessions, load_config(settings.engine_config)):
+            raise SystemExit(1)
+        return
     settings.data_root.mkdir(parents=True, exist_ok=True)
     with (settings.data_root / "runtime.lock").open("a") as guard:
         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -431,13 +501,32 @@ def main(argv=None):
         if args.action == "apply":
             manager.configure(load_config(settings.engine_config))
             return
-        while True:
+        stopping = Event()
+
+        def request_stop(signum, frame):
+            """通知管理循环结束本轮检查并关闭受管代次。"""
+            stopping.set()
+
+        handlers = {}
+        if args.stop_engines_on_exit:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                handlers[sig] = signal.signal(sig, request_stop)
+        try:
+            while not stopping.is_set():
+                try:
+                    manager.tick(load_config(settings.engine_config))
+                except (SQLAlchemyError, OSError, ValueError) as exc:
+                    # 数据库或配置临时不可用时保留全部身份记录。下一轮从持久事实接管。
+                    logging.getLogger(__name__).error("运行管理等待重试 %s", type(exc).__name__)
+                stopping.wait(2)
+        finally:
             try:
-                manager.tick(load_config(settings.engine_config))
-            except (SQLAlchemyError, OSError, ValueError) as exc:
-                # 数据库或配置临时不可用时保留全部身份记录。下一轮从持久事实接管。
-                logging.getLogger(__name__).error("运行管理等待重试 %s", type(exc).__name__)
-            time.sleep(2)
+                if args.stop_engines_on_exit:
+                    # 容器主进程退出将终止 PID 命名空间，先让监护程序记录真正的退出凭据。
+                    _stop_generations(sessions, select(EngineInstance))
+            finally:
+                for sig, handler in handlers.items():
+                    signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

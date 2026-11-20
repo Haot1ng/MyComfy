@@ -15,4 +15,23 @@
 
 仅在单机回环开发时，可设置 `MYCOMFY_PUBLIC_ORIGIN=http://127.0.0.1:8000` 与 `MYCOMFY_COOKIE_SECURE=false` 后运行 API，并从同一地址打开网页。生产部署使用同源 HTTPS 和 Secure Cookie。实际生成还需已发布且有兼容部署的策略、运行中的 Worker 与 ComfyUI。[引擎部署](../../docs/engine-deployment.md)
 
-会话与 SSE 拥有独立的回归测试，使用 Node.js 24 可运行 `node --test tests/web/session.test.mjs`。
+## 按分组显示页面与按钮
+
+登录或密码轮换成功后，工作台用 `GET /api/v1/me` 读取页签对应的会话与权限。响应中的 `groups` 是用户所属分组，`permissions` 是这些分组授权的并集。路由和导航用同一规则检查页面，操作按钮分别检查对应权限。[工作台入口](app.js) · [权限模块](access.mjs)
+
+| 页面或操作 | 权限 |
+| --- | --- |
+| 生成页面 `generate` | `strategies.view` |
+| 任务页面 `jobs` | `jobs.view` |
+| 通知页面 `notifications` | `notifications.view` |
+| 提交任务 | `jobs.submit` |
+| 取消任务 | `jobs.cancel` |
+| 上传素材 | `assets.upload` |
+| 预览或下载文件 | `assets.download` |
+| 标记通知已读 | `notifications.mark_read` |
+
+页签重新获得焦点、收到 `403 PERMISSION_DENIED` 或收到任务事件流的 `permissions.changed` 时，工作台重新读取权限并更新页面。退出登录或会话失效时清除私有页面。所有业务请求由后端再次核验当前权限。
+
+```bash
+node --test tests/web/session.test.mjs web/client/access.test.mjs
+```

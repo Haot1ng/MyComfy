@@ -11,6 +11,7 @@ dependencies = [
     "jsonschema>=4.23,<5",
     "pymysql[rsa]>=1.1,<2",
     "python-multipart>=0.0.22,<1",
+    "redis>=6.2,<8",
     "referencing>=0.36,<1",
     "sqlalchemy>=2.0.39,<2.1",
     "uvicorn>=0.34,<1",

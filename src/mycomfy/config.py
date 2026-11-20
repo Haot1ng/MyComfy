@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -18,6 +18,8 @@ class Settings:
     poll_seconds: float = 1.0
     sse_heartbeat_seconds: float = 15.0
     sse_send_timeout_seconds: float = 10.0
+    redis_url: str | None = field(default=None, repr=False)
+    session_cache_ttl_seconds: int = 60
 
     def __post_init__(self):
         """检查容量、调度周期和会话时长等必需为正数的配置。"""
@@ -30,6 +32,7 @@ class Settings:
                 self.poll_seconds,
                 self.sse_heartbeat_seconds,
                 self.sse_send_timeout_seconds,
+                self.session_cache_ttl_seconds,
             )
             <= 0
         ):
@@ -61,5 +64,9 @@ class Settings:
             sse_heartbeat_seconds=float(os.environ.get("MYCOMFY_SSE_HEARTBEAT_SECONDS", "15")),
             sse_send_timeout_seconds=float(
                 os.environ.get("MYCOMFY_SSE_SEND_TIMEOUT_SECONDS", "10")
+            ),
+            redis_url=os.environ.get("MYCOMFY_REDIS_URL") or None,
+            session_cache_ttl_seconds=int(
+                os.environ.get("MYCOMFY_SESSION_CACHE_TTL_SECONDS", "60")
             ),
         )

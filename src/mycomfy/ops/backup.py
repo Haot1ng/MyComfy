@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from sqlalchemy import DateTime, MetaData, func, inspect, select, text
 
+from mycomfy.api.permissions import DEFAULT_GROUP_KEY, Permission
 from mycomfy.database.session import make_sessions
 
 
@@ -302,6 +303,30 @@ def restore_row(table, record, mapping):
     return record
 
 
+def _clear_restore_seeds(conn, tables):
+    """确认目标只含迁移种子数据，再清除种子让备份还原完整的授权设置。"""
+    defaults = {
+        "user_groups": {(DEFAULT_GROUP_KEY, "标准用户")},
+        "user_group_permissions": {(DEFAULT_GROUP_KEY, code) for code in Permission},
+    }
+    seeds = []
+    for table in tables:
+        if table.name in defaults:
+            rows = set(conn.execute(select(table)).tuples())
+            if rows and rows != defaults[table.name]:
+                raise ValueError("Restore database already contains application data")
+            seeds.append(table)
+            continue
+        exists = select(func.count()).select_from(table)
+        if table.name == "capacity_gates":
+            exists = exists.where(table.c.id != "admission")
+        if conn.scalar(exists):
+            raise ValueError("Restore database already contains application data")
+    # 权限依赖组，清理时按依赖逆序。后续恢复失败时同一事务会还原种子。
+    for table in reversed(seeds):
+        conn.execute(table.delete())
+
+
 def restore_backup(engine, directory, dest):
     """完整核验后在新的文件目录和已迁移的空业务库恢复，任一步失败则回滚。"""
     root = Path(directory).resolve(strict=True)
@@ -327,12 +352,7 @@ def restore_backup(engine, directory, dest):
             metadata = MetaData()
             metadata.reflect(conn)
             tables = [t for t in metadata.sorted_tables if t.name != "alembic_version"]
-            for table in tables:
-                exists = select(func.count()).select_from(table)
-                if table.name == "capacity_gates":
-                    exists = exists.where(table.c.id != "admission")
-                if conn.scalar(exists):
-                    raise ValueError("Restore database already contains application data")
+            _clear_restore_seeds(conn, tables)
             # 在提交数据库前先恢复文件，派生的运行时路径仅指向该隔离副本。
             for label in manifest["roots"]:
                 shutil.copytree(safe_child(root, f"roots/{label}"), safe_child(dest, label))

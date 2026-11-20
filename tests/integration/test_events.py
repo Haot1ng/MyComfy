@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select
+from sqlalchemy import delete, event, func, select
 
 from mycomfy.api.auth import COOKIE, digest
 from mycomfy.api.events import (
@@ -24,6 +24,7 @@ from mycomfy.api.events import (
     stream_cursor,
     user_stream,
 )
+from mycomfy.api.permissions import DEFAULT_GROUP_KEY, Permission
 from mycomfy.database.models import (
     Base,
     Batch,
@@ -34,6 +35,9 @@ from mycomfy.database.models import (
     StrategyVersion,
     User,
     UserEvent,
+    UserGroup,
+    UserGroupMember,
+    UserGroupPermission,
     UserSequence,
     UserSession,
 )
@@ -48,6 +52,13 @@ def sessions(tmp_path):
     factory = make_sessions(f"sqlite:///{tmp_path / 'events.sqlite'}")
     engine = factory.kw["bind"]
     Base.metadata.create_all(engine)
+    with factory.begin() as db:
+        db.add(UserGroup(key=DEFAULT_GROUP_KEY, name="标准用户"))
+        db.flush()
+        db.add_all(
+            UserGroupPermission(group_key=DEFAULT_GROUP_KEY, permission=permission)
+            for permission in Permission
+        )
     yield factory
     engine.dispose()
 
@@ -87,6 +98,7 @@ def seed(sessions):
         db.flush()
         db.add_all(
             [
+                UserGroupMember(user_id=user_id, group_key=DEFAULT_GROUP_KEY),
                 UserSequence(user_id=user_id, latest=0),
                 UserSession(
                     id=session_id,
@@ -222,6 +234,25 @@ def test_resync_for_invalid_cursor(value):
         stream_cursor(None, value, 2)
     assert exc.value.status == 400 and exc.value.code == "RESYNC_REQUIRED"
     assert stream_cursor("1", value, 2) == 1
+
+
+def test_event_stream_closes_when_group_permission_is_removed(sessions, settings):
+    """撤掉任务查看权限后，已建立的事件连接发送权限变化并退出。"""
+    ids = seed(sessions)
+    assert dispatch_one(sessions)
+
+    async def observe():
+        """观察权限撤销前后的事件流，并核对结束状态。"""
+        async with asyncio.timeout(3):
+            stream = user_stream(sessions, settings, ids.user_id, ids.session_id, 0)
+            assert (await anext(stream)).startswith("id: 1\n")
+            with sessions.begin() as db:
+                db.execute(delete(UserGroupMember).where(UserGroupMember.user_id == ids.user_id))
+            assert await anext(stream) == "event: permissions.changed\ndata: {}\n\n"
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+
+    asyncio.run(observe())
 
 
 def test_notification_api_and_session_generation(sessions, settings):

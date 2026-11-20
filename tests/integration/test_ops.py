@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import create_engine, select, text
 from starlette.requests import Request
 
+from mycomfy.api.permissions import Permission, access_profile
 from mycomfy.artifacts.publication import publish_pending, reconcile_asset
 from mycomfy.artifacts.storage import LocalStore
 from mycomfy.config import Settings
@@ -25,6 +26,9 @@ from mycomfy.database.models import (
     StrategySeries,
     StrategyVersion,
     User,
+    UserGroup,
+    UserGroupMember,
+    UserGroupPermission,
 )
 from mycomfy.database.schema import migrate
 from mycomfy.database.session import make_sessions
@@ -330,6 +334,14 @@ def test_backup_isolated_restore_and_corruption(mysql_sessions, restore_sessions
     credentials.chmod(0o600)
     with mysql_sessions.begin() as db:
         seed_backup(db, data, protected)
+        db.add(UserGroup(key="viewer", name="浏览组"))
+        db.flush()
+        db.add_all(
+            [
+                UserGroupMember(user_id="u", group_key="viewer"),
+                UserGroupPermission(group_key="viewer", permission=Permission.VIEW_JOBS),
+            ]
+        )
     source = mysql_sessions.kw["bind"]
     target = restore_sessions.kw["bind"]
     backup, recovered = tmp_path / "backup", tmp_path / "recovered"
@@ -339,6 +351,10 @@ def test_backup_isolated_restore_and_corruption(mysql_sessions, restore_sessions
     assert (recovered / "data" / "maintenance.key").stat().st_mode & 0o777 == 0o600
     with restore_sessions() as db:
         assert db.get(User, "u").username == "one"
+        assert access_profile(db, "u") == {
+            "groups": [{"key": "viewer", "name": "浏览组"}],
+            "permissions": ["jobs.view"],
+        }
         assert set(db.scalars(select(Job.state))) == {
             "SUCCEEDED",
             "CANCELLED",

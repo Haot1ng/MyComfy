@@ -1,11 +1,14 @@
 {
+  "single_host": false,
   "mysql": {
+    "host": "127.0.0.1",
     "user": "mycomfy",
-    "password": ""
+    "password": "123456"
   },
   "redis": {
+    "host": "127.0.0.1",
     "user": "mycomfy_cache",
-    "password": ""
+    "password": "123456"
   },
   "paths": {
     "data": "var/data",
@@ -18,19 +21,49 @@
     "api": 8000,
     "admin": 8001
   },
+  "public": {
+    "host": "127.0.0.1",
+    "origin": "http://127.0.0.1:8000"
+  },
   "engine": {
     "comfyui": {
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "version": "v0.3.59"
+      "version": "v0.33.0"
     },
     "pytorch": {
-      "index_url": "https://download.pytorch.org/whl/cu126",
-      "torch": "2.7.1+cu126",
-      "torchvision": "0.22.1+cu126",
-      "torchaudio": "2.7.1+cu126"
+      "index_url": "https://download.pytorch.org/whl/cu130",
+      "torch": "2.11.0+cu130",
+      "torchvision": "0.26.0+cu130",
+      "torchaudio": "2.11.0+cu130"
     },
     "nodes": {},
-    "models": {},
+    "models": {
+      "h3-fl2va": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "path": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a"
+      },
+      "h3-text": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+      },
+      "h3-video-vae": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+        "path": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+        "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+      },
+      "h3-audio-vae": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/vae/minimax_h3_audio_vae_fp32.safetensors",
+        "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+      },
+      "h3-turbo-8step": {
+        "source": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "path": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "sha256": "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
+      }
+    },
     "instances": [
       {
         "id": "gpu0",

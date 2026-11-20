@@ -1,8 +1,10 @@
 # Linux 或 Docker Desktop WSL 2。core 的本机管理端口使用 host 网络；
 # engine 和 worker 使用同一个私有容器网络命名空间，ComfyUI 仅绑定该空间内的回环地址。
 x-app-environment: &app-environment
-  MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@127.0.0.1:${MYCOMFY_MYSQL_PORT:-3306}/mycomfy}"
+  MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:-}@${MYCOMFY_MYSQL_HOST:-127.0.0.1}:${MYCOMFY_MYSQL_PORT:-3306}/mycomfy}"
   MYCOMFY_DATA_ROOT: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}"
+  # 各机保存相同的工作台地址。仅业务端绑定监听端口，Worker 通过 MySQL 领任务。
+  MYCOMFY_PUBLIC_ORIGIN: "${MYCOMFY_PUBLIC_ORIGIN:-http://127.0.0.1:${MYCOMFY_API_PORT:-8000}}"
 
 # 保留宿主绝对路径，发布器与运行管理可以重读数据库中记录的文件位置。
 x-data-mount: &data-mount
@@ -15,11 +17,14 @@ x-data-mount: &data-mount
 services:
   mysql:
     image: mysql:8.4
+    profiles: [database]
     restart: unless-stopped
     command:
       - sh
       - -ec
       - |
+        # 密码只在启动自带 MySQL 时要求，外部数据库可以使用独立的连接串。
+        : "$${MYSQL_PASSWORD:?set MYSQL_PASSWORD before starting mysql}"
         # 官方镜像以专用变量设置 root 的密码；普通账号由 MYSQL_USER 创建。
         if [ "$$MYSQL_USER" = root ]; then
           export MYSQL_ROOT_PASSWORD="$$MYSQL_PASSWORD"
@@ -29,10 +34,12 @@ services:
     environment:
       MYSQL_DATABASE: mycomfy
       MYSQL_USER: "${MYSQL_USER:-mycomfy}"
-      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-}"
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
     ports:
-      - "127.0.0.1:${MYCOMFY_MYSQL_PORT:-3306}:3306"
+      - target: 3306
+        published: "${MYCOMFY_MYSQL_PORT:-3306}"
+        host_ip: "${MYCOMFY_MYSQL_BIND_HOST:-127.0.0.1}"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -44,12 +51,14 @@ services:
 
   redis:
     image: redis:7-alpine
+    profiles: [database]
     restart: unless-stopped
     # 用密码摘要配置所选 ACL 用户。使用自定义用户时，关闭内置 default 账号。
     command:
       - sh
       - -ec
       - |
+        : "$${REDISCLI_AUTH:?set REDIS_PASSWORD before starting redis}"
         digest="$$(printf '%s' "$$REDISCLI_AUTH" | sha256sum)"
         set -- --user "$$REDIS_USER" reset on "#$${digest%% *}" '~*' '&*' '+@all'
         if [ "$$REDIS_USER" != default ]; then
@@ -58,9 +67,11 @@ services:
         exec docker-entrypoint.sh redis-server "$$@" --save '' --appendonly no
     environment:
       REDIS_USER: "${REDIS_USER:-default}"
-      REDISCLI_AUTH: "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"
+      REDISCLI_AUTH: "${REDIS_PASSWORD:-}"
     ports:
-      - "127.0.0.1:${MYCOMFY_REDIS_PORT:-6379}:6379"
+      - target: 6379
+        published: "${MYCOMFY_REDIS_PORT:-6379}"
+        host_ip: "${MYCOMFY_REDIS_BIND_HOST:-127.0.0.1}"
     healthcheck:
       test: ["CMD-SHELL", 'redis-cli --user "$$REDIS_USER" ping | grep -qx PONG']
       interval: 10s
@@ -74,9 +85,6 @@ services:
     command: ["migrate"]
     network_mode: host
     environment: *app-environment
-    depends_on:
-      mysql:
-        condition: service_healthy
     restart: "no"
 
   core:
@@ -91,9 +99,8 @@ services:
     command: ["api", "--host", "${MYCOMFY_API_HOST:-127.0.0.1}", "--port", "${MYCOMFY_API_PORT:-8000}", "--local-port", "${MYCOMFY_LOCAL_PORT:-8001}"]
     environment:
       <<: *app-environment
-      MYCOMFY_PUBLIC_ORIGIN: "${MYCOMFY_PUBLIC_ORIGIN:-http://127.0.0.1:${MYCOMFY_API_PORT:-8000}}"
       MYCOMFY_COOKIE_SECURE: "${MYCOMFY_COOKIE_SECURE:-false}"
-      MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://${REDIS_USER:-default}:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:${MYCOMFY_REDIS_PORT:-6379}/0}"
+      MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://${REDIS_USER:-default}:${REDIS_PASSWORD:-}@${MYCOMFY_REDIS_HOST:-127.0.0.1}:${MYCOMFY_REDIS_PORT:-6379}/0}"
       MYCOMFY_MAINTENANCE_TOKEN_FILE: /run/mycomfy/maintenance-token
     volumes:
       - *data-mount
@@ -104,8 +111,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
-        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', ${MYCOMFY_LOCAL_PORT:-8001}), 2).close()"]
       interval: 10s
@@ -124,7 +129,7 @@ services:
     user: "${MYCOMFY_UID:-10001}:${MYCOMFY_GID:-10001}"
     environment:
       <<: *app-environment
-      MYCOMFY_DATABASE_URL: &engine-db "${MYCOMFY_ENGINE_DATABASE_URL:-${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/mycomfy}}"
+      MYCOMFY_DATABASE_URL: &engine-db "${MYCOMFY_ENGINE_DATABASE_URL:-${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:-}@${MYCOMFY_ENGINE_MYSQL_HOST:-${MYCOMFY_MYSQL_HOST:-mysql}}:${MYCOMFY_ENGINE_MYSQL_PORT:-3306}/mycomfy}}"
       # deploy 将检出、venv、模型与每个代次的工作目录写在同一个持久根目录。
       MYCOMFY_ENGINE_CONFIG: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}/engines/engines.json"
       HOME: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}/engines"

@@ -17,7 +17,7 @@ MyComfy/
 │   ├── client/                   C 端网页
 │   └── admin/                    本机管理网页
 ├── migrations/                   Alembic 数据库版本
-├── scripts/                      测试与验收命令
+├── scripts/                      一键部署、测试与验收命令
 ├── tests/{unit,integration,e2e}/  单元、集成和端到端测试
 └── docs/                         部署、运维与验收
 ```
@@ -52,34 +52,27 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 
 ### 全栈 Docker Compose（Linux / Windows WSL 2）
 
-在有 NVIDIA 显卡的 Docker 主机运行这一套 Compose。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 使用支持 WSL 的 NVIDIA 驱动、WSL 2 后端与 Docker Desktop 4.34 或更新版本，在 **Settings → Resources → Network** 启用 **Enable host networking**，用于访问 core 的本机管理端口。使用 Docker Compose 2.30.0 或更新版本。Windows 下请在 WSL 发行版的 Linux 文件系统（如 `~/MyComfy`）中检出项目、保存数据并执行以下 Bash 命令。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop) · [Linux Toolkit 安装](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+使用 Docker Compose 2.30.0 或更新版本。宿主机上的部署脚本使用 Python 3 标准库和 OpenSSL。Windows 下请在 WSL 发行版的 Linux 文件系统（如 `~/MyComfy`）中检出项目。在 Docker Desktop 4.34 或更新版本中启用 WSL 2 后端及 **Settings → Resources → Network → Enable host networking**，以访问本机管理端口。完整部署还需容器能使用 NVIDIA 显卡。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit，Windows 使用支持 WSL 的 NVIDIA 驱动。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop) · [Linux Toolkit 安装](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+**先体验前端和 API**，在项目根目录运行以下命令。脚本启动 MySQL、Redis，完成数据库迁移后启动 `core`。默认工作台为 `http://127.0.0.1:8000/`，本机监控为 `http://127.0.0.1:8001/`。
 
 ```bash
-umask 077
-mkdir -p var/config var/data var/deployment
-test -s var/config/maintenance-token || openssl rand -hex 32 > var/config/maintenance-token
-sh scripts/init-env.sh
+python3 scripts/deploy.py --core-only
 ```
 
-用日常运行 Docker 的 Linux 或 WSL 用户执行初始化脚本。脚本首次生成 `.env` 时会自动写入该用户的 UID 和 GID，再次运行会沿用现有文件。要让容器使用指定账号，可以在 `.env` 中修改 `MYCOMFY_UID` 和 `MYCOMFY_GID`。
+**在 GPU 机部署全栈**，先把实际工作流的 `deployment.json`、带哈希的 GPU 依赖锁和清单引用的本地模型放入 `var/deployment/`。脚本在挂载 GPU 的 `engine` 容器内检出 ComfyUI 和节点、安装依赖、校验模型并检测 CUDA。配置写入数据目录的 `engines/engines.json` 后，Compose 启动服务并等待就绪。可以先部署业务端，随后用同一套配置补上引擎和 Worker。[引擎清单示例](docs/engine-deployment.md#安装清单)
 
-编辑生成的 `.env`。模板预填 MySQL 用户 `mycomfy` 和 Redis 用户 `default`，可用 `MYSQL_USER` 和 `REDIS_USER` 修改。分别运行一次 `openssl rand -hex 32`，将结果填入 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`。保存后用 `docker compose config --quiet` 检查。只启动网页和 API 时，运行 `docker compose up -d --build --wait core` 即可。[.env 填写模板](.env.example)
+```bash
+python3 scripts/deploy.py
+```
+
+用日常运行 Docker 的 Linux 或 WSL 用户执行命令。首次运行会创建 `.env`、独立的 MySQL 和 Redis 随机密码、宿主用户 UID/GID、数据目录及本机维护令牌。再次运行会使用已有凭据和持久卷。数据库密码通过环境变量提供时，后续部署也需要提供相同变量。若在 `.env` 指定其他容器 UID，请确保该用户可以写入数据目录并读取权限为 `0600` 的维护令牌。[部署脚本](scripts/deploy.py)
+
+如需自行指定账号密码，请在首次部署前运行 `sh scripts/init-env.sh`，编辑生成的 `.env`。模板预填 MySQL 用户 `mycomfy` 和 Redis 用户 `default`，可用 `MYSQL_USER` 和 `REDIS_USER` 修改。将密码填入 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，保存后用 `docker compose config --quiet` 检查。[.env 填写模板](.env.example)
 
 新建数据卷时，MySQL 会初始化所填账号。沿用旧数据卷时请填写库内已有的账号和密码，变更账号或密码需要同步更新 MySQL。Redis 会在容器启动时配置所选账号。旧版 `.env` 可以继续使用原密码，省略用户名时沿用 `mycomfy` 和 `default`。
 
 默认连接串支持直接填写由字母、数字和 `-._~` 组成的凭据。沿用含 URL 保留字符的凭据时，在密码变量里填原值，另用 `MYCOMFY_DATABASE_URL`（业务端和迁移）、`MYCOMFY_ENGINE_DATABASE_URL`（引擎和 Worker）或 `MYCOMFY_REDIS_URL` 指定对应连接串，将用户名和密码部分按 URL 规则编码。`.env` 中包含字面量 `$` 的密码用单引号包住。
-
-部署 GPU 服务时，先运行 `docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L` 确认容器能看到显卡。
-
-把目标工作流的 `deployment.json`、带哈希的 GPU 依赖锁及清单引用的本地模型放入 `var/deployment/`。首次启动前在 engine 容器内安装 ComfyUI、节点及 CUDA 版 PyTorch。安装成功会在数据目录的 `engines/` 下生成 `engines.json`，并保留模型和 Python 环境，供后续重启复用。[部署清单示例](docs/engine-deployment.md#安装清单)
-
-```bash
-# 在容器中按配置的绝对路径写入部署结果。
-docker compose run --rm --no-deps --build --entrypoint sh engine -ec \
-  'exec python -m mycomfy.cli deploy /deployment/deployment.json --root "$MYCOMFY_DATA_ROOT/engines"'
-docker compose up -d --build --wait
-docker compose ps
-```
 
 | 服务 | 容器职责 |
 | --- | --- |
@@ -90,7 +83,7 @@ docker compose ps
 
 日常启动用 `docker compose up -d --wait`。在计划停机或更换锁文件前，先排空任务，再停止服务。单独启动业务端可用 `docker compose up -d --build --wait core`。[Dockerfile](Dockerfile) · [compose.yaml](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
 
-若业务端与 GPU 分机，engine 和 worker 仍需在同一台 GPU 机。业务机先启动 core 和数据库并完成迁移。两端以相同绝对路径挂载支持文件锁和原子重命名的同一份数据，并核对共享卷的设备编号及容量预留。GPU 机使用自己的本地 `.env`，将 `MYCOMFY_ENGINE_DATABASE_URL` 指向容器网络可达的同一业务库，按上述步骤部署引擎，再运行 `docker compose up -d --no-deps --build --wait engine worker`。默认 MySQL 发布在业务机的回环地址，跨机数据库连接需配置私网通道。[容量核算](src/mycomfy/ops/capacity.py#L91)
+若业务端与 GPU 分机，engine 和 worker 仍需在同一台 GPU 机。业务机先启动 core 和数据库并完成迁移。两端以相同绝对路径挂载支持文件锁和原子重命名的同一份数据，并核对共享卷的设备编号及容量预留。GPU 机使用自己的本地 `.env`，将 `MYCOMFY_ENGINE_DATABASE_URL` 指向容器网络可达的同一业务库，运行 `docker compose run --rm --no-deps --build --entrypoint mycomfy-deploy-engine engine` 部署引擎，再运行 `docker compose up -d --no-deps --build --wait engine worker`。默认 MySQL 发布在业务机的回环地址，跨机数据库连接需配置私网通道。[容量核算](src/mycomfy/ops/capacity.py#L91)
 
 ### 从 Python 环境启动
 

@@ -1,9 +1,10 @@
 from collections import Counter
+from itertools import batched
 from typing import Annotated, Any
 
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import literal, select, union_all
 
 from mycomfy.database.models import (
     Asset,
@@ -18,7 +19,7 @@ from mycomfy.database.session import db_now, new_id, timestamp
 from mycomfy.errors import ApiError, not_found
 
 from .state import TERMINAL, advance, canonical_digest, emit
-from .strategy import asset_field_names, configured_for, json_pointer
+from .strategy import asset_field_names, configured_strategy_ids, json_pointer
 
 ClientKey = Annotated[str, Field(min_length=1, max_length=200)]
 
@@ -39,6 +40,56 @@ class BatchRequest(BaseModel):
 def asset_ids(value):
     """将标量和列表素材参数统一为可逐项校验的 ID 序列。"""
     return value if isinstance(value, list) else [value]
+
+
+def _lookup_batch_ids(db, model, requested_ids, *filters):
+    """按批读取满足条件的记录，返回以调用方传入的 ID 原文为键的映射。"""
+    records = {}
+    # 让数据库按主键列的排序规则匹配，并带回请求原文。分块限制单条语句的大小。
+    for chunk in batched(requested_ids, 250):
+        requested = union_all(
+            *(select(literal(key).label("request_id")) for key in chunk)
+        ).subquery()
+        rows = db.execute(
+            select(requested.c.request_id, model)
+            .select_from(model)
+            .join(requested, model.id == requested.c.request_id)
+            .where(*filters)
+        )
+        records.update((key, row) for key, row in rows)
+    return records
+
+
+def _prepare_task(task, strategy):
+    """合并策略默认参数和用户输入，找出本任务需要核验的素材字段。"""
+    if strategy is None:
+        return task, None, task.inputs, {}
+    properties = strategy.content["input_schema"].get("properties", {})
+    inputs = {
+        name: rule["default"]
+        for name, rule in properties.items()
+        if isinstance(rule, dict) and "default" in rule
+    }
+    # 用户提交的值覆盖默认值，预取与最终校验共用同一份有效参数。
+    inputs.update(task.inputs)
+    asset_inputs = {name: inputs[name] for name in asset_field_names(strategy) & inputs.keys()}
+    return task, strategy, inputs, asset_inputs
+
+
+def _readable_batch_assets(db, user_id, prepared_tasks, store):
+    """批量查出用户可用的输入素材，每个实际文件在本次请求内核验一次。"""
+    requested_ids = set()
+    for _, _, _, asset_inputs in prepared_tasks:
+        for value in asset_inputs.values():
+            requested_ids.update(key for key in asset_ids(value) if isinstance(key, str))
+    records = _lookup_batch_ids(
+        db, Asset, requested_ids, Asset.user_id == user_id, Asset.job_id.is_(None), Asset.available
+    )
+    # 同一行可能对应多个请求键。先按记录检查磁盘，再按请求键返回正式素材 ID。
+    readable = {
+        asset.id for asset in set(records.values()) if store.readable(asset.object_key, asset.size)
+    }
+    return {key: asset.id for key, asset in records.items() if asset.id in readable}
 
 
 def admit_batch(db, user, request, max_tasks, store, capacity=None):
@@ -62,9 +113,17 @@ def admit_batch(db, user, request, max_tasks, store, capacity=None):
     instances = db.scalars(
         select(EngineInstance).where(EngineInstance.configured).with_for_update(read=True)
     ).all()
+    # 在持有实例配置共享锁的事务内加载本批引用，后面的逐项检查只读这些结果。
+    version_ids = {task.strategy_version_id for task in request.tasks}
+    strategies = _lookup_batch_ids(db, StrategyVersion, version_ids)
+    compatible_ids = configured_strategy_ids(db, strategies.values(), instances)
+    prepared = [
+        _prepare_task(task, strategies.get(task.strategy_version_id)) for task in request.tasks
+    ]
+    readable_assets = _readable_batch_assets(db, user.id, prepared, store)
     errors = []
     validated = []
-    for index, task in enumerate(request.tasks):
+    for index, (task, strategy, inputs, asset_inputs) in enumerate(prepared):
 
         def issue(path, code, *, index=index, task=task):
             """记录当前任务的字段错误，同时保留批次索引和客户端任务键。"""
@@ -79,21 +138,14 @@ def admit_batch(db, user, request, max_tasks, store, capacity=None):
 
         if offsets[task.client_task_key] > 1:
             issue(("client_task_key",), "DUPLICATE")
-        strategy = db.get(StrategyVersion, task.strategy_version_id)
         if strategy is None:
             issue(("strategy_version_id",), "UNKNOWN_VERSION")
             continue
-        if not configured_for(db, strategy, instances):
+        if strategy.id not in compatible_ids:
             issue(("strategy_version_id",), "NO_COMPATIBLE_DEPLOYMENT")
 
         schema = strategy.content["input_schema"]
         properties = schema.get("properties", {})
-        inputs = {
-            name: rule["default"]
-            for name, rule in properties.items()
-            if isinstance(rule, dict) and "default" in rule
-        }
-        inputs.update(task.inputs)
         for name in task.inputs.keys() - properties.keys():
             issue(("inputs", name), "UNKNOWN_INPUT")
         for error in Draft202012Validator(schema).iter_errors(inputs):
@@ -109,21 +161,14 @@ def admit_batch(db, user, request, max_tasks, store, capacity=None):
             elif error.validator != "additionalProperties" or error.absolute_path:
                 issue(path, "SCHEMA_INVALID")
         references = set()
-        for name in asset_field_names(strategy) & inputs.keys():
-            ids = inputs[name]
+        for name, ids in asset_inputs.items():
             for offset, asset_id in enumerate(asset_ids(ids)):
-                asset = db.get(Asset, asset_id) if isinstance(asset_id, str) else None
-                if (
-                    asset is None
-                    or asset.user_id != user.id
-                    or asset.job_id is not None
-                    or not asset.available
-                    or not store.readable(asset.object_key, asset.size)
-                ):
+                stored_id = readable_assets.get(asset_id) if isinstance(asset_id, str) else None
+                if stored_id is None:
                     path = ("inputs", name, offset) if isinstance(ids, list) else ("inputs", name)
                     issue(path, "ASSET_UNAVAILABLE")
                 else:
-                    references.add(asset.id)
+                    references.add(stored_id)
         validated.append((index, task, strategy, inputs, references))
     # 所有任务先完成校验，任何一项失败都不会留下批次或任务。
     if errors:

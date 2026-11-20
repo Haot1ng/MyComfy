@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from deployment_config import read_config
+from deployment_config import legacy_single_host_environment, read_config
 
 
 def bind_source(service, target):
@@ -46,6 +46,9 @@ def main():
         "--config", type=Path, help="部署参数文件，默认使用仓库根目录的 deploy.config.json"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--single-host", action="store_true", help="在同一台 GPU 主机上部署内置数据库和全部应用"
+    )
     mode.add_argument("--db-only", action="store_true", help="只启动内置 MySQL 和 Redis 并等待就绪")
     mode.add_argument(
         "--core-only", action="store_true", help="连接现有数据库，执行迁移并启动网页和 API"
@@ -62,15 +65,17 @@ def main():
     process_env = {**os.environ, "PWD": str(repo)}
     compose = ["docker", "compose"]
     recipe = None
+    single_host = args.single_host
 
     if args.config or config_path.exists():
         # 配置文件提供 Compose 凭据，单独的引擎参数通过 stdin 传给安装器。
-        settings, recipe = read_config(
+        settings, recipe, single_host = read_config(
             config_path,
             repo,
             core_only=args.db_only or args.core_only or args.compose is not None,
             database_init=args.db_only,
             redis_optional=args.gpu_only or args.compose is not None,
+            single_host=single_host,
         )
         process_env.update(settings)
         compose += ["--env-file", os.devnull]
@@ -82,6 +87,9 @@ def main():
             cwd=repo,
             env=process_env,
         )
+    if single_host or args.db_only:
+        # 两阶段复用同一 Compose 项目和网络，后续运维也可用配置开关查看数据库。
+        compose += ["--profile", "database"]
 
     def run_compose(*arguments, **options):
         """让部署和日常 Compose 命令使用相同的工作目录和配置快照。"""
@@ -94,13 +102,21 @@ def main():
             parser.error("--compose 后需要命令，例如 ps")
         run_compose(*args.compose)
         return
-    if args.db_only:
-        # 数据服务可在独立主机启动，此模式不创建业务目录、不运行迁移。
-        run_compose("--profile", "database", "up", "-d", "--wait", "mysql", "redis")
+
+    def start_database():
+        """等待两个内置数据服务均健康，失败时终止本次部署。"""
+        run_compose("up", "-d", "--wait", "mysql", "redis")
         print("MySQL 和 Redis 已就绪。", flush=True)
+
+    if args.db_only:
+        start_database()
         return
     config = run_compose("config", "--format", "json", stdout=subprocess.PIPE).stdout
     services = json.loads(config)["services"]
+    deploy_local_stack = single_host and not (args.gpu_only or args.core_only)
+    if deploy_local_stack and recipe is None:
+        # 旧版 .env 也可切换到单机，连接串使用随附数据库的实际账号和发布端口。
+        process_env.update(legacy_single_host_environment(services))
     owner = services["engine" if args.gpu_only else "core"]
     data = bind_source(owner, owner["environment"]["MYCOMFY_DATA_ROOT"])
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -121,6 +137,9 @@ def main():
             )
         build += ["engine", "worker"]
         start += ["engine", "worker"]
+    if deploy_local_stack:
+        # 单机全栈在配置检查完成后启动数据层。显式角色仍只操作各自的服务。
+        start_database()
     run_compose("build", *build)
 
     # 在具备 GPU 和持久卷的临时 engine 容器中安装，失败时保留已有服务和数据。

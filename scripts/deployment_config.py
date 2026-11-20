@@ -84,6 +84,39 @@ def _endpoint(host, port):
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+def _connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, redis_endpoint):
+    """用已编码的凭据生成业务端、GPU 端和缓存连接串。"""
+    return {
+        "MYCOMFY_DATABASE_URL": f"mysql+pymysql://{mysql_auth}@{mysql_endpoint}/mycomfy",
+        "MYCOMFY_ENGINE_DATABASE_URL": f"mysql+pymysql://{mysql_auth}@{engine_endpoint}/mycomfy",
+        "MYCOMFY_REDIS_URL": f"redis://{redis_auth}@{redis_endpoint}/0" if redis_auth else "",
+    }
+
+
+def legacy_single_host_environment(services):
+    """从 Compose 已解析的旧版 .env 提取内置账号、密码和端口，为单机生成本地连接。"""
+
+    def authority(service, username, password):
+        """还原 Compose 输出中的字面量 $，用与 JSON 部署相同的规则校验并编码凭据。"""
+        values = services[service]["environment"]
+        credentials = {
+            "user": values[username].replace("$$", "$"),
+            "password": values[password].replace("$$", "$"),
+        }
+        return _credentials(credentials, service, database_init=True)[2]
+
+    # 宿主网络里的业务端使用发布端口，GPU 容器用 Compose 服务名直连 MySQL。
+    loopback = "127.0.0.1"
+    urls = _connection_urls(
+        authority("mysql", "MYSQL_USER", "MYSQL_PASSWORD"),
+        authority("redis", "REDIS_USER", "REDISCLI_AUTH"),
+        _endpoint(loopback, services["mysql"]["ports"][0]["published"]),
+        "mysql:3306",
+        _endpoint(loopback, services["redis"]["ports"][0]["published"]),
+    )
+    return {**urls, "MYCOMFY_MYSQL_BIND_HOST": loopback, "MYCOMFY_REDIS_BIND_HOST": loopback}
+
+
 def read_config(
     path: Path,
     repo: Path,
@@ -91,13 +124,21 @@ def read_config(
     core_only: bool,
     database_init: bool = False,
     redis_optional: bool = False,
-) -> tuple[dict[str, str], dict | None]:
-    """读取单一配置，解析路径、端口和业务凭据，返回 Compose 变量及独立的引擎配置。"""
+    single_host: bool = False,
+) -> tuple[dict[str, str], dict | None, bool]:
+    """读取一次 JSON，返回 Compose 变量、当前角色所需的引擎配置和生效的单机标记。"""
     config = _object(
         json.loads(path.read_text(encoding="utf-8-sig")),
         "部署配置",
-        {"mysql", "redis", "paths", "ports", "public", "engine"},
+        {"single_host", "mysql", "redis", "paths", "ports", "public", "engine"},
     )
+    configured_single_host = config.get("single_host", False)
+    if not isinstance(configured_single_host, bool):
+        raise ValueError("single_host 需要填写 JSON 布尔值 true 或 false")  # noqa: TRY004
+    single_host = single_host or configured_single_host
+    # 单机全栈会创建内置库。按角色执行的命令仍只校验其所需的凭据与引擎参数。
+    if single_host and not core_only and not redis_optional:
+        database_init = True
     service_fields = {"user", "password", "host", "bind_host"}
     mysql = _object(config.get("mysql"), "mysql", service_fields | {"engine_host", "engine_port"})
     redis = _object(config.get("redis", {}), "redis", service_fields)
@@ -123,20 +164,25 @@ def read_config(
     for name, port in ports.items():
         _port(port, f"ports.{name}")
 
-    mysql_host, local_mysql = _host(mysql.get("host", "127.0.0.1"), "mysql.host")
-    redis_host, _ = _host(redis.get("host", "127.0.0.1"), "redis.host")
-    mysql_bind, _ = _host(mysql.get("bind_host", "127.0.0.1"), "mysql.bind_host", bind=True)
-    redis_bind, _ = _host(redis.get("bind_host", "127.0.0.1"), "redis.bind_host", bind=True)
-
-    # 本机配套部署时 GPU 通过 Compose 网络访问 MySQL 内部端口。远端默认与业务端共用地址。
-    if "engine_host" in mysql:
-        engine_host, _ = _host(mysql["engine_host"], "mysql.engine_host")
-        engine_port = ports["mysql"]
-    elif local_mysql:
+    if single_host:
+        # 业务进程在宿主机网络中，GPU 进程走 Compose 内网。两端使用同一套内置服务。
+        mysql_host = redis_host = mysql_bind = redis_bind = "127.0.0.1"
         engine_host, engine_port = "mysql", 3306
     else:
-        engine_host, engine_port = mysql_host, ports["mysql"]
-    engine_port = _port(mysql.get("engine_port", engine_port), "mysql.engine_port")
+        mysql_host, local_mysql = _host(mysql.get("host", "127.0.0.1"), "mysql.host")
+        redis_host, _ = _host(redis.get("host", "127.0.0.1"), "redis.host")
+        mysql_bind, _ = _host(mysql.get("bind_host", "127.0.0.1"), "mysql.bind_host", bind=True)
+        redis_bind, _ = _host(redis.get("bind_host", "127.0.0.1"), "redis.bind_host", bind=True)
+
+        # 分机时允许单独指定 GPU 可达的地址，省略时按业务端 MySQL 位置推导。
+        if "engine_host" in mysql:
+            engine_host, _ = _host(mysql["engine_host"], "mysql.engine_host")
+            engine_port = ports["mysql"]
+        elif local_mysql:
+            engine_host, engine_port = "mysql", 3306
+        else:
+            engine_host, engine_port = mysql_host, ports["mysql"]
+        engine_port = _port(mysql.get("engine_port", engine_port), "mysql.engine_port")
     mysql_endpoint = _endpoint(mysql_host, ports["mysql"])
     engine_endpoint = _endpoint(engine_host, engine_port)
     redis_endpoint = _endpoint(redis_host, ports["redis"])
@@ -175,9 +221,7 @@ def read_config(
         "MYCOMFY_REDIS_HOST": redis_host,
         "MYCOMFY_MYSQL_BIND_HOST": mysql_bind,
         "MYCOMFY_REDIS_BIND_HOST": redis_bind,
-        "MYCOMFY_DATABASE_URL": f"mysql+pymysql://{mysql_auth}@{mysql_endpoint}/mycomfy",
-        "MYCOMFY_ENGINE_DATABASE_URL": f"mysql+pymysql://{mysql_auth}@{engine_endpoint}/mycomfy",
-        "MYCOMFY_REDIS_URL": f"redis://{redis_auth}@{redis_endpoint}/0" if redis_auth else "",
+        **_connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, redis_endpoint),
         "MYCOMFY_DATA_ROOT": directories["data"],
         "MYCOMFY_CONFIG_DIR": directories["config"],
         "MYCOMFY_DEPLOYMENT_DIR": directories["deployment"],
@@ -192,7 +236,7 @@ def read_config(
         "MYCOMFY_COOKIE_SECURE": str(cookie_secure).lower(),
     }
     if core_only:
-        return variables, None
+        return variables, None, single_host
 
     # 两个目录均会挂载到 GPU 容器。凭据文件需要留在这些目录以外。
     config_path = path.resolve()
@@ -207,4 +251,4 @@ def read_config(
     for required in ("comfyui", "pytorch"):
         if required not in engine:
             raise ValueError(f"engine.{required} 为全栈部署必填项")
-    return variables, engine
+    return variables, engine, single_host

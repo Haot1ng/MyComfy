@@ -27,7 +27,9 @@
 
 本地 `source` 从 `paths.deployment` 指定的目录读取，脚本自动计算 SHA-256。若提供 `sha256`，脚本会核验文件与指定摘要一致。HTTPS 来源必填上游发布的 64 位小写 `sha256`。`path` 是引擎模型目录内的目标路径，首级是模型分类。模型标识（例中的 `video-checkpoint`）对应策略的 `requirements.models`。
 
-数据库就绪后，同机部署运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。安装引擎时，临时容器会检出 ComfyUI 和节点，读取各自的 `requirements.txt`，生成带哈希的依赖锁并安装。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。[数据库与分机地址配置](../README.md#已有部署与分机部署)
+同一台 GPU 主机上运行 `python3 scripts/deploy.py --single-host`，脚本会启动本机 Docker 的 MySQL、Redis 及全部应用服务。首次部署时在模板中填写两项数据库密码。若将顶层 `single_host` 设为 `true`，日常部署直接运行 `python3 scripts/deploy.py` 即可。使用外部数据库时，保留 `single_host` 默认值 `false`，待数据库就绪后运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。[数据库与分机地址配置](../README.md#已有部署与分机部署)
+
+安装引擎时，临时容器会检出 ComfyUI 和节点，读取各自的 `requirements.txt`，生成带哈希的依赖锁并安装。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。
 
 ## 安装清单
 

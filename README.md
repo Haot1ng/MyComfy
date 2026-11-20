@@ -61,8 +61,17 @@ umask 077
 cp -n deploy.config.example.json deploy.config.json
 ```
 
+**同一台 GPU 机器上一键部署。** 在 `deploy.config.json` 中填写 `mysql.password` 和 `redis.password`，保留模板中的回环地址 `127.0.0.1`，按显卡和工作流填写 `engine`。保存后在项目根目录运行以下命令。
+
+```bash
+python3 scripts/deploy.py --single-host
+```
+
+这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。单机模式将数据库端口发布在回环地址。业务端通过 `127.0.0.1` 和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，按默认端口可在本机打开工作台 `http://127.0.0.1:8000/` 和监控页 `http://127.0.0.1:8001/`。[配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+
 | JSON 字段 | 填写内容 |
 | --- | --- |
+| `single_host` | 顶层布尔值。设置为 `true` 后，直接运行 `python3 scripts/deploy.py` 即可在这台 GPU 主机的 Docker 中部署全部服务。省略或设为 `false` 时，无参部署连接已就绪的数据服务。 |
 | `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
 | `public.host`、`public.origin` | `public.host` 是业务机监听 API 的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
 | `mysql.bind_host`、`redis.bind_host` | 可选。运行随附数据库容器时，端口发布到数据库服务器的哪个本机 IP，默认都是 `127.0.0.1`。分机示例见下文。 |
@@ -73,16 +82,9 @@ cp -n deploy.config.example.json deploy.config.json
 | `engine.nodes`、`engine.models` | 填写工作流使用的自定义节点及模型。模板中的两项为空。生成实际视频前需补齐工作流依赖，并发布相应策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
 
-**同机启动分两步。** 首次使用项目自带的 MySQL 和 Redis，在项目根目录用同一份配置先启动数据库并等待健康检查通过，再启动应用。
+**已有独立 MySQL 和 Redis** 时，保留模板的 `"single_host": false`，在 JSON 中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
 
-```bash
-python3 scripts/deploy.py --db-only
-python3 scripts/deploy.py
-```
-
-第一条通过 Compose 的 `database` profile 只启动 `mysql` 和 `redis`。第二条使用已就绪的数据库，安装引擎、执行 MySQL 迁移，启动 `core`、`engine`、`worker`。如果已经有数据库服务，可跳过第一条，在 JSON 中填写已有服务的地址与凭据。请事先准备好 MySQL 的 `mycomfy` 库并授予应用账号迁移和读写权限。[配置模板](deploy.config.example.json) · [部署脚本](scripts/deploy.py) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
-
-**先体验网页**时，只填写数据库连接参数。数据库就绪后，将上面的第二条换成 `python3 scripts/deploy.py --core-only`。它执行迁移并启动 `core`。默认工作台为 `http://127.0.0.1:8000/`，本机监控为 `http://127.0.0.1:8001/`。
+**先体验网页**时，只填写数据库连接参数。使用本机配套数据库时，先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `"single_host": true` 仍决定这些服务连接本机数据库。
 
 | 服务 | 容器职责 |
 | --- | --- |
@@ -120,7 +122,7 @@ python3 scripts/deploy.py
 
 默认情况下，`mysql.host` 填写私网地址时，GPU 容器也连接该地址及 `ports.mysql`。填写回环地址时，默认按项目自带的单机数据库处理，GPU 容器通过同一 Compose 网络连接 `mysql:3306`。如果 GPU 容器需要走另一条路（例如宿主机的独立数据库或私网隧道），填写从容器可达的 `mysql.engine_host` 和 `mysql.engine_port`。
 
-已有 `.env`、`deployment.json` 和 GPU 依赖锁的部署可继续使用这些文件。在仓库根目录没有 `deploy.config.json` 时，脚本读取旧配置。随附数据库同样用 `--db-only` 单独启动。切换到 JSON 时，填入原账号、密码、端口和持久目录。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
+已有 `.env`、`deployment.json` 和 GPU 依赖锁的部署可继续使用这些文件。在仓库根目录没有 `deploy.config.json` 时，脚本读取旧配置。也可以用 `--single-host` 启动同机完整栈，或用 `--db-only` 单独启动数据库。切换到 JSON 时，填入原账号、密码、端口和持久目录。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
 
 ### 从 Python 环境启动
 

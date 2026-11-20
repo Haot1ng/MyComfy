@@ -63,20 +63,26 @@ cp -n deploy.config.example.json deploy.config.json
 
 | JSON 字段 | 填写内容 |
 | --- | --- |
-| `mysql.user`、`mysql.password` | MySQL 应用账号和密码。空数据卷会创建 `mycomfy` 库并初始化所填账号。首次初始化请使用单行凭据，避开单引号与反斜杠。复用已有数据卷时填写已有凭据，轮换密码需同步修改库内账号。 |
+| `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
+| `public.host`、`public.origin` | `public.host` 是业务机监听 API 的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
+| `mysql.bind_host`、`redis.bind_host` | 可选。运行随附数据库容器时，端口发布到数据库服务器的哪个本机 IP，默认都是 `127.0.0.1`。分机示例见下文。 |
+| `mysql.user`、`mysql.password` | MySQL 应用账号和密码。随附容器在空数据卷上创建 `mycomfy` 库并初始化所填账号，初始化凭据请避开单引号和反斜杠。复用已有数据卷时填写已有凭据。 |
 | `redis.user`、`redis.password` | Redis 缓存账号和密码。两个服务的密码均填原值，由脚本编码连接串。 |
 | `engine.comfyui` | ComfyUI 仓库地址与发布标签或 40 位 Git 提交号。 |
 | `engine.pytorch` | CUDA 轮子索引，以及目标环境需要的 torch、torchvision、torchaudio 精确版本。模板示例为 Linux x86_64、Python 3.12、CUDA 12.6，请按显卡驱动和工作流选取匹配组合。 |
 | `engine.nodes`、`engine.models` | 填写工作流使用的自定义节点及模型。模板中的两项为空。生成实际视频前需补齐工作流依赖，并发布相应策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
 
-**启动**。在 GPU 机运行下面的一条命令。脚本读取 JSON，在引擎容器内检出源码，解析并锁定指定版本的依赖，准备模型并检测 CUDA，随后运行数据库迁移并启动服务。锁文件和安装清单由脚本生成。用 `--config /路径/部署配置.json` 可以指定另一份配置。[配置模板](deploy.config.example.json) · [部署脚本](scripts/deploy.py) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+**同机启动分两步。** 首次使用项目自带的 MySQL 和 Redis，在项目根目录用同一份配置先启动数据库并等待健康检查通过，再启动应用。
 
 ```bash
+python3 scripts/deploy.py --db-only
 python3 scripts/deploy.py
 ```
 
-**先体验网页**时，只填写 MySQL 和 Redis 的账号密码，运行 `python3 scripts/deploy.py --core-only`。默认工作台为 `http://127.0.0.1:8000/`，本机监控为 `http://127.0.0.1:8001/`。准备好 GPU 与工作流依赖后，用同一份配置执行全栈命令。
+第一条通过 Compose 的 `database` profile 只启动 `mysql` 和 `redis`。第二条使用已就绪的数据库，安装引擎、执行 MySQL 迁移，启动 `core`、`engine`、`worker`。如果已经有数据库服务，可跳过第一条，在 JSON 中填写已有服务的地址与凭据。请事先准备好 MySQL 的 `mycomfy` 库并授予应用账号迁移和读写权限。[配置模板](deploy.config.example.json) · [部署脚本](scripts/deploy.py) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+
+**先体验网页**时，只填写数据库连接参数。数据库就绪后，将上面的第二条换成 `python3 scripts/deploy.py --core-only`。它执行迁移并启动 `core`。默认工作台为 `http://127.0.0.1:8000/`，本机监控为 `http://127.0.0.1:8001/`。
 
 | 服务 | 容器职责 |
 | --- | --- |
@@ -85,13 +91,36 @@ python3 scripts/deploy.py
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
 | `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。 |
 
-日常部署可重复使用同一份配置。运行 `python3 scripts/deploy.py --compose ps` 查看容器状态，运行 `python3 scripts/deploy.py --compose logs --tail 100 core` 查看业务服务日志。脚本把 JSON 中的连接参数传给 Compose，UID 和 GID 取当前用户。在计划停机或更换引擎配置前，先排空在途任务。[Dockerfile](Dockerfile) · [compose.yaml](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
+用 `--config /路径/部署配置.json` 可指定配置文件。运行 `python3 scripts/deploy.py --compose --profile database ps` 查看同一项目的数据库和应用状态。计划停机前先排空在途任务。只停业务端用 `python3 scripts/deploy.py --compose stop core`，GPU 端用 `python3 scripts/deploy.py --compose stop worker engine`，数据库可以继续服务。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
 
 ### 已有部署与分机部署
 
-已有 `.env`、`deployment.json` 和 GPU 依赖锁的部署可沿用原流程。在仓库根目录没有 `deploy.config.json` 时，脚本读取旧配置。切换到 JSON 时，请填入原账号、密码、端口和持久目录，再运行同一部署命令。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
+假设数据库机、业务机、GPU 机位于同一私网。MySQL 与 Redis 在 `10.20.0.10`，业务工作台在 `10.20.0.20:8000`，GPU 机是 `10.20.0.30`。三台主机可以使用相同的地址配置。下列字段合并到各自的 `deploy.config.json`，账号、密码和引擎配置沿用现场填写的值。
 
-若业务端与 GPU 分机，engine 和 worker 仍需在同一台 GPU 机。业务机先启动 core 和数据库并完成迁移。两端以相同绝对路径挂载支持文件锁和原子重命名的同一份数据，并核对共享卷的设备编号及容量预留。GPU 机使用自己的本地 `.env`，将 `MYCOMFY_ENGINE_DATABASE_URL` 指向容器网络可达的同一业务库，运行 `docker compose run --rm --no-deps --build --entrypoint mycomfy-deploy-engine engine` 部署引擎，再运行 `docker compose up -d --no-deps --build --wait engine worker`。默认 MySQL 发布在业务机的回环地址，跨机数据库连接需配置私网通道。[容量核算](src/mycomfy/ops/capacity.py#L91)
+```json
+{
+  "mysql": {"host": "10.20.0.10", "bind_host": "10.20.0.10"},
+  "redis": {"host": "10.20.0.10", "bind_host": "10.20.0.10"},
+  "public": {"host": "10.20.0.20", "origin": "http://10.20.0.20:8000"},
+  "ports": {"mysql": 3306, "redis": 6379, "api": 8000}
+}
+```
+
+只有业务机的 `core` 会绑定 `public.host` 和 `ports.api`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
+
+| 顺序 | 在哪里运行 | 配置和命令 |
+| --- | --- | --- |
+| 1 | 数据库机 `10.20.0.10` | 如使用随附容器，将 `mysql.bind_host` 和 `redis.bind_host` 都设为该机私网 IP `10.20.0.10`，运行 `python3 scripts/deploy.py --db-only`。已有独立数据库服务可跳过此步。 |
+| 2 | 业务机 `10.20.0.20` | 将 `mysql.host` 和 `redis.host` 都设为 `10.20.0.10`，填写对应凭据，运行 `python3 scripts/deploy.py --core-only`。等待迁移和业务端启动成功。 |
+| 3 | GPU 机 `10.20.0.30` | 填好业务工作台地址、数据库地址及本机 `engine` 参数，运行 `python3 scripts/deploy.py --gpu-only`。它安装引擎，仅启动 `engine` 和 `worker`。 |
+
+业务机需要能访问 MySQL 和 Redis。GPU 机可以省略整个 `redis` 配置。Worker 直接连接 MySQL 领取任务和回写状态，任务执行无需访问业务机的 HTTP 接口。示例可以在私网防火墙允许业务机、GPU 机连接 `10.20.0.10:3306`，允许业务机连接 `10.20.0.10:6379`。MySQL 与 Redis 在不同主机时，分别填写各自的地址和端口。
+
+业务机与 GPU 机还要把同一共享盘挂载到相同绝对路径，例如两边的 `paths.data` 都填写 `/srv/mycomfy/data`。两端容器使用部署用户的 UID/GID，需有共享读写权限，文件系统需支持文件锁和原子重命名。部署时核对两端共享卷的设备编号与容量预留。[容量核算](src/mycomfy/ops/capacity.py#L91)
+
+默认情况下，`mysql.host` 填写私网地址时，GPU 容器也连接该地址及 `ports.mysql`。填写回环地址时，默认按项目自带的单机数据库处理，GPU 容器通过同一 Compose 网络连接 `mysql:3306`。如果 GPU 容器需要走另一条路（例如宿主机的独立数据库或私网隧道），填写从容器可达的 `mysql.engine_host` 和 `mysql.engine_port`。
+
+已有 `.env`、`deployment.json` 和 GPU 依赖锁的部署可继续使用这些文件。在仓库根目录没有 `deploy.config.json` 时，脚本读取旧配置。随附数据库同样用 `--db-only` 单独启动。切换到 JSON 时，填入原账号、密码、端口和持久目录。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
 
 ### 从 Python 环境启动
 

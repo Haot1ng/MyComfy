@@ -1,9 +1,11 @@
 {
   "mysql": {
+    "host": "127.0.0.1",
     "user": "mycomfy",
     "password": ""
   },
   "redis": {
+    "host": "127.0.0.1",
     "user": "mycomfy_cache",
     "password": ""
   },
@@ -17,6 +19,10 @@
     "redis": 6379,
     "api": 8000,
     "admin": 8001
+  },
+  "public": {
+    "host": "127.0.0.1",
+    "origin": "http://127.0.0.1:8000"
   },
   "engine": {
     "comfyui": {

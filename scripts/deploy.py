@@ -46,7 +46,13 @@ def main():
         "--config", type=Path, help="部署参数文件，默认使用仓库根目录的 deploy.config.json"
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--core-only", action="store_true", help="只启动网页、API、MySQL 和 Redis")
+    mode.add_argument("--db-only", action="store_true", help="只启动内置 MySQL 和 Redis 并等待就绪")
+    mode.add_argument(
+        "--core-only", action="store_true", help="连接现有数据库，执行迁移并启动网页和 API"
+    )
+    mode.add_argument(
+        "--gpu-only", action="store_true", help="连接已迁移的数据库，只部署 GPU 引擎和 Worker"
+    )
     mode.add_argument(
         "--compose", nargs=argparse.REMAINDER, help="用同一份配置执行 Compose 命令，如 ps 或 logs"
     )
@@ -60,7 +66,11 @@ def main():
     if args.config or config_path.exists():
         # 配置文件提供 Compose 凭据，单独的引擎参数通过 stdin 传给安装器。
         settings, recipe = read_config(
-            config_path, repo, core_only=args.core_only or args.compose is not None
+            config_path,
+            repo,
+            core_only=args.db_only or args.core_only or args.compose is not None,
+            database_init=args.db_only,
+            redis_optional=args.gpu_only or args.compose is not None,
         )
         process_env.update(settings)
         compose += ["--env-file", os.devnull]
@@ -84,14 +94,23 @@ def main():
             parser.error("--compose 后需要命令，例如 ps")
         run_compose(*args.compose)
         return
+    if args.db_only:
+        # 数据服务可在独立主机启动，此模式不创建业务目录、不运行迁移。
+        run_compose("--profile", "database", "up", "-d", "--wait", "mysql", "redis")
+        print("MySQL 和 Redis 已就绪。", flush=True)
+        return
     config = run_compose("config", "--format", "json", stdout=subprocess.PIPE).stdout
     services = json.loads(config)["services"]
-    core = services["core"]
-    data = bind_source(core, core["environment"]["MYCOMFY_DATA_ROOT"])
+    owner = services["engine" if args.gpu_only else "core"]
+    data = bind_source(owner, owner["environment"]["MYCOMFY_DATA_ROOT"])
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
-    prepare_token(bind_source(core, "/run/mycomfy"))
 
-    build = ["migrate", "core"]
+    build = []
+    start = []
+    if not args.gpu_only:
+        prepare_token(bind_source(services["core"], "/run/mycomfy"))
+        build.extend(["migrate", "core"])
+        start.append("core")
     if not args.core_only:
         deployment = bind_source(services["engine"], "/deployment")
         deployment.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -101,6 +120,7 @@ def main():
                 f"已有项目可继续使用 {deployment / 'deployment.json'} 及其依赖锁。"
             )
         build += ["engine", "worker"]
+        start += ["engine", "worker"]
     run_compose("build", *build)
 
     # 在具备 GPU 和持久卷的临时 engine 容器中安装，失败时保留已有服务和数据。
@@ -118,9 +138,12 @@ def main():
             run_compose(*install)
         else:
             run_compose(*install, "--recipe", "-", input=json.dumps(recipe).encode("utf-8"))
-    start = ["core"] if args.core_only else ["core", "engine", "worker"]
-    run_compose("up", "-d", "--wait", "--no-build", *start)
-    print("部署完成，工作台地址", core["environment"]["MYCOMFY_PUBLIC_ORIGIN"], flush=True)
+    # 分机时业务机已完成迁移。GPU 机同时指定 engine 和 worker，只启动这两个服务。
+    options = ["--no-deps"] if args.gpu_only else []
+    run_compose("up", "-d", "--wait", "--no-build", *options, *start)
+    if args.gpu_only:
+        print("GPU 引擎和 Worker 已启动。", flush=True)
+    print("工作台地址", owner["environment"]["MYCOMFY_PUBLIC_ORIGIN"], flush=True)
 
 
 if __name__ == "__main__":

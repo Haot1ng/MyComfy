@@ -27,7 +27,7 @@
 
 本地 `source` 从 `paths.deployment` 指定的目录读取，脚本自动计算 SHA-256。若提供 `sha256`，脚本会核验文件与指定摘要一致。HTTPS 来源必填上游发布的 64 位小写 `sha256`。`path` 是引擎模型目录内的目标路径，首级是模型分类。模型标识（例中的 `video-checkpoint`）对应策略的 `requirements.models`。
 
-运行 `python3 scripts/deploy.py` 时，引擎容器检出 ComfyUI 和节点，读取各自的 `requirements.txt`，将指定的 PyTorch 包及相关依赖解析为带哈希的锁文件，再用它安装独立环境。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。宿主机使用完整配置连接 MySQL、Redis，引擎安装器只接收部署引擎所需的字段。
+数据库就绪后，同机部署运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。安装引擎时，临时容器会检出 ComfyUI 和节点，读取各自的 `requirements.txt`，生成带哈希的依赖锁并安装。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。[数据库与分机地址配置](../README.md#已有部署与分机部署)
 
 ## 安装清单
 
@@ -79,7 +79,7 @@ python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime re
 
 Compose 正常停止 engine 时会请求各代次退出并等待落盘凭据。强制终止或掉电后，缺失退出凭据的实例可能进入隔离。核对实际执行、进程与文件后，再在原 engine 服务内执行 `runtime resolve`。[运维说明](operations.md)
 
-从已有宿主机引擎切换时，先在原运行管理中排空实例，等候其任务结算和 `ended.json`，再停止原管理进程。保留数据库及原代次目录，按容器内路径重新部署清单。对于已暂停的实例，先用 `python3 scripts/deploy.py --compose up -d` 启动服务，在 engine 容器内核对并 `resume` 当前代次，随后用 `runtime ready` 确认接单。沿用旧版 `.env` 的部署可直接执行相同的 `docker compose` 命令，在 engine 容器中运行 `mycomfy-deploy-engine --check` 校验预制清单和依赖锁。
+从已有宿主机引擎切换时，先在原运行管理中排空实例，等候其任务结算和 `ended.json`，再停止原管理进程。保留数据库及原代次目录，按容器内路径重新部署清单。对于已暂停的实例，在确认 MySQL 迁移完毕后，用 `python3 scripts/deploy.py --compose up -d --no-deps engine worker` 启动 GPU 服务，在 engine 容器内核对并 `resume` 当前代次，随后用 `runtime ready` 确认接单。沿用旧版 `.env` 的部署可直接执行相同的 `docker compose` 命令，在 engine 容器中运行 `mycomfy-deploy-engine --check` 校验预制清单和依赖锁。
 
 ## 在宿主机直接运行
 

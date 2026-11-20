@@ -1,7 +1,9 @@
 """用真实 HTTP 入口和独立 MySQL 检验用户、维护与批次契约。"""
 
+import re
 import struct
 import zlib
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
@@ -9,15 +11,27 @@ import pytest
 from fastapi.testclient import TestClient
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from mycomfy.api import auth
 from mycomfy.api.app import create_app
 from mycomfy.api.auth import COOKIE
 from mycomfy.api.permissions import Permission
 from mycomfy.api.session_cache import KEY_PREFIX
+from mycomfy.artifacts.storage import LocalStore
 from mycomfy.config import Settings
-from mycomfy.database.models import Audit, Batch, EngineInstance, Job, SourceEvent
+from mycomfy.database.models import (
+    Audit,
+    Batch,
+    EngineInstance,
+    Incompatibility,
+    Job,
+    SourceEvent,
+    User,
+)
+from mycomfy.errors import ApiError
+from mycomfy.generation.jobs import BatchRequest, admit_batch
+from mycomfy.generation.state import canonical_digest
 
 pytestmark = pytest.mark.mysql
 PUBLIC = "https://video.example"
@@ -341,6 +355,76 @@ def test_user_group_permissions_gate_the_same_actions_as_the_frontend(clients, m
     assert user.get("/api/v1/events/cursor").status_code == 403
     assert user.get("/api/v1/notifications").status_code == 403
     assert user.get("/api/v1/me").json()["permissions"] == []
+
+
+def test_batch_validation_reads_each_metadata_table_once(clients, mysql_sessions, tmp_path):
+    """重复使用策略、默认素材及被拒环境时，元数据查询按表聚合，错误仍按任务定位。"""
+    user, local = clients
+    headers = login(user, "batch-reader")
+    user_id = user.get("/api/v1/me").json()["user_id"]
+    upload = user.post("/api/v1/assets", headers=headers, files={"file": ("ok.png", png_sample())})
+    assert upload.status_code == 201, upload.text
+    manifest = {"comfyui": "configured"}
+    versions = []
+    uploaded_id = upload.json()["asset_id"]
+    for asset_id in (uploaded_id, "missing-asset"):
+        config = strategy()
+        config["requirements"] = manifest
+        config["input_schema"]["properties"]["image"]["default"] = asset_id
+        result = local.post("/local/v1/strategy-versions", json=config, headers=MAINTENANCE)
+        assert result.status_code == 201, result.text
+        versions.append(result.json()["strategy_version_id"])
+
+    with mysql_sessions.begin() as db:
+        # 切换部署时按下次启动清单判断；相同清单只拒收第二个策略版本。
+        db.get(EngineInstance, "engine").runtime = {"configured_manifest": manifest}
+        db.add(
+            Incompatibility(
+                strategy_version_id=versions[1],
+                environment_digest=canonical_digest(manifest),
+                reason="test",
+            )
+        )
+    tasks = [
+        {
+            "client_task_key": str(i),
+            "strategy_version_id": versions[i % 2],
+            "inputs": {"text": "风景"},
+        }
+        for i in range(8)
+    ]
+    # 同一批内两种大小写都能按数据库主键排序规则匹配到同一版本和素材。
+    tasks[2]["strategy_version_id"] = versions[0].upper()
+    tasks[2]["inputs"]["image"] = uploaded_id.upper()
+    request = BatchRequest.model_validate({"client_batch_key": "bulk-metadata", "tasks": tasks})
+    counts = Counter()
+    with mysql_sessions() as db:
+        # 只统计本次受理使用的连接，排除后台服务的定时查询。
+        @event.listens_for(db.connection(), "before_cursor_execute")
+        def count_selects(conn, cursor, sql, params, context, executemany):
+            """记录实际执行的 SELECT 涉及的表和次数。"""
+            if sql.lstrip().upper().startswith("SELECT"):
+                counts.update(set(re.findall(r"\b(?:from|join)\s+`?(\w+)", sql.lower())))
+
+        store = LocalStore(tmp_path / "data")
+        with (
+            patch.object(store, "readable", wraps=store.readable) as readable,
+            pytest.raises(ApiError) as caught,
+        ):
+            admit_batch(db, db.get(User, user_id), request, 20, store)
+        readable.assert_called_once()
+
+    for table in ("strategy_versions", "engine_instances", "incompatibilities", "assets"):
+        assert counts[table] == 1, counts
+    assert caught.value.status == 422
+    assert [(e["index"], e["path"], e["code"]) for e in caught.value.details] == [
+        (i, f"/tasks/{i}/{field}", code)
+        for i in (1, 3, 5, 7)
+        for field, code in (
+            ("strategy_version_id", "NO_COMPATIBLE_DEPLOYMENT"),
+            ("inputs/image", "ASSET_UNAVAILABLE"),
+        )
+    ]
 
 
 def test_batch_replays_ownership_and_partial_errors(clients, mysql_sessions):

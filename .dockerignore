@@ -1,0 +1,11 @@
+# 镜像只需要 Python 源码、迁移和依赖清单。网页由 API 容器启动时挂载。
+**
+!pyproject.toml
+!uv.lock
+!src/
+!src/mycomfy/
+!src/mycomfy/**
+!migrations/
+!migrations/**
+**/__pycache__/
+**/*.py[cod]

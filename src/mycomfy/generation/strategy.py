@@ -1,3 +1,4 @@
+from itertools import batched
 from typing import Annotated, Any, Literal
 
 from jsonschema import Draft202012Validator, SchemaError
@@ -252,18 +253,47 @@ def compatible(db, strategy, instance):
     return instance.configured and allows_manifest(db, strategy, instance.manifest)
 
 
+def _configured_manifests(instances):
+    """逐个取出已配置实例下一次启动使用的环境清单。"""
+    for instance in instances:
+        if instance.configured:
+            # 排空期间实际运行的环境与下一次启动配置的环境可能不同。
+            yield (instance.runtime or {}).get("configured_manifest", instance.manifest)
+
+
 def configured_for(db, strategy, instances=None):
     """判断是否仍存在兼容的部署配置，供新任务受理使用。"""
     if instances is None:
         instances = db.scalars(select(EngineInstance).where(EngineInstance.configured)).all()
-    # 正在排空的旧代次可能还持有槽位，新受理依据下一次启动所用的清单。
     return any(
-        instance.configured
-        and allows_manifest(
-            db, strategy, (instance.runtime or {}).get("configured_manifest", instance.manifest)
-        )
-        for instance in instances
+        allows_manifest(db, strategy, manifest) for manifest in _configured_manifests(instances)
     )
+
+
+def configured_strategy_ids(db, strategies, instances):
+    """批量读取本批版本的环境拒收记录，返回至少有一份兼容部署清单的版本 ID。"""
+    requirements = {strategy.id: strategy.content["requirements"] for strategy in strategies}
+    manifests = {canonical_digest(m): m for m in _configured_manifests(instances)}
+    blocked = set()
+    # 两个 IN 按版本和环境分别分块，避免把所有版本与环境的组合展开为 SQL 参数。
+    for version_ids in batched(requirements, 400):
+        for digests in batched(manifests, 400):
+            blocked.update(
+                db.execute(
+                    select(Incompatibility.strategy_version_id, Incompatibility.environment_digest)
+                    .where(Incompatibility.strategy_version_id.in_(version_ids))
+                    .where(Incompatibility.environment_digest.in_(digests))
+                )
+            )
+
+    return {
+        version_id
+        for version_id, required in requirements.items()
+        if any(
+            (version_id, digest) not in blocked and matches_environment(required, manifest)
+            for digest, manifest in manifests.items()
+        )
+    }
 
 
 def asset_field_names(version):

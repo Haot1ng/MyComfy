@@ -1,5 +1,6 @@
 {
   "single_host": false,
+  "manual_retry_limit": 3,
   "mysql": {
     "host": "127.0.0.1",
     "user": "mycomfy",

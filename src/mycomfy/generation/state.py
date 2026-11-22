@@ -12,6 +12,7 @@ TRANSITIONS = {
     "RECOVERING": {"QUEUED", "EXECUTING", "PUBLISHING", "RETRY_WAIT", "FAILED", "CANCELLED"},
     "RETRY_WAIT": {"QUEUED", "CANCELLED"},
     "PUBLISHING": {"SUCCEEDED", "RETRY_WAIT", "FAILED", "CANCELLED"},
+    "FAILED": {"QUEUED"},  # 仅用户获准手动重试时进入新一轮生成。
 }
 
 
@@ -46,7 +47,7 @@ def emit(db, job, now, event_type, **payload):
     )
 
 
-def advance(db, job, new_state, now):
+def advance(db, job, new_state, now, **event_data):
     """校验状态迁移，递增公开版本并记录同一事务内的变更事件。"""
     if new_state not in TRANSITIONS.get(job.state, set()):
         raise ValueError(f"Invalid job transition {job.state} → {new_state}")
@@ -55,7 +56,7 @@ def advance(db, job, new_state, now):
     # 清理上一轮的唤醒时间，防止终态或运行中的任务被再次唤醒。
     if new_state != "RETRY_WAIT":
         job.retry_at = None
-    emit(db, job, now, f"job.{new_state.lower()}")
+    emit(db, job, now, f"job.{new_state.lower()}", **event_data)
 
 
 def set_blocked(db, job, now, reason):

@@ -28,6 +28,7 @@ ADMIN_FILES = (
     "templates.html",
     "templates.js",
     "templates.css",
+    "template-catalog.js",
     "template-draft.js",
     "template-editor.js",
     "template-editor.css",

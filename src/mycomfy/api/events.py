@@ -160,13 +160,17 @@ def event_frame(kind, data, seq=None):
     return f"{prefix}event: {kind}\ndata: {body}\n\n"
 
 
-async def user_stream(sessions, settings, user_id, session_id, cursor):
-    """持续补发任务事件，会话或组授权失效时发送控制帧并关闭流。"""
+async def user_stream(sessions, settings, user_id, session_id, cursor, *, stop_streams=None):
+    """持续补发任务事件；在会话或授权失效、服务停机时结束订阅。"""
+    if stop_streams is None:
+        stop_streams = asyncio.Event()
     heartbeat_at = monotonic()
-    while True:
+    while not stop_streams.is_set():
         page = await asyncio.to_thread(event_page, sessions, user_id, cursor)
         if page:
             for seq, kind, data in page:
+                if stop_streams.is_set():
+                    return
                 reason = await asyncio.to_thread(stream_block_reason, sessions, user_id, session_id)
                 if reason:
                     yield event_frame(reason, {})
@@ -183,7 +187,12 @@ async def user_stream(sessions, settings, user_id, session_id, cursor):
         if monotonic() >= heartbeat_at:
             yield ": heartbeat\n\n"
             heartbeat_at = monotonic() + settings.sse_heartbeat_seconds
-        await asyncio.sleep(min(settings.poll_seconds, max(0, heartbeat_at - monotonic())))
+        # 即使部署采用长轮询间隔，停机也应及时发送 EOF；客户端按原游标重连。
+        delay = min(settings.poll_seconds, max(0, heartbeat_at - monotonic()))
+        try:
+            await asyncio.wait_for(stop_streams.wait(), timeout=delay)
+        except TimeoutError:
+            pass
 
 
 class EventStreamResponse(StreamingResponse):
@@ -214,7 +223,7 @@ class EventStreamResponse(StreamingResponse):
             await self.body_iterator.aclose()
 
 
-def build_event_router(settings, sessions):
+def build_event_router(settings, sessions, *, stop_streams=None):
     """创建当前用户的事件水位、订阅、通知列表及已读接口。"""
     router = APIRouter(prefix="/api/v1")
 
@@ -248,7 +257,9 @@ def build_event_router(settings, sessions):
                 after,
                 db.get(UserSequence, user.id).latest,
             )
-            stream = user_stream(sessions, settings, user.id, session.id, cursor)
+            stream = user_stream(
+                sessions, settings, user.id, session.id, cursor, stop_streams=stop_streams
+            )
         return EventStreamResponse(stream, settings.sse_send_timeout_seconds)
 
     @router.get("/notifications")

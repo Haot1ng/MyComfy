@@ -228,7 +228,7 @@ def batch_payload(db, batch_id):
 
 def resource(db, model, id_value, user_id, *, lock=False, options=()):
     """按资源 ID 和用户归属加载记录，写入方可请求行锁。"""
-    row = db.get(model, id_value, with_for_update=lock, options=options)
+    row = db.get(model, id_value, with_for_update=lock, populate_existing=lock, options=options)
     if row is None or row.user_id != user_id:
         raise not_found()
     return row
@@ -242,6 +242,57 @@ def cancel_job(db, job_id, user_id, reason):
         if reason:
             job.failure = reason
     return {"job_id": job.id, "state": job.state, "job_version": job.version}
+
+
+def retry_job(db, job_id, user_id, expected_version, limit, store, capacity):
+    """持锁重新排队用户确认的失败版本，并在同一事务中扣除一次手动重试额度。"""
+    job = resource(db, Job, job_id, user_id, lock=True)
+    # 即使下一轮已经再次失败，旧页签或超时重发也只能针对先前的任务版本。
+    if job.version != expected_version:
+        raise ApiError(409, "JOB_VERSION_CONFLICT", "Reload the current job before retrying")
+    if job.state != "FAILED":
+        raise ApiError(409, "JOB_NOT_FAILED", "Only failed jobs can be retried")
+    if job.manual_retry_count >= limit:
+        raise ApiError(409, "MANUAL_RETRY_LIMIT", "Manual retry limit reached")
+
+    # 重试沿用原来的素材引用。文件不可用或队列容量不足时，尚未消耗重试次数。
+    for asset in db.scalars(select(Asset).join(JobInput).where(JobInput.job_id == job.id)):
+        if (
+            asset.user_id != user_id
+            or asset.job_id is not None
+            or not asset.available
+            or not store.readable(asset.object_key, asset.size)
+        ):
+            raise ApiError(409, "ASSET_UNAVAILABLE", "An original input asset is unavailable")
+    if capacity is not None:
+        capacity.check_batch(db, user_id, 1)
+
+    now = db_now(db)
+    previous_execution = job.current_execution_id
+    previous_failure = job.failure
+    job.manual_retry_count += 1
+    # 自动重试预算按本轮从零计算。全生命周期的执行编号和历史执行各自保留。
+    job.budget_used = 0
+    job.current_execution_id = None
+    job.failure = None
+    job.blocked_reason = None
+    job.enqueued_at = now
+    advance(
+        db,
+        job,
+        "QUEUED",
+        now,
+        manual_retry_count=job.manual_retry_count,
+        previous_execution_id=previous_execution,
+        previous_failure=previous_failure,
+    )
+    return {
+        "job_id": job.id,
+        "state": job.state,
+        "job_version": job.version,
+        "manual_retry_count": job.manual_retry_count,
+        "manual_retry_limit": limit,
+    }
 
 
 def asset_payload(asset):

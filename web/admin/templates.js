@@ -1,10 +1,11 @@
 import { renderWorkflowPreview } from "./workflow-graph.js";
 import { renderAdminNav } from "./navigation.js";
 import { mountTemplateEditor } from "./template-editor.js";
+import { builtins, readTemplateCatalog } from "./template-catalog.js";
 
 /** 取得模板维护页中的固定控件。 */
 const byId = id => document.getElementById(id);
-const presets = Array.from(document.querySelectorAll("[data-preset]"));
+const choices = byId("template-choices");
 const filePicker = byId("template-file");
 const publishButton = byId("publish-template");
 const pasteToggle = byId("paste-toggle");
@@ -21,7 +22,8 @@ let publishText = null;
 let previewedApi = null;
 let publishing = false;
 let creating = false;
-let nextCursor = null;
+let catalog = builtins;
+let selectedUrl = null;
 let catalogRequest = null;
 const editor = mountTemplateEditor(byId("new-template-editor"), {
   onDirty: resetPreview,
@@ -37,8 +39,12 @@ function message(id, text, tone = "") {
 
 /** 同步发布条件，提交期间锁住来源，确保发送的就是屏幕上的模板。 */
 function updateControls() {
-  for (const control of [...presets, filePicker, pasteToggle, jsonText, byId("preview-paste"), byId("new-template")]) {
+  for (const control of [filePicker, pasteToggle, jsonText, byId("preview-paste"), byId("new-template")]) {
     control.disabled = publishing;
+  }
+  for (const button of choices.children) {
+    button.disabled = publishing;
+    button.setAttribute("aria-pressed", String(button.dataset.url === selectedUrl));
   }
   editor.setBusy(publishing);
   publishButton.disabled = publishing || publishText === null;
@@ -50,20 +56,22 @@ function resetPreview() {
   loadNumber += 1;
   publishText = null;
   previewedApi = null;
+  selectedUrl = null;
   graph.replaceChildren();
   sourceLabel.textContent = "";
   byId("publish-description").textContent = creating ? "请先预览新模板。" : "选择完整策略模板后可发布新版本。";
   message("preview-message", "");
   message("publish-result", "");
-  for (const preset of presets) preset.setAttribute("aria-pressed", "false");
   updateControls();
   return loadNumber;
 }
 
 /** 读取一个模板来源，渲染节点图，并确定该文件是否具备策略发布字段。 */
-async function loadPreview(label, read, presetButton = null) {
+async function loadPreview(label, read, sourceUrl = null) {
   if (publishing) return;
   const request = resetPreview();
+  selectedUrl = sourceUrl;
+  updateControls();
   message("preview-message", "正在读取模板…");
   sourceLabel.textContent = label;
   try {
@@ -84,7 +92,6 @@ async function loadPreview(label, read, presetButton = null) {
     }
     const kind = renderWorkflowPreview(graph, raw);
     message("preview-message", "");
-    if (presetButton) presetButton.setAttribute("aria-pressed", "true");
     if (kind !== "strategy") {
       if (kind === "api") previewedApi = text;
       byId("publish-description").textContent = kind === "canvas"
@@ -112,18 +119,19 @@ async function loadPreview(label, read, presetButton = null) {
   }
 }
 
-/** 从同源的固定资源读取内置示例，预览时无需维护凭据。 */
-function selectPreset(button) {
+/** 按卡片上的版本读取完整策略，发布直接使用响应原文以保留大整数种子。 */
+function selectTemplate(template) {
   filePicker.value = "";
   pasteEditor.hidden = true;
   pasteToggle.setAttribute("aria-expanded", "false");
-  void loadPreview(button.querySelector("strong").textContent, async () => {
-    const response = await fetch("./presets/" + button.dataset.preset + ".strategy.json", {
-      credentials: "omit", redirect: "error",
+  const label = template.name + (template.version ? " · v" + template.version : " · 内置");
+  void loadPreview(label, async () => {
+    const response = await fetch(template.url, {
+      mode: "same-origin", credentials: "omit", redirect: "error", cache: "no-store",
     });
-    if (!response.ok) throw new Error("内置模板读取失败（HTTP " + response.status + "）。");
+    if (!response.ok) throw new Error("模板读取失败（HTTP " + response.status + "）。");
     return response.text();
-  }, button);
+  }, template.url);
 }
 
 /** 展示接口状态和校验错误的 JSON 字段路径，便于定位失败输入。 */
@@ -146,7 +154,7 @@ function rejection(status, data) {
 function markUnconfirmed(status) {
   publishText = null;
   message("publish-result", (status ? "HTTP " + status + "。" : "") +
-    "未能确认发布结果。请先刷新已发布模板，核对版本后再决定是否重试。", "error");
+    "未能确认发布结果。请在「选择模板」中刷新列表，核对版本后再决定是否重试。", "error");
 }
 
 /** 从同源管理页发起一次明确的创建或发布，并显示数据库回执。 */
@@ -198,52 +206,51 @@ function toggleEditor() {
   if (creating) editor.open(apiText);
   else {
     editor.close();
-    selectPreset(presets[0]);
+    selectTemplate(catalog[0]);
   }
 }
 
-/** 按页读取每个模板的最新版本，刷新时淘汰在途的旧响应。 */
-async function loadPublished(cursor = null) {
+/** 在同一个选择区展示所有模板；异步刷新后仍按不可变版本标识当前预览。 */
+function renderChoices() {
+  const cards = document.createDocumentFragment();
+  for (const template of catalog) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.url = template.url;
+    const name = document.createElement("strong");
+    name.textContent = template.name;
+    const details = document.createElement("span");
+    details.textContent = template.key + (template.version ? " · v" + template.version : " · 内置");
+    button.append(name, details);
+    button.addEventListener("click", () => selectTemplate(template));
+    cards.append(button);
+  }
+  choices.replaceChildren(cards);
+  updateControls();
+}
+
+/** 完整读完目录再替换卡片。若刷新失败，仍可使用上一次成功读取的目录。 */
+async function loadPublished() {
   catalogRequest?.abort();
   const request = new AbortController();
   catalogRequest = request;
-  const list = byId("published-templates");
-  const more = byId("more-published");
-  more.disabled = true;
-  const query = new URLSearchParams({limit: "10"});
-  if (cursor) query.set("cursor", cursor);
+  message("catalog-message", "正在读取已发布模板…");
   try {
-    const response = await fetch("/local/v1/strategies?" + query, {
-      mode: "same-origin", credentials: "omit", cache: "no-store", signal: request.signal,
-    });
-    if (!response.ok) throw new Error("HTTP " + response.status);
-    const data = await response.json();
+    const templates = await readTemplateCatalog(request.signal);
     if (request !== catalogRequest) return;
-    if (!cursor) list.replaceChildren();
-    for (const item of data.items) {
-      const row = document.createElement("li");
-      const name = document.createElement("strong");
-      name.textContent = item.name;
-      const key = document.createElement("span");
-      key.className = "template-key";
-      key.textContent = item.strategy_key;
-      const version = document.createElement("span");
-      version.className = "template-version";
-      version.textContent = "v" + item.version;
-      row.append(name, key, version);
-      list.append(row);
-    }
-    nextCursor = data.next_cursor;
-    more.hidden = !nextCursor;
-    message("catalog-message", list.children.length ? "" : "暂无已发布模板。");
+    catalog = templates;
+    renderChoices();
+    message("catalog-message", "");
   } catch (error) {
-    if (request === catalogRequest) message("catalog-message", "读取模板列表失败。 " + error.message, "error");
-  } finally {
-    if (request === catalogRequest) more.disabled = false;
+    if (request !== catalogRequest) return;
+    message("catalog-message", "读取已发布模板失败。 " + error.message, "error");
+  }
+  // 首次打开默认显示第一个模板。等待目录期间的文件导入、粘贴或点击优先。
+  if (loadNumber === 0) {
+    selectTemplate(catalog[0]);
   }
 }
 
-for (const button of presets) button.addEventListener("click", () => selectPreset(button));
 filePicker.addEventListener("change", () => {
   const file = filePicker.files[0];
   if (!file) return;
@@ -271,7 +278,6 @@ byId("preview-paste").addEventListener("click", () => {
 byId("new-template").addEventListener("click", toggleEditor);
 publishButton.addEventListener("click", publish);
 byId("refresh-published").addEventListener("click", () => loadPublished());
-byId("more-published").addEventListener("click", () => loadPublished(nextCursor));
 renderAdminNav(byId("nav"), "templates");
-selectPreset(presets[0]);
+renderChoices();
 void loadPublished();

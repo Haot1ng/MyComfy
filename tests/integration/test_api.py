@@ -22,11 +22,13 @@ from mycomfy.api.session_cache import KEY_PREFIX
 from mycomfy.artifacts.storage import LocalStore
 from mycomfy.config import Settings
 from mycomfy.database.models import (
+    Asset,
     Audit,
     Batch,
     EngineInstance,
     Incompatibility,
     Job,
+    JobInput,
     SourceEvent,
     User,
 )
@@ -434,6 +436,98 @@ def test_batch_validation_reads_each_metadata_table_once(clients, mysql_sessions
             ("inputs/image", "ASSET_UNAVAILABLE"),
         )
     ]
+
+
+def test_retry_failed_job_is_owned_fenced_and_limited(clients, mysql_sessions):
+    """并发和延迟的请求只能重试所见的失败版本，且共享同一任务的手动次数。"""
+    user, local = clients
+    version = publish(local).json()["strategy_version_id"]
+    headers = login(user, "retry-owner")
+    owner = user.get("/api/v1/me").json()["user_id"]
+    image = user.post(
+        "/api/v1/assets", headers=headers, files={"file": ("a.png", png_sample())}
+    ).json()["asset_id"]
+    inputs = {"text": "retry", "image": image}
+    body = {
+        "client_batch_key": "same",
+        "tasks": [{"client_task_key": "task", "strategy_version_id": version, "inputs": inputs}],
+    }
+    original = user.post("/api/v1/batches", headers=headers, json=body).json()
+    job_id = original["tasks"][0]["job_id"]
+    path = f"/api/v1/jobs/{job_id}"
+
+    def retry(failed_version):
+        """使用真实会话、提交权限与调用方看到的版本调用手动重试接口。"""
+        return user.post(
+            f"{path}/retry", headers=headers, json={"expected_job_version": failed_version}
+        )
+
+    detail = user.get(path).json()
+    limit = detail["manual_retry_limit"]
+    assert limit == 3 and detail["manual_retry_count"] == 0
+    assert retry(detail["job_version"]).json()["error"]["code"] == "JOB_NOT_FAILED"
+    previous_failed_version = None
+    for attempt in range(limit + 1):
+        # 模拟每轮已由 Worker 结算的失败；真实执行预算另由 Worker 协议测试覆盖。
+        with mysql_sessions.begin() as db:
+            job = db.get(Job, job_id)
+            job.state = "FAILED"
+            job.version += 1
+            failed_version = job.version
+        if previous_failed_version is not None:
+            # 同一任务已再次失败，仍然不能用上一轮发送的版本重复扣次。
+            assert retry(previous_failed_version).json()["error"]["code"] == "JOB_VERSION_CONFLICT"
+        if attempt == 0:
+            foreign = login(user, "retry-foreign")
+            assert (
+                user.post(
+                    f"{path}/retry", headers=foreign, json={"expected_job_version": failed_version}
+                ).status_code
+                == 404
+            )
+            headers = login(user, "retry-owner", register=False)
+            membership = f"/local/v1/users/{owner}/groups"
+            local.put(membership, json={"group_keys": []}, headers=MAINTENANCE).raise_for_status()
+            assert retry(failed_version).status_code == 403
+            local.put(
+                membership, json={"group_keys": ["standard"]}, headers=MAINTENANCE
+            ).raise_for_status()
+            with mysql_sessions.begin() as db:
+                db.get(Asset, image).available = False
+            assert retry(failed_version).json()["error"]["code"] == "ASSET_UNAVAILABLE"
+            with mysql_sessions.begin() as db:
+                db.get(Asset, image).available = True
+        if attempt == limit:
+            assert retry(failed_version).json()["error"]["code"] == "MANUAL_RETRY_LIMIT"
+            break
+        with ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(retry, [failed_version, failed_version]))
+        assert sorted(r.status_code for r in results) == [202, 409]
+        success = next(r.json() for r in results if r.status_code == 202)
+        assert success == {
+            "job_id": job_id,
+            "state": "QUEUED",
+            "job_version": failed_version + 1,
+            "manual_retry_count": attempt + 1,
+            "manual_retry_limit": limit,
+        }
+        assert (
+            next(r.json() for r in results if r.status_code == 409)["error"]["code"]
+            == "JOB_VERSION_CONFLICT"
+        )
+        previous_failed_version = failed_version
+
+    # 同一批次的提交响应、固定参数与原素材引用始终指向该任务。
+    assert user.post("/api/v1/batches", headers=headers, json=body).json() == original
+    with mysql_sessions() as db:
+        job = db.get(Job, job_id)
+        assert (job.inputs, job.strategy_version_id, job.state, job.manual_retry_count) == (
+            inputs,
+            version,
+            "FAILED",
+            limit,
+        )
+        assert db.get(JobInput, (job_id, image))
 
 
 def test_batch_replays_ownership_and_partial_errors(clients, mysql_sessions):

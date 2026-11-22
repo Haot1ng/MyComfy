@@ -79,6 +79,10 @@ class Cancel(Input):
     reason: str | None = Field(None, max_length=255)
 
 
+class RetryJob(Input):
+    expected_job_version: int = Field(gt=0, le=2**63 - 1)
+
+
 def _error(request, exc):
     """将业务错误、字段明细和本次请求标识编码为统一响应。"""
     return JSONResponse(
@@ -242,7 +246,7 @@ def _cookie(response, settings, token):
     )
 
 
-def create_app(settings, *, local=False, sessions=None):
+def create_app(settings, *, local=False, sessions=None, stop_streams=None):
     """按监听用途装配公开或本机应用，并注入会话工厂和容量策略。"""
     sessions = sessions if sessions is not None else make_sessions(settings.database_url)
     capacity = Capacity.from_settings(settings)
@@ -374,7 +378,7 @@ def create_app(settings, *, local=False, sessions=None):
                 # 避免失效标签页或无凭据调用在参数校验前占用解析资源。
                 if request.method == "POST" and (
                     path in {"/api/v1/me/password", "/api/v1/batches"}
-                    or (path.startswith("/api/v1/jobs/") and path.endswith("/cancel"))
+                    or (path.startswith("/api/v1/jobs/") and path.endswith(("/cancel", "/retry")))
                 ):
                     await run_in_threadpool(check_page_write, request)
             if request.method in {"POST", "PUT"} and path.startswith(("/api/v1/", "/local/v1/")):
@@ -424,7 +428,7 @@ def create_app(settings, *, local=False, sessions=None):
     else:
         store = LocalStore(settings.data_root)
         app.include_router(_public_routes(settings, sessions, store, capacity, cache))
-        app.include_router(build_event_router(settings, sessions))
+        app.include_router(build_event_router(settings, sessions, stop_streams=stop_streams))
     return app
 
 
@@ -495,6 +499,18 @@ def _local_routes(settings, sessions, cache):
                     "version": row.version,
                 },
             )
+
+    @router.get("/strategy-versions/{version_id}")
+    def published_template(version_id: str):
+        """按不可变版本 ID 读取完整策略，供管理页预览节点或再次发布。"""
+        with sessions() as db:
+            # 列表只取摘要，选定模板后才读取该版本的工作流、绑定和输出契约。
+            content = db.scalar(
+                select(StrategyVersion.content).where(StrategyVersion.id == version_id)
+            )
+            if content is None:
+                raise not_found()
+            return content
 
     @router.post("/users/{user_id}/password-reset", status_code=204)
     def reset(user_id: str, request: Request, body: PasswordReset):
@@ -719,7 +735,11 @@ def _public_routes(settings, sessions, store, capacity, cache):
         with sessions() as db:
             user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
             job = jobs.resource(db, Job, job_id, user.id, options=(defer(Job.inputs),))
-            return jobs.job_payload(db, job)
+            return {
+                **jobs.job_payload(db, job),
+                "manual_retry_count": job.manual_retry_count,
+                "manual_retry_limit": settings.manual_retry_limit,
+            }
 
     @router.get("/jobs/{job_id}/original")
     def job_original(job_id: str, request: Request):
@@ -729,6 +749,24 @@ def _public_routes(settings, sessions, store, capacity, cache):
             job = jobs.resource(db, Job, job_id, user.id)
             can_download = has_permission(db, user.id, Permission.DOWNLOAD_ASSETS)
             return jobs.original_payload(db, job, can_download=can_download)
+
+    @router.post("/jobs/{job_id}/retry", status_code=202)
+    def retry(job_id: str, request: Request, body: RetryJob):
+        """以当前用户的提交权限和所见版本重新受理本人已失败的任务。"""
+        with sessions.begin() as db:
+            user, _ = _session(db, request, write=True, permission=Permission.SUBMIT_JOBS)
+            request.state.target = job_id
+            result = jobs.retry_job(
+                db,
+                job_id,
+                user.id,
+                body.expected_job_version,
+                settings.manual_retry_limit,
+                store,
+                capacity,
+            )
+            _audit(db, request, 202)
+            return result
 
     @router.post("/jobs/{job_id}/cancel")
     def cancel(job_id: str, request: Request, body: Cancel | None = None):

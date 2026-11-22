@@ -28,14 +28,13 @@
           <div class="template-bar">
             <h2 id="source-title">选择模板</h2>
             <div class="template-actions">
+              <button type="button" id="refresh-published">刷新列表</button>
               <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,application/json"></label>
               <button id="paste-toggle" type="button" aria-expanded="false" aria-controls="paste-editor">粘贴 JSON</button>
             </div>
           </div>
-          <div class="template-presets" role="group" aria-label="内置模板">
-            <button type="button" data-preset="h3-t2v" aria-pressed="false"><strong>MiniMax H3 文生视频</strong><span>提示词 → 视频</span></button>
-            <button type="button" data-preset="h3-i2v" aria-pressed="false"><strong>MiniMax H3 图生视频</strong><span>首帧图片 + 提示词 → 视频</span></button>
-          </div>
+          <p id="catalog-message" class="template-message" role="status"></p>
+          <div id="template-choices" class="template-presets" role="group" aria-labelledby="source-title"></div>
           <div id="paste-editor" hidden>
             <label for="json-text">模板或工作流 JSON</label>
             <textarea id="json-text" rows="6" spellcheck="false" autocomplete="off"></textarea>
@@ -52,12 +51,6 @@
           <p id="publish-description" class="template-hint">选择完整策略模板后可发布新版本。</p>
           <button id="publish-template" type="button" class="highlight" disabled>发布新版本</button>
           <p id="publish-result" class="template-message" role="status"></p>
-        </section>
-        <section class="panel template-panel" aria-labelledby="published-title">
-          <div class="template-bar"><h2 id="published-title">已发布模板</h2><button type="button" id="refresh-published">刷新列表</button></div>
-          <p id="catalog-message" class="template-message" role="status"></p>
-          <ul id="published-templates" aria-label="已发布模板的最新版本"></ul>
-          <button type="button" id="more-published" hidden>加载更多</button>
         </section>
         <noscript>请启用 JavaScript 以预览和发布工作流模板。</noscript>
       </div>

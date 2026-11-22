@@ -313,3 +313,27 @@ def test_credential_file_outside_engine_mounts(tmp_path):
     )
     with pytest.raises(ValueError, match=r"paths\.deployment"):
         read_config(path, tmp_path, core_only=False)
+
+
+@pytest.mark.parametrize("limit", [0, 1, 5])
+def test_manual_retry_limit_reaches_core(tmp_path, monkeypatch, limit):
+    """验证部署 JSON 的手动重试次数经环境变量进入业务端，包括关闭重试。"""
+    template = Path(__file__).resolve().parents[2] / "deploy.config.example.json"
+    config = json.loads(template.read_text())
+    assert config["manual_retry_limit"] == 3
+    config["manual_retry_limit"] = limit
+    path = tmp_path / "deploy.json"
+    path.write_text(json.dumps(config))
+    variables, _, _ = read_config(path, tmp_path, core_only=True)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    assert Settings.from_env().manual_retry_limit == limit
+
+
+@pytest.mark.parametrize("limit", [-1, True, "3", 1.5])
+def test_invalid_manual_retry_limit(tmp_path, limit):
+    """错误配置在部署阶段就给出具体参数名。"""
+    path = tmp_path / "deploy.json"
+    path.write_text(json.dumps({"manual_retry_limit": limit}))
+    with pytest.raises(ValueError, match="manual_retry_limit"):
+        read_config(path, tmp_path, core_only=True)

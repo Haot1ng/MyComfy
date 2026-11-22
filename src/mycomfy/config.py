@@ -23,6 +23,7 @@ class Settings:
     redis_url: str | None = field(default=None, repr=False)
     session_cache_ttl_seconds: int = 60
     admin_test_origin: str | None = None
+    manual_retry_limit: int = 3
 
     def __post_init__(self):
         """校验容量和时间配置，并保存浏览器用于同源比较的入口地址。"""
@@ -40,6 +41,8 @@ class Settings:
             <= 0
         ):
             raise ValueError("Session, upload, batch, aging and polling settings must be positive")
+        if type(self.manual_retry_limit) is not int or self.manual_retry_limit < 0:
+            raise ValueError("manual_retry_limit 需要填写非负整数")
         public, admin = normalize_test_origins(self.public_origin, self.admin_test_origin)
         object.__setattr__(self, "public_origin", public.rstrip("/"))
         object.__setattr__(self, "admin_test_origin", admin)
@@ -64,6 +67,7 @@ class Settings:
                 os.environ.get("MYCOMFY_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))
             ),
             max_batch_tasks=int(os.environ.get("MYCOMFY_MAX_BATCH_TASKS", "20")),
+            manual_retry_limit=int(os.environ.get("MYCOMFY_MANUAL_RETRY_LIMIT", "3")),
             aging_seconds=int(os.environ.get("MYCOMFY_AGING_SECONDS", "60")),
             maintenance_token_file=optional_path("MYCOMFY_MAINTENANCE_TOKEN_FILE"),
             engine_config=optional_path("MYCOMFY_ENGINE_CONFIG"),

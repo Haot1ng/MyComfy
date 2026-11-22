@@ -9,6 +9,7 @@ from mycomfy.api.app import create_app
 from mycomfy.config import Settings
 from mycomfy.database.models import Audit, Base, User
 from mycomfy.database.session import make_sessions
+from mycomfy.generation.state import canonical_digest
 
 HOST = "test-node.example.ts.net:8443"
 ORIGIN = f"https://{HOST}"
@@ -72,6 +73,34 @@ def test_anonymous_admin_browser_flow(backend):
         with factory() as db:
             audit = db.get(Audit, published.headers["X-Request-ID"])
             assert audit.actor == "test-template-admin" and audit.target == version
+
+
+def test_admin_template_preview_returns_exact_published_version(backend):
+    """打开同一模板的两个版本，验证完整策略与发布摘要一致，用户监听器无法读取。"""
+    settings, factory = backend
+    with listener(settings, factory) as admin, listener(settings, factory, local=False) as public:
+        path = "/presets/h3-t2v.strategy.json"
+        strategy = admin.get(path, headers=PROXY).raise_for_status().json()
+        strategy["strategy_key"] = "imported-workflow"
+        # 种子超出 JavaScript 安全整数范围，验证 API 保留可供界面直接使用的精确原文。
+        seed = 2**53 + 1
+        strategy["workflow"]["129"]["inputs"]["noise_seed"] = seed
+        v1 = admin.post(PUBLISH, headers=PAGE, json=strategy).raise_for_status().json()
+        v2 = (
+            admin.post(PUBLISH, headers=PAGE, json={**strategy, "name": "第二版"})
+            .raise_for_status()
+            .json()
+        )
+        for published, name in ((v1, strategy["name"]), (v2, "第二版")):
+            detail_url = f"{PUBLISH}/{published['strategy_version_id']}"
+            response = admin.get(detail_url, headers=PROXY).raise_for_status()
+            content = response.json()
+            assert content["name"] == name
+            assert content["workflow"]["129"]["inputs"]["noise_seed"] == seed
+            assert str(seed) in response.text
+            assert canonical_digest(content) == published["content_digest"]
+            assert public.get(detail_url).status_code == 404
+        assert admin.get(f"{PUBLISH}/unknown", headers=PROXY).status_code == 404
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,7 @@ def run_deploy(checkout, tmp_path, monkeypatch):
     recorder.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
+        "from pathlib import Path\n"
         "args = sys.argv[1:]\n"
         "with open(os.environ['TEST_DOCKER_LOG'], 'a') as log:\n"
         "    log.write(json.dumps(args) + '\\n')\n"
@@ -62,6 +63,27 @@ def run_deploy(checkout, tmp_path, monkeypatch):
         "        output.write(sys.stdin.buffer.read())\n"
         "if 'up' in args and 'mysql' in args and os.environ.get('TEST_DB_FAILURE'):\n"
         "    sys.exit(41)\n"
+        "if 'stop' in args and os.environ.get('TEST_STOP_FAILURE') in args:\n"
+        "    sys.exit(42)\n"
+        "if os.getenv('TEST_STOP_PROBE'):\n"
+        "    folder = Path(os.environ['TEST_STOP_PROBE'])\n"
+        "    if 'ps' in args and '--format' in args:\n"
+        "        service = args[-1]\n"
+        "        calls = Path(os.environ['TEST_DOCKER_LOG']).read_text().splitlines()\n"
+        "        stopped = any('stop' in call and service in call for call in map(json.loads, calls))\n"
+        "        stopped = stopped or (service == 'engine' and (folder / '.container-exited').exists())\n"
+        "        code = 137 if stopped and os.getenv('TEST_BAD_EXIT') == service else 0\n"
+        "        row = {'Service': service, 'State': 'exited' if stopped else 'running', 'ExitCode': code}\n"
+        "        print(json.dumps([row] if service == 'worker' else row))\n"
+        "    if 'exec' in args and 'engine' in args:\n"
+        "        if os.getenv('TEST_SNAPSHOT_FAILURE'):\n"
+        "            sys.exit(43)\n"
+        "        print(json.dumps([{'generation': 7, 'run_dir': str(folder)}]))\n"
+        "    if 'stop' in args and 'engine' in args:\n"
+        "        (folder / '.container-exited').touch()\n"
+        "        receipt = os.getenv('TEST_RECEIPT', 'correct')\n"
+        "        if receipt != 'missing':\n"
+        "            (folder / 'ended.json').write_text(json.dumps({'generation': 7 if receipt == 'correct' else 6}))\n"
     )
     recorder.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
@@ -152,6 +174,150 @@ def test_database_failure_blocks_application(launch):
     up = [call for call in calls if "up" in call]
     assert len(up) == 1 and {"--wait", "mysql", "redis"} <= set(up[0])
     assert not any("run" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("roles", "single_host", "expected"),
+    [
+        ((), False, [{"worker"}, {"engine"}, {"core"}, {"mysql", "redis"}]),
+        ((), True, [{"worker"}, {"engine"}, {"core"}, {"mysql", "redis"}]),
+        (("--single-host",), False, [{"worker"}, {"engine"}, {"core"}, {"mysql", "redis"}]),
+        (("--gpu-only",), True, [{"worker"}, {"engine"}]),
+        (("--core-only",), True, [{"core"}]),
+        (("--db-only",), True, [{"mysql", "redis"}]),
+    ],
+)
+def test_stop_limits_shutdown_to_selected_role(launch, checkout, roles, single_host, expected):
+    """各角色仅停指定服务，全栈先等待 Worker 退出，再停引擎、业务和本机数据服务。"""
+    result, calls = launch(*roles, "--stop", single_host=single_host)
+    assert result.returncode == 0, result.stderr
+    assert not any(
+        set(call) & {"up", "build", "run", "start", "restart", "down", "kill", "rm"}
+        for call in calls
+    )
+    # 依赖仍运行时等待上一组退出。单机启动参数可能只在当时的命令行中指定。
+    stops = [call for call in calls if "stop" in call]
+    assert [set(call[call.index("stop") + 1 :]) for call in stops] == [
+        {"--timeout", "-1", *targets} for targets in expected
+    ]
+    if "mysql" in expected[-1]:
+        assert (
+            "--profile" in stops[-1] and stops[-1][stops[-1].index("--profile") + 1] == "database"
+        )
+    assert not (checkout / "var").exists()
+
+
+@pytest.mark.parametrize(
+    ("failing", "remaining"),
+    [("worker", {"engine", "core", "mysql", "redis"}), ("engine", {"core", "mysql", "redis"})],
+)
+def test_stop_failure_preserves_remaining_services(launch, monkeypatch, failing, remaining):
+    """停止某个服务失败应返回原退出码，保留其后续对账所需的服务。"""
+    monkeypatch.setenv("TEST_STOP_FAILURE", failing)
+    result, calls = launch("--stop", "--single-host")
+    assert result.returncode == 42
+    failed = next(i for i, call in enumerate(calls) if "stop" in call and failing in call)
+    assert not any("stop" in call for call in calls[failed + 1 :])
+    assert not any("stop" in call and remaining.intersection(call) for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("bad_exit", "receipt", "expect_success"),
+    [
+        ("", "correct", True),
+        ("worker", "correct", False),
+        ("engine", "correct", False),
+        ("", "missing", False),
+        ("", "wrong_generation", False),
+    ],
+)
+def test_stop_verifies_container_exit_and_generation_receipt(
+    launch, checkout, monkeypatch, bad_exit, receipt, expect_success
+):
+    """容器退出码和实际代次凭据均正常才继续停机，保留尚待核对的业务与数据库。"""
+    # 模拟容器只在收到 stop 后落盘凭据，过时代次和没有凭据均不能证明本代已退出。
+    run_dir = checkout / "var/data/engines/instances/gpu0/g7-fixture"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setenv("TEST_STOP_PROBE", str(run_dir))
+    monkeypatch.setenv("TEST_BAD_EXIT", bad_exit)
+    monkeypatch.setenv("TEST_RECEIPT", receipt)
+    result, calls = launch("--stop", "--single-host")
+    assert (result.returncode == 0) is expect_success, result.stderr
+    stops = [call for call in calls if "stop" in call]
+    snapshot = [i for i, call in enumerate(calls) if "exec" in call and "engine" in call]
+    if bad_exit == "worker":
+        assert all("engine" not in call for call in stops) and not snapshot
+    else:
+        assert len(snapshot) == 1
+        assert snapshot[0] < next(
+            i for i, call in enumerate(calls) if "stop" in call and "engine" in call
+        )
+    if not expect_success:
+        assert not any({"core", "mysql", "redis"}.intersection(call) for call in stops)
+
+
+def test_stop_retry_rechecks_exited_engine_until_receipt_is_restored(
+    checkout, run_deploy, monkeypatch
+):
+    """旧引擎已经退出时，重复停机仍需核对首次记录的同一代次，再关闭余下服务。"""
+    run_dir = checkout / "var/data/engines/instances/gpu0/g7-legacy"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setenv("TEST_STOP_PROBE", str(run_dir))
+    monkeypatch.setenv("TEST_RECEIPT", "missing")
+    # 沿用同一旧部署和 Compose 项目，下一次调用不能从已经退出的 engine 重新取快照。
+    (checkout / ".env").write_text("MYSQL_PASSWORD=existing\nREDIS_PASSWORD=existing\n")
+    first, first_calls = run_deploy("--stop")
+    assert first.returncode != 0
+    assert any("exec" in call and "engine" in call for call in first_calls)
+    assert (run_dir / ".container-exited").exists()
+
+    second, second_calls = run_deploy("--stop")
+    assert second.returncode != 0
+    assert not any("exec" in call and "engine" in call for call in second_calls)
+    for call in first_calls + second_calls:
+        assert not ("stop" in call and {"core", "mysql", "redis"}.intersection(call))
+
+    # 模拟运维核实原代次后恢复退出凭据，只有此时重试才应完成后续停机。
+    (run_dir / "ended.json").write_text(json.dumps({"generation": 7}))
+    restored, calls = run_deploy("--stop")
+    assert restored.returncode == 0, restored.stderr
+    assert not any("exec" in call and "engine" in call for call in calls)
+    stops = [call for call in calls if "stop" in call]
+    assert [set(call).intersection({"core", "mysql", "redis"}) for call in stops[-2:]] == [
+        {"core"},
+        {"mysql", "redis"},
+    ]
+
+
+@pytest.mark.parametrize("options", [("--test-tunnel", "off"), ("--compose", "ps")])
+def test_stop_rejects_conflicting_actions(run_deploy, options):
+    """停机不能和重配隧道或原样转发的 Compose 操作混用。"""
+    result, calls = run_deploy("--stop", *options)
+    assert result.returncode == 2 and not calls
+
+
+def test_unresolved_engine_snapshot_preserves_running_engine_and_database(
+    launch, tmp_path, monkeypatch
+):
+    """引擎内的待核实执行拒绝停机时，只允许之前的 Worker 排空步骤完成。"""
+    monkeypatch.setenv("TEST_STOP_PROBE", str(tmp_path))
+    monkeypatch.setenv("TEST_SNAPSHOT_FAILURE", "1")
+    result, calls = launch("--stop")
+    assert result.returncode == 43
+    stops = [call for call in calls if "stop" in call]
+    assert len(stops) == 1 and stops[0][-1] == "worker"
+    assert any(call[-5:] == ["exec", "-T", "engine", "python", "-"] for call in calls)
+
+
+def test_stop_gpu_preserves_legacy_files_without_bootstrap(checkout, run_deploy):
+    """只有预制引擎清单的旧部署可以停机，不生成新账号或维护凭据。"""
+    manifest = checkout / "var/deployment/deployment.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+    result, _ = run_deploy("--gpu-only", "--stop")
+    assert result.returncode == 0, result.stderr
+    assert not (checkout / ".env").exists() and not (checkout / "var/config").exists()
+    assert manifest.read_text() == "{}"
 
 
 def test_conflicting_cli_roles_do_not_start_services(launch):

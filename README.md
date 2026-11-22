@@ -96,7 +96,25 @@ cp -n deploy.config.example.json deploy.config.json
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
 | `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。镜像自带健康检查，在 `docker ps` 的 STATUS 列显示协调循环的状态。队列为空时，能正常完成轮询的 Worker 同样显示 `healthy`。 |
 
-用 `--config /路径/部署配置.json` 可指定配置文件。运行 `python3 scripts/deploy.py --compose --profile database ps` 查看同一项目的数据库和应用状态。计划停机前先排空在途任务。只停业务端用 `python3 scripts/deploy.py --compose stop core`，GPU 端用 `python3 scripts/deploy.py --compose stop worker engine`，数据库可以继续服务。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
+每个失败任务默认可由用户手动重试 3 次。在 `deploy.config.json` 顶层设置 `"manual_retry_limit": 3` 可调整次数，设为 `0` 可关闭。重新部署业务端后生效。已有任务继续沿用已消耗的次数，模板内的自动重试单独计数。
+
+### 优雅停机
+
+单机部署在 WSL 的项目目录运行以下命令。如果开着测试隧道，先在 PowerShell 的隧道窗口按 Ctrl+C，等它恢复业务端配置并退出。
+
+```bash
+python3 scripts/deploy.py --stop
+```
+
+Worker 先停止领新任务，等待在途执行到达可恢复的边界。脚本随后停止引擎并核对当前代次的退出记录，最后停止业务端、MySQL 和 Redis。看到“所选服务已停止”后，就可以在 Windows 终端执行 `wsl --shutdown`。长视频可能需要数分钟以上。若提示退出凭据缺失，请保留现场，先检查该代次的 `ended.json` 和引擎日志。旧版业务端若在浏览器打开时一直等待，请关闭工作台页签，让事件订阅结束。
+
+分机部署可分别执行 `--gpu-only --stop`、`--core-only --stop`、`--db-only --stop`，数据库机最后停。容器、数据卷和未领取的任务都会保留。继续使用原单机镜像时，运行以下命令恢复服务。
+
+```bash
+python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core engine worker
+```
+
+如果使用了自定义配置文件，沿用 `--config /路径/部署配置.json`。查看容器状态可执行 `python3 scripts/deploy.py --compose --profile database ps -a`。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
 
 ### 已有部署与分机部署
 

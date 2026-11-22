@@ -359,6 +359,7 @@ export async function mountHistory(host, ctx, path) {
   let currentJob = null;
   let cancelPending = false;
   let confirmCancel = false;
+  let manualRetryPending = false;
   let pollTimer;
   const unreadPending = new Set();
   const appliedJobs = new Map();
@@ -531,6 +532,49 @@ export async function mountHistory(host, ctx, path) {
     }
   }
 
+  /** 按本次详情的状态、额度和当前会话权限确定是否可重新排队。 */
+  function canRetryJob(job) {
+    return job?.state === "FAILED" && ctx.can("jobs.submit")
+      && Number.isInteger(job.manual_retry_count) && job.manual_retry_count >= 0
+      && Number.isInteger(job.manual_retry_limit) && job.manual_retry_count < job.manual_retry_limit;
+  }
+
+  /** 仅对用户看到的失败版本请求一次重试，遇到竞争或网络错误时重新读取详情。 */
+  async function retryJob(version) {
+    if (disposed || manualRetryPending || !canRetryJob(currentJob) || currentJob.job_version !== version) return;
+    manualRetryPending = true;
+    actionError.replaceChildren();
+    renderDetail(currentJob);
+    try {
+      const result = await ctx.api("/jobs/" + encodeURIComponent(id) + "/retry", {
+        method: "POST", body: { expected_job_version: version }, signal: writes.signal,
+      });
+      if (disposed) return;
+      if (currentJob && result.job_version >= currentJob.job_version) {
+        // 先显示服务器确认的新状态；下次完整快照会补上当前执行的明细。
+        renderDetail({ ...currentJob, ...result, failure: null, stage: null, execution_phase: null });
+      }
+    } catch (error) {
+      if (disposed) return;
+      const messages = {
+        JOB_VERSION_CONFLICT: "任务已更新，请查看当前状态。",
+        JOB_NOT_FAILED: "当前任务已不处于失败状态，请查看最新进度。",
+        MANUAL_RETRY_LIMIT: "此任务的手动重试次数已用完。",
+        ASSET_UNAVAILABLE: "原任务的输入素材已不可用。",
+      };
+      showError(actionError, {
+        status: error.status, requestId: error.requestId, code: error.code,
+        message: !error.status ? "未收到重试回执，请以当前任务状态为准。" : messages[error.code] || error.message,
+      });
+    } finally {
+      if (!disposed) {
+        await refresh();
+        manualRetryPending = false;
+        if (!disposed && currentJob) renderDetail(currentJob);
+      }
+    }
+  }
+
   function renderDetail(job) {
     if (currentJob && job.job_version < currentJob.job_version) return;
     currentJob = job;
@@ -544,6 +588,9 @@ export async function mountHistory(host, ctx, path) {
       ["所属批次", link(job.batch_id, "/batch/" + encodeURIComponent(job.batch_id), ctx)],
       ["策略版本", job.strategy_version_id],
       ["尝试序号", job.attempt_no],
+      ["手动重试", Number.isInteger(job.manual_retry_count) && Number.isInteger(job.manual_retry_limit)
+        && (job.state === "FAILED" || job.manual_retry_count > 0)
+        ? "已用 " + job.manual_retry_count + " / " + job.manual_retry_limit + " 次" : null],
       ["执行状态", phases[job.execution_phase] || job.execution_phase],
       ["当前阶段", job.stage], ["重试时间", job.retry_at && dateText(job.retry_at)],
       ["阻塞原因", reasons[job.blocked_reason] || job.blocked_reason],
@@ -556,6 +603,11 @@ export async function mountHistory(host, ctx, path) {
       detailArea.append(element("label", "hist-progress", "执行进度 " + Math.round(meter.value * 100) + "%", meter));
     }
     if (windingDown(job)) detailArea.append(element("p", "hist-note", "取消已生效，原执行仍在收尾。"));
+    if (canRetryJob(job)) {
+      const retry = button(manualRetryPending ? "正在重试…" : "手动重试", () => retryJob(job.job_version), "btn primary");
+      retry.disabled = manualRetryPending;
+      detailArea.append(retry);
+    }
     if (!terminal.has(job.state) && ctx.can("jobs.cancel")) {
       if (confirmCancel) {
         const confirm = element("div", "hist-confirm", element("span", null, "确认取消此任务？"),

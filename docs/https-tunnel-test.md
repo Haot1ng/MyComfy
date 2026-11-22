@@ -56,6 +56,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-
 
 ## 测试结束
 
-在窗口二按 **Ctrl+C**，脚本会结束本次启动的两条隧道，并用启动时的部署配置恢复 `core`。容器继续运行，已发布的模板和提交的任务保留。
+在窗口二按 **Ctrl+C**，脚本会结束本次启动的两条隧道，并用启动时的部署配置恢复 `core`。只关闭隧道时，容器继续运行。若还要关闭 WSL，等隧道脚本退出后，在 Ubuntu 的项目目录运行 `python3 scripts/deploy.py --stop`，看到“所选服务已停止”再执行 `wsl --shutdown`。
 
 如果 Windows 被强制关机，来不及执行恢复步骤，可在窗口一运行 `python3 scripts/deploy.py --single-host --test-tunnel off` 恢复原工作台地址。使用自定义部署文件时同样传入原来的 `--config`。

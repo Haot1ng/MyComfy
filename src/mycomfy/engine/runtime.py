@@ -87,7 +87,7 @@ def stop_generation(sessions, instance_id, generation, timeout=12):
     return _stop_generations(sessions, targets, timeout)
 
 
-def _stop_generations(sessions, targets, timeout=12):
+def _stop_generations(sessions, targets, timeout=12, *, allow_empty=False):
     """通知选定代次的监护程序停止，在同一个等待窗口内核验各自的退出凭据。"""
     pending = {}
     with sessions.begin() as db:
@@ -97,7 +97,8 @@ def _stop_generations(sessions, targets, timeout=12):
                 row.runtime = {**row.runtime, "stop_requested": True}
                 pending[(row.id, row.generation)] = row.runtime
     if not pending:
-        return False
+        # 服务可能在首次启动引擎前收到停机信号；定向停止仍要求找到实际代次。
+        return allow_empty
     # 各代次先收到自己的停止文件，避免多个 GPU 的退出时间串行累加。
     for runtime in pending.values():
         directory = Path(runtime["run_dir"])
@@ -528,9 +529,11 @@ def main(argv=None):
                 stopping.wait(2)
         finally:
             try:
-                if args.stop_engines_on_exit:
-                    # 容器主进程退出将终止 PID 命名空间，先让监护程序记录真正的退出凭据。
-                    _stop_generations(sessions, select(EngineInstance))
+                # 容器主进程退出将终止 PID 命名空间，先等所有受管代次落盘退出凭据。
+                if args.stop_engines_on_exit and not _stop_generations(
+                    sessions, select(EngineInstance), allow_empty=True
+                ):
+                    raise SystemExit("引擎代次退出凭据不完整，请检查隔离状态")
             finally:
                 for sig, handler in handlers.items():
                     signal.signal(sig, handler)

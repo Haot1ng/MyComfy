@@ -87,7 +87,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 
 版本的 `asset_fields` 是去重后的素材输入字段名数组。按该数组和对应字段的 Schema 区分上传控件、普通参数、单值及数组。每次上传一个文件，浏览器负责生成 multipart boundary。服务端校验实际类型、媒体内容、大小和配额，持久化成功后才返回 `asset_id`。任务的素材参数提交此 ID，数组字段提交 ID 数组。单文件上限由 `MYCOMFY_MAX_UPLOAD_BYTES` 配置，默认 100 MiB。上传素材与批次分别登记，批次校验失败后仍可用已登记的素材 ID 重新提交。[策略对象](../src/mycomfy/generation/strategy.py#L274) · [上传路由](../src/mycomfy/api/app.py#L588) · [部署默认值](../src/mycomfy/config.py)
 
-### 批次、任务与取消
+### 批次、任务与重试
 
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
@@ -97,6 +97,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | `GET /jobs/{job_id}` | 任务 ID | `200`，任务详情及其可见产物。 |
 | `GET /jobs/{job_id}/original` | 本人的任务 ID，需 `jobs.view` | `200`，任务受理时的输入、素材引用及所用策略版本。仅在进入“原始任务信息”页后请求。 |
 | `POST /jobs/{job_id}/cancel` | 可省略请求体，或传 `{reason}`，最长 255 字符 | `200 {job_id, state, job_version}`。非终态原子取消，终态请求返回已提交的结论。 |
+| `POST /jobs/{job_id}/retry` | `{expected_job_version}`，使用详情返回的 `job_version` | `202 {job_id, state, job_version, manual_retry_count, manual_retry_limit}`。具有 `jobs.submit` 权限的用户可将自己的失败任务重新排队。 |
 
 ```json
 {
@@ -113,7 +114,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 
 - 每批至少一项，默认最多 20 项，由 `MYCOMFY_MAX_BATCH_TASKS` 配置。每项独立选择策略版本。`client_task_key` 在批内唯一，两种客户端键均为 1 至 200 字符。
 - 整批校验通过后才创建记录。对逐项 `422`，按任务键或索引和字段路径展示错误。未受理的批次修改后可沿用原键。已受理的批次，同一用户以同键同内容重放可取回原 ID，键相同但内容变化返回 `409 IDEMPOTENCY_CONFLICT`。响应丢失时保留原键和请求快照，按原任务和数组顺序重放。
-- 任务摘要含 `job_id`、`batch_id`、`strategy_version_id`、`client_task_key`、`state`、`job_version`、`created_at`、`blocked_reason`、`retry_at`。详情增加 `current_execution_id`、`stage`、`execution_phase`、`progress`、`attempt_no`、`failure`、`assets`。未知值按 `null` 处理。
+- 任务摘要含 `job_id`、`batch_id`、`strategy_version_id`、`client_task_key`、`state`、`job_version`、`created_at`、`blocked_reason`、`retry_at`。详情增加 `current_execution_id`、`stage`、`execution_phase`、`progress`、`attempt_no`、`failure`、`assets`、`manual_retry_count`、`manual_retry_limit`。同一失败版本只接受一次手动重试。版本已变化、任务状态不允许重试或额度用完时返回 409，客户端重新读取详情。未知值按 `null` 处理。
 
 **原始任务信息**返回 `job_id`、`batch_id`、`client_task_key`、`created_at` 和任务绑定的 `strategy_key`、`strategy_name`、`strategy_version`、`strategy_version_id`。页面用以下字段还原这次任务的表单。
 
@@ -134,7 +135,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | `RETRY_WAIT` | 等待自动重试，参考 `retry_at`。 |
 | `PUBLISHING` | 正在校验和发布文件。 |
 | `SUCCEEDED` | 必需文件可读且已登记。文件后来不可用时，单独显示文件状态。 |
-| `FAILED` | 最终失败，详情可显示 `failure`。 |
+| `FAILED` | 本轮生成失败，详情显示 `failure`。有提交权限且仍有手动重试额度时，可按原参数重新排队。 |
 | `CANCELLED` | 业务取消已生效。原执行可能仍在核对或收尾，按详情中的执行阶段提示。 |
 
 取消与成功以事务先后裁决。页面用取消响应的 `state` 更新结论，随后刷新详情。每项任务独立变化，同批其他任务可继续执行。用户历史从 `GET /jobs` 进入，以 `batch_id` 打开批次汇总。[批次及任务数据](../src/mycomfy/generation/jobs.py) · [状态转换](../src/mycomfy/generation/state.py)
@@ -201,6 +202,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
 | `GET /local/v1/strategies` | 分页。 | `200 {items, next_cursor}`。每个系列返回最新版本的 `strategy_key, name, version, strategy_version_id`。 |
+| `GET /local/v1/strategy-versions/{version_id}` | 列表返回的不可变版本 ID。 | `200`，返回该版本的完整策略对象，包含工作流、参数绑定及输出契约；未知版本返回 `404`。 |
 | `POST /local/v1/strategy-versions?create_only=true` | 完整策略对象，使用新的 `strategy_key`。 | 新建时返回 `201` 和版本 `1`。标识已存在时返回 `409 STRATEGY_ALREADY_EXISTS`。 |
 | `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。首次发布为 `1`，后续按同一标识递增，已发布的内容不可变。 |
 | `GET /local/v1/users` | 游标分页，`limit` 默认 50，最大 200。 | `200 {items, next_cursor}`。各项含 `user_id, username, groups, permissions`。 |

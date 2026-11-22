@@ -588,14 +588,15 @@ class Worker:
             cleanup_inputs(self.sessions, self.store, finished)
 
     def drained(self):
-        """判断所有在途执行是否已结束或停在可恢复的核对边界。"""
+        """停机时等待已授权执行结束或隔离，暂时观测不到引擎时继续核对。"""
         with self.sessions.begin() as db:
             query = (
                 select(EngineInstance.id)
                 .join(Execution, Execution.id == EngineInstance.active_execution_id)
                 .where(
                     EngineInstance.quarantine_reason.is_(None),
-                    Execution.phase.not_in(("UNCONFIRMED", "QUARANTINED", "PREPARING", "PREPARED")),
+                    # 已授权的 UNCONFIRMED 执行仍可能在生成，应继续使用原核对期限。
+                    Execution.phase.not_in(("QUARANTINED", "PREPARING", "PREPARED")),
                 )
             )
             return db.scalar(query.limit(1)) is None

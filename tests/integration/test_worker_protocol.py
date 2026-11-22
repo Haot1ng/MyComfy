@@ -23,7 +23,7 @@ from mycomfy.database.models import (
 )
 from mycomfy.database.session import db_now
 from mycomfy.engine.adapter import ComfyAdapter
-from mycomfy.generation.jobs import cancel_job
+from mycomfy.generation.jobs import cancel_job, retry_job
 from mycomfy.generation.state import effective_priority
 from mycomfy.generation.strategy import sql_publish
 from mycomfy.generation.worker import Worker, coordinator_lock
@@ -275,7 +275,7 @@ def test_explicit_rejection_refunded_once(setup_worker):
 
 @pytest.mark.mysql
 def test_retry_budget(setup_worker):
-    """A05 连续失败使用同一策略的三个生成额度，额外轮询保持最终失败。"""
+    """自动重试耗尽后可手动开始新周期，旧执行和连续的尝试序号仍可追溯。"""
     worker, engine = setup_worker
     worker.tick()
     for _ in range(3):
@@ -283,9 +283,26 @@ def test_retry_budget(setup_worker):
         worker.tick()
     worker.tick()
     with worker.sessions.begin() as db:
-        assert db.get(Job, "job").state == "FAILED"
-        assert db.get(Job, "job").budget_used == 3
+        job = db.get(Job, "job")
+        assert (job.state, job.budget_used, job.manual_retry_count) == ("FAILED", 3, 0)
+        old_attempts = db.scalars(select(Execution.id).where(Execution.job_id == job.id)).all()
+        retry_job(db, job.id, job.user_id, job.version, 1, worker.store, worker.capacity)
+        assert (job.state, job.budget_used, job.manual_retry_count) == ("QUEUED", 0, 1)
+        assert job.current_execution_id is None and job.failure is None
     assert len(engine.posts) == 3
+    worker.tick()
+    engine.complete(worker.settings.data_root / "output", failure=True)
+    worker.tick()
+    engine.complete(worker.settings.data_root / "output")
+    worker.tick()
+    with worker.sessions() as db:
+        job = db.get(Job, "job")
+        assert (job.state, job.budget_used, job.manual_retry_count) == ("SUCCEEDED", 2, 1)
+        executions = db.scalars(
+            select(Execution).where(Execution.job_id == job.id).order_by(Execution.attempt_no)
+        ).all()
+        assert {execution.id for execution in executions[:3]} == set(old_attempts)
+        assert [execution.attempt_no for execution in executions] == [1, 2, 3, 4, 5]
 
 
 @pytest.mark.mysql
@@ -444,6 +461,15 @@ def test_draining_finishes_inflight_without_claiming_more(setup_worker):
     worker, engine = setup_worker
     worker.tick()
     worker.draining.set()
+    assert not worker.drained()
+    # 回执已确认；一次队列和历史同时未命中时，停机循环应保留槽位并继续核对。
+    prompt_id = engine.running.pop()
+    worker.tick()
+    assert not worker.drained()
+    with worker.sessions() as db:
+        assert db.get(Job, "job").state == "RECOVERING"
+    engine.running.add(prompt_id)
+    worker.tick()
     assert not worker.drained()
     with worker.sessions.begin() as db:
         job = db.get(Job, "job")

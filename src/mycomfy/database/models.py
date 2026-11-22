@@ -157,6 +157,7 @@ class Job(Base):
     current_execution_id: Mapped[str | None] = mapped_column(ID)
     base_priority: Mapped[int]
     budget_used: Mapped[int] = mapped_column(default=0)
+    manual_retry_count: Mapped[int] = mapped_column(default=0, server_default="0")
     attempt_count: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(TIME)
     enqueued_at: Mapped[datetime] = mapped_column(TIME)

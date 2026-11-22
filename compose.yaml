@@ -102,6 +102,7 @@ services:
     command: ["api", "--host", "${MYCOMFY_API_HOST:-127.0.0.1}", "--port", "${MYCOMFY_API_PORT:-8000}", "--local-port", "${MYCOMFY_LOCAL_PORT:-8001}"]
     environment:
       <<: *app-environment
+      MYCOMFY_MANUAL_RETRY_LIMIT: "${MYCOMFY_MANUAL_RETRY_LIMIT:-3}"
       MYCOMFY_COOKIE_SECURE: "${MYCOMFY_COOKIE_SECURE:-false}"
       MYCOMFY_ADMIN_TEST_ORIGIN: "${MYCOMFY_ADMIN_TEST_ORIGIN:-}"
       MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://${REDIS_USER:-default}:${REDIS_PASSWORD:-}@${MYCOMFY_REDIS_HOST:-127.0.0.1}:${MYCOMFY_REDIS_PORT:-6379}/0}"

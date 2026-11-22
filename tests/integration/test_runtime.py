@@ -3,11 +3,13 @@
 import json
 import os
 import pwd
+import signal
 import socket
 import subprocess
 import sys
 import time
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,7 @@ from sqlalchemy.orm import sessionmaker
 
 from mycomfy.database.models import Base, EngineInstance
 from mycomfy.database.schema import migrate
+from mycomfy.engine import runtime
 from mycomfy.engine.runtime import (
     EngineConfig,
     Manager,
@@ -113,6 +116,46 @@ def test_container_shutdown_records_exit_and_allows_restart(tmp_path):
             child = json.loads((directory / "child.json").read_text())
             assert proof["generation"] == generation and proof["reason"] == "requested stop"
             assert process_identity(child["pid"]) != child
+    finally:
+        sessions.kw["bind"].dispose()
+
+
+@pytest.mark.parametrize(("launched", "receipt_generation"), [(False, None), (True, 7), (True, 6)])
+def test_service_exit_requires_matching_receipts(
+    tmp_path, monkeypatch, launched, receipt_generation
+):
+    """验证空部署和已停止代次可正常停机，缺少本代退出凭据时报告失败。"""
+    url = f"sqlite:///{tmp_path}/db.sqlite"
+    migrate(url)
+    sessions = sessionmaker(create_engine(url), expire_on_commit=False)
+    config = tmp_path / "engines.json"
+    config.write_text('{"instances": []}')
+    monkeypatch.setenv("MYCOMFY_DATABASE_URL", url)
+    monkeypatch.setenv("MYCOMFY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("MYCOMFY_ENGINE_CONFIG", str(config))
+    if launched:
+        with sessions.begin() as db:
+            db.add(
+                EngineInstance(
+                    id="gpu0", generation=7, manifest={}, runtime={"run_dir": str(tmp_path)}
+                )
+            )
+        (tmp_path / "ended.json").write_text(json.dumps({"generation": receipt_generation}))
+
+    # 让 serve 在收到真实 TERM 的路径走完最终核对，缩短等待缺失凭据的时间。
+    monkeypatch.setattr(Manager, "tick", lambda *_: signal.raise_signal(signal.SIGTERM))
+    monkeypatch.setattr(runtime, "_stop_generations", partial(runtime._stop_generations, timeout=0))
+    try:
+        if launched and receipt_generation != 7:
+            with pytest.raises(SystemExit, match="退出凭据不完整"):
+                runtime.main(["serve", "--stop-engines-on-exit"])
+            with sessions() as db:
+                assert (
+                    db.get(EngineInstance, "gpu0").quarantine_reason
+                    == "PROCESS_TREE_EXIT_UNCONFIRMED"
+                )
+        else:
+            runtime.main(["serve", "--stop-engines-on-exit"])
     finally:
         sessions.kw["bind"].dispose()
 

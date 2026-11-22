@@ -6,8 +6,8 @@
 .template-file {position:relative;cursor:pointer}
 .template-file input {position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}
 .template-file:focus-within {outline:2px solid var(--accent);outline-offset:3px}
-.template-presets {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:15px}
-.template-presets button {display:grid;justify-content:start;text-align:left;gap:3px;padding:12px 15px;white-space:normal}
+.template-presets {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:15px;max-height:42vh;overflow-y:auto}
+.template-presets button {display:grid;justify-content:start;text-align:left;gap:3px;padding:12px 15px;white-space:normal;overflow-wrap:anywhere;min-width:0}
 .template-presets button[aria-pressed="true"] {background:#203a31;border-color:#659883;color:var(--accent)}
 .template-presets button span,.template-hint,.template-source {color:var(--muted);font-size:13px}
 .template-source {overflow-wrap:anywhere}
@@ -19,10 +19,6 @@
 #paste-editor {margin-top:15px;display:grid;gap:8px;justify-items:start}
 #json-text {width:100%;resize:vertical;background:var(--base);border:1px solid var(--line);border-radius:7px;padding:10px;color:var(--text);font:13px/1.55 var(--mono)}
 #paste-editor label {font-weight:600}
-#published-templates {list-style:none;padding:0;margin:8px 0}
-#published-templates li {display:flex;align-items:baseline;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
-#published-templates .template-key {color:var(--muted);font:12px/1.4 var(--mono)}
-#published-templates .template-version {margin-left:auto;color:var(--accent);white-space:nowrap}
 .template-panel button:disabled {cursor:default}
 @media(max-width:520px) {
   .template-presets {grid-template-columns:minmax(0,1fr)}

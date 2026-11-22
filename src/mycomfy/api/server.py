@@ -1,5 +1,6 @@
 """在同一 API 进程中分别监听用户端口和回环维护端口。"""
 
+import asyncio
 import os
 import socket
 from contextlib import asynccontextmanager, contextmanager
@@ -11,6 +12,21 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from mycomfy.database.session import make_sessions
 
 from .app import create_app
+
+
+class ApiServer(uvicorn.Server):
+    """在 HTTP 连接排空前结束长连接订阅。"""
+
+    def __init__(self, config, stop_streams):
+        """保存当前服务实例与 SSE 订阅共享的停机信号。"""
+        super().__init__(config)
+        self.stop_streams = stop_streams
+
+    async def shutdown(self, sockets=None):
+        """唤醒所有 SSE 订阅，然后使用 Uvicorn 的优雅退出流程。"""
+        # lifespan.shutdown 要等到活动 HTTP 请求结束才会触发。
+        self.stop_streams.set()
+        await super().shutdown(sockets=sockets)
 
 
 @contextmanager
@@ -26,7 +42,8 @@ def api_server(settings, host, port, local_port, *, sessions=None):
         sockets = [public_socket, local_socket]
         shared = sessions if sessions is not None else make_sessions(settings.database_url)
         try:
-            public = create_app(settings, sessions=shared)
+            stop_streams = asyncio.Event()
+            public = create_app(settings, sessions=shared, stop_streams=stop_streams)
             local = create_app(settings, local=True, sessions=shared)
 
             @asynccontextmanager
@@ -59,7 +76,7 @@ def api_server(settings, host, port, local_port, *, sessions=None):
                 await handlers[address[1]](scope, receive, send)
 
             config = uvicorn.Config(dispatch, proxy_headers=False, access_log=False, lifespan="on")
-            yield uvicorn.Server(config), sockets
+            yield ApiServer(config, stop_streams), sockets
         finally:
             if sessions is None:
                 shared.kw["bind"].dispose()

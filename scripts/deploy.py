@@ -88,6 +88,83 @@ def start_tunnel_core(run_compose, json_output):
         raise
 
 
+def container_states(run_compose, service):
+    """读取 Compose 常驻容器状态，兼容 JSON 数组与逐行 JSON。"""
+    output = run_compose(
+        "ps", "--all", "--format", "json", service, stdout=subprocess.PIPE, text=True
+    ).stdout.strip()
+    rows = (
+        json.loads(output)
+        if output.startswith("[")
+        else [json.loads(line) for line in output.splitlines()]
+    )
+    return [
+        row
+        for row in rows
+        if "com.docker.compose.oneoff=true" not in row.get("Labels", "").lower().split(",")
+    ]
+
+
+def stop_process_service(run_compose, service):
+    """请求容器无限期优雅退出，再检查实际进程退出状态。"""
+    run_compose("stop", "--timeout", "-1", service)
+    for row in container_states(run_compose, service):
+        if row["State"] != "created" and (row["State"] != "exited" or int(row["ExitCode"]) != 0):
+            raise ValueError(f"{service} 未正常退出，请检查容器日志。")
+
+
+def stop_engine(run_compose, repo):
+    """记录正在运行的代次，仅在每一份退出凭据都核实后清除停机检查记录。"""
+    rows = container_states(run_compose, "engine")
+    project = rows[0].get("Project") if rows else None
+    directory = repo / "var" / "stop"
+    if not project and not rows and directory.exists():
+        # 容器可能已在失败后被移除，仍须使用 Compose 项目名找到未核实的凭据。
+        config = run_compose("config", "--format", "json", stdout=subprocess.PIPE, text=True)
+        project = json.loads(config.stdout).get("name")
+    checkpoint = directory / f"{project or repo.name}.json"
+    targets = json.loads(checkpoint.read_text()) if checkpoint.exists() else []
+    if any(row["State"] == "running" for row in rows):
+        # 使用已部署镜像的实例配置快照，兼容尚未升级停机处理的旧引擎。
+        probe = Path(__file__).with_name("stop_snapshot.py").read_text()
+        result = run_compose(
+            "exec", "-T", "engine", "python", "-", input=probe, stdout=subprocess.PIPE, text=True
+        )
+        targets.extend(target for target in json.loads(result.stdout) if target not in targets)
+        if targets:
+            # 退出后无法再 exec。先原子保存现场，允许中断后重复核验同一个代次。
+            checkpoint.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=checkpoint.parent, mode="w", delete=False
+            ) as draft:
+                json.dump(targets, draft)
+            os.replace(draft.name, checkpoint)
+
+    stop_process_service(run_compose, "engine")
+    for target in targets:
+        receipt = Path(target["run_dir"]) / "ended.json"
+        if (
+            not receipt.is_file()
+            or json.loads(receipt.read_text()).get("generation") != target["generation"]
+        ):
+            raise ValueError(f"引擎代次 {target['generation']} 缺少匹配的退出凭据 {receipt}")
+    checkpoint.unlink(missing_ok=True)
+
+
+def graceful_stop(run_compose, args, repo):
+    """依次排空 Worker、确认引擎退出，再关闭本次选择的业务和数据服务。"""
+    if not (args.core_only or args.db_only):
+        print("正在排空 Worker；运行中的任务可能需要较长时间。", flush=True)
+        stop_process_service(run_compose, "worker")
+        stop_engine(run_compose, repo)
+
+    if not (args.db_only or args.gpu_only):
+        run_compose("stop", "--timeout", "-1", "core")
+    if not (args.core_only or args.gpu_only):
+        run_compose("stop", "--timeout", "-1", "mysql", "redis")
+    print("所选服务已停止。", flush=True)
+
+
 def main():
     """读取一份部署配置，按所选模式构建镜像、部署引擎并等待服务就绪。"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -117,7 +194,12 @@ def main():
     parser.add_argument(
         "--tunnel-json", action="store_true", help="为隧道启动器输出 JSON 格式的实际监听端口"
     )
+    parser.add_argument(
+        "--stop", action="store_true", help="排空在途任务后停止本项目服务，可指定机器角色"
+    )
     args = parser.parse_args()
+    if args.stop and (args.test_tunnel or args.compose is not None):
+        parser.error("--stop 不能与 --test-tunnel 或 --compose 一起使用")
     if args.tunnel_json and not args.test_tunnel:
         parser.error("--tunnel-json 需要与 --test-tunnel 一起使用")
     if args.test_tunnel and (
@@ -131,7 +213,11 @@ def main():
     recipe = None
     single_host = args.single_host
 
-    if config_path is not None:
+    if args.stop:
+        # stop 只按项目和服务名操作已有容器。无需生成密码、安装模型或解析部署参数。
+        if config_path is not None:
+            compose += ["--env-file", os.devnull]
+    elif config_path is not None:
         # 配置文件提供 Compose 凭据，单独的引擎参数通过 stdin 传给安装器。
         settings, recipe, single_host = read_config(
             config_path,
@@ -154,7 +240,7 @@ def main():
             cwd=repo,
             env=process_env,
         )
-    if single_host or args.db_only:
+    if single_host or args.db_only or (args.stop and not (args.core_only or args.gpu_only)):
         # 两阶段复用同一 Compose 项目和网络，后续运维也可用配置开关查看数据库。
         compose += ["--profile", "database"]
 
@@ -173,6 +259,9 @@ def main():
             [*compose, *arguments], cwd=repo, env=process_env, check=True, **options
         )
 
+    if args.stop:
+        graceful_stop(run_compose, args, repo)
+        return
     if args.compose is not None:
         if not args.compose:
             parser.error("--compose 后需要命令，例如 ps")

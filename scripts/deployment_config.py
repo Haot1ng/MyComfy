@@ -136,8 +136,20 @@ def read_config(
     config = _object(
         json.loads(path.read_text(encoding="utf-8-sig")),
         "部署配置",
-        {"single_host", "mysql", "redis", "paths", "ports", "public", "engine"},
+        {
+            "single_host",
+            "manual_retry_limit",
+            "mysql",
+            "redis",
+            "paths",
+            "ports",
+            "public",
+            "engine",
+        },
     )
+    retry_limit = config.get("manual_retry_limit", 3)
+    if type(retry_limit) is not int or retry_limit < 0:
+        raise ValueError("manual_retry_limit 需要填写非负整数，0 表示关闭手动重试")
     configured_single_host = config.get("single_host", False)
     if not isinstance(configured_single_host, bool):
         raise ValueError("single_host 需要填写 JSON 布尔值 true 或 false")  # noqa: TRY004
@@ -241,6 +253,7 @@ def read_config(
         "MYCOMFY_UID": str(os.getuid()),
         "MYCOMFY_GID": str(os.getgid()),
         "MYCOMFY_API_HOST": host,
+        "MYCOMFY_MANUAL_RETRY_LIMIT": str(retry_limit),
         "MYCOMFY_PUBLIC_ORIGIN": origin.rstrip("/"),
         "MYCOMFY_ADMIN_TEST_ORIGIN": admin_test_origin or "",
         "MYCOMFY_COOKIE_SECURE": str(cookie_secure).lower(),

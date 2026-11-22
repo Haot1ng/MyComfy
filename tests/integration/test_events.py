@@ -25,6 +25,8 @@ from mycomfy.api.events import (
     user_stream,
 )
 from mycomfy.api.permissions import DEFAULT_GROUP_KEY, Permission
+from mycomfy.api.server import api_server
+from mycomfy.config import Settings
 from mycomfy.database.models import (
     Base,
     Batch,
@@ -377,3 +379,41 @@ def test_http_stream_replays_and_closes_revoked_connection(sessions, settings):
             server.should_exit = True
             thread.join(timeout=5)
             assert not thread.is_alive()
+
+
+def test_api_server_drains_idle_sse_without_waiting_for_client_close(sessions, tmp_path):
+    """已建立的用户订阅应在 API 停机时收到 EOF，不必等待客户端或长轮询超时。"""
+    ids = seed(sessions)
+    assert dispatch_one(sessions)
+    settings = Settings(
+        database_url="unused",
+        data_root=tmp_path / "files",
+        poll_seconds=300,
+        sse_heartbeat_seconds=300,
+    )
+    with api_server(settings, "127.0.0.1", 0, 0, sessions=sessions) as (server, sockets):
+        thread = Thread(target=server.run, kwargs={"sockets": sockets}, daemon=True)
+        url = f"http://127.0.0.1:{sockets[0].getsockname()[1]}/api/v1/events"
+        thread.start()
+        try:
+            deadline = monotonic() + 5
+            while not server.started:
+                assert thread.is_alive() and monotonic() < deadline
+                sleep(0.01)
+            with (
+                httpx.Client(timeout=3, trust_env=False, cookies={COOKIE: ids.token}) as client,
+                client.stream(
+                    "GET", url, params={"after": "1", "session_generation": "1"}
+                ) as stream,
+            ):
+                stream.raise_for_status()
+                lines = stream.iter_lines()
+                assert next(lines) == ": heartbeat"
+                server.should_exit = True
+                # 客户端保持连接直至服务端正常结束响应，不发送撤销或主动关闭请求。
+                assert all(not line for line in lines)
+                thread.join(timeout=3)
+                assert not thread.is_alive()
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)

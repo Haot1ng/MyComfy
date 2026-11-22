@@ -53,6 +53,10 @@ def run_deploy(checkout, tmp_path, monkeypatch):
         "    keys = ('API_HOST', 'PUBLIC_ORIGIN', 'ADMIN_TEST_ORIGIN', 'COOKIE_SECURE')\n"
         "    with open(os.environ['TEST_CORE_CONFIG'], 'w') as output:\n"
         "        json.dump({k: os.getenv('MYCOMFY_' + k) for k in keys}, output)\n"
+        "    if os.getenv('TEST_CORE_LOGS'):\n"
+        "        print('build-step', flush=True)\n"
+        "        print('engine diagnostic', os.getenv('MYSQL_PASSWORD'), file=sys.stderr)\n"
+        "        sys.exit(int(os.environ['TEST_CORE_LOGS']))\n"
         "if '--recipe' in args:\n"
         "    with open(os.environ['TEST_RECIPE'], 'wb') as output:\n"
         "        output.write(sys.stdin.buffer.read())\n"
@@ -197,6 +201,40 @@ def test_https_tunnel_enable_and_restore(checkout, run_deploy, tmp_path):
 def test_https_tunnel_invalid_name(run_deploy, value):
     """域名填写错误时在调用 Docker 前报告。"""
     result, calls = run_deploy("--test-tunnel", value)
+    assert result.returncode == 2 and not calls
+
+
+def test_https_tunnel_json_reports_only_ports_or_empty_object(checkout, run_deploy, monkeypatch):
+    """脚本调用可完整解析标准输出；启停成功时构建日志不占用两个输出流。"""
+    config = json.loads((checkout / "deploy.config.example.json").read_text())
+    config["ports"].update(api=9400, admin=9501)
+    (checkout / "deploy.config.json").write_text(json.dumps(config))
+    monkeypatch.setenv("TEST_CORE_LOGS", "0")
+    for host, expected in (
+        ("pc.my-tail.ts.net", {"public_port": 9400, "admin_port": 9501}),
+        ("off", {}),
+    ):
+        result, _ = run_deploy("--test-tunnel", host, "--tunnel-json")
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == expected
+        assert "build-step" not in result.stderr and "engine diagnostic" not in result.stderr
+
+
+def test_https_tunnel_json_preserves_failure_without_logs(launch, monkeypatch):
+    """构建失败保留退出码，脚本只提示查看服务状态，原始日志和密码都不会输出。"""
+    monkeypatch.setenv("TEST_CORE_LOGS", "73")
+    result, _ = launch("--test-tunnel", "pc.my-tail.ts.net", "--tunnel-json")
+    assert result.returncode == 73 and result.stdout == ""
+    assert "docker compose ps -a core" in result.stderr
+    assert len(result.stderr.splitlines()) == 1
+    assert not any(
+        value in result.stderr for value in ("build-step", "engine diagnostic", "test-mysql")
+    )
+
+
+def test_tunnel_json_requires_tunnel_action(run_deploy):
+    """单独给出输出格式时报告用法错误，避免意外启动默认的全栈部署。"""
+    result, calls = run_deploy("--tunnel-json")
     assert result.returncode == 2 and not calls
 
 

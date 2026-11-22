@@ -72,6 +72,22 @@ def funnel_host(value):
     return host
 
 
+def start_tunnel_core(run_compose, json_output):
+    """重建并等待 core，程序调用时只在失败后提示如何查看服务状态。"""
+    command = ("up", "-d", "--no-deps", "--build", "--wait", "core")
+    if not json_output:
+        run_compose(*command)
+        return
+    # 隧道启动器只读取端口结果；Docker 的构建和启动输出直接丢弃。
+    try:
+        run_compose(*command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print(
+            "core 启动失败，请在项目目录运行 docker compose ps -a core 查看状态。", file=sys.stderr
+        )
+        raise
+
+
 def main():
     """读取一份部署配置，按所选模式构建镜像、部署引擎并等待服务就绪。"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -98,7 +114,12 @@ def main():
         metavar="设备名或off",
         help="为已部署的 core 配置两个 Tailscale Funnel 测试网址，off 恢复原配置",
     )
+    parser.add_argument(
+        "--tunnel-json", action="store_true", help="为隧道启动器输出 JSON 格式的实际监听端口"
+    )
     args = parser.parse_args()
+    if args.tunnel_json and not args.test_tunnel:
+        parser.error("--tunnel-json 需要与 --test-tunnel 一起使用")
     if args.test_tunnel and (
         args.db_only or args.core_only or args.gpu_only or args.compose is not None
     ):
@@ -174,19 +195,22 @@ def main():
         process_env.update(legacy_single_host_environment(services))
     if args.test_tunnel:
         # 两个页面都由 core 提供，仅重建这一个容器，复用现有数据库和 GPU 部署。
-        run_compose("up", "-d", "--no-deps", "--build", "--wait", "core")
+        start_tunnel_core(run_compose, args.tunnel_json)
         if args.test_tunnel == "off":
-            print("core 已恢复原部署配置。")
+            print("{}" if args.tunnel_json else "core 已恢复原部署配置。")
             return
         core = services["core"]
-        for flag, port, origin in (
-            ("--port", 443, "MYCOMFY_PUBLIC_ORIGIN"),
-            ("--local-port", 8443, "MYCOMFY_ADMIN_TEST_ORIGIN"),
-        ):
-            # Compose 已解析旧 .env 或 JSON 中的自定义监听端口，打印对应宿主机命令。
-            local_port = core["command"][core["command"].index(flag) + 1]
-            print(f"tailscale funnel --https={port} http://127.0.0.1:{local_port}")
-            print(core["environment"][origin])
+        # 监听端口取自 Compose 已解析的 core 命令，支持旧 .env 和 JSON 中的自定义值。
+        command = core["command"]
+        public_port = int(command[command.index("--port") + 1])
+        admin_port = int(command[command.index("--local-port") + 1])
+        if args.tunnel_json:
+            print(json.dumps({"public_port": public_port, "admin_port": admin_port}))
+        else:
+            print(f"tailscale funnel --https=443 http://127.0.0.1:{public_port}")
+            print(core["environment"]["MYCOMFY_PUBLIC_ORIGIN"])
+            print(f"tailscale funnel --https=8443 http://127.0.0.1:{admin_port}")
+            print(core["environment"]["MYCOMFY_ADMIN_TEST_ORIGIN"])
         return
     owner = services["engine" if args.gpu_only else "core"]
     data = bind_source(owner, owner["environment"]["MYCOMFY_DATA_ROOT"])

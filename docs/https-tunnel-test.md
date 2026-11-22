@@ -9,9 +9,15 @@
 
 表中为示例网址，实际网址使用 Tailscale 给你分配的完整设备名。管理后台的用户、分组和密码重置维护接口只供本机调用。两个隧道只转发网页端口。
 
-## 1. 更新业务机并获取设备名称
+## 窗口一 · 启动 WSL 和 MyComfy
 
-在 **WSL 的 Ubuntu 终端**更新项目。
+先启动 Docker Desktop。在第一个 Windows 终端进入 Ubuntu。
+
+```powershell
+wsl -d Ubuntu-24.04
+```
+
+在 Ubuntu 提示符下更新项目。已经在运行的服务可以直接用于测试。
 
 ```bash
 cd ~/MyComfy
@@ -19,53 +25,37 @@ git switch main
 git pull --ff-only origin main
 ```
 
-在 **Windows PowerShell** 安装 Tailscale，然后从开始菜单打开 Tailscale 并登录。只有运行隧道的主机需要这一步。[Windows 下载](https://tailscale.com/download/windows)
+首次部署时运行 `python3 scripts/deploy.py --single-host`。如果是之前已经部署、后来停止的单机容器，用下面的命令启动已有服务。服务就绪后会在 Docker 中后台运行。
+
+```bash
+python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core engine worker
+```
+
+## 窗口二 · 同时开启两个 HTTPS 链接
+
+第一次使用，在 **Windows** 安装 Tailscale 并从开始菜单打开、登录。主机操作者完成这一步后，测试人员只需浏览器。[Windows 下载](https://tailscale.com/download/windows)
 
 ```powershell
 winget install --id Tailscale.Tailscale --exact
 ```
 
-重新打开 PowerShell，确认设备名并检查 Windows 可以访问两个本地页面。两条 HTTP 请求都应返回 200。若你在 MyComfy 中改过网页端口，请用实际端口检查。
+在 **Windows PowerShell** 执行下面这一行。示例对应 WSL 发行版 `Ubuntu-24.04` 和仓库 `/home/liu/MyComfy`。脚本根据自身所在的 WSL 路径识别发行版和仓库，读取 Docker Compose 实际使用的端口。`-ExecutionPolicy Bypass` 仅用于本次运行仓库内的脚本。
 
 ```powershell
-$deviceName = ((tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
-$deviceName
-curl.exe --noproxy "*" -I http://127.0.0.1:8000/
-curl.exe --noproxy "*" -I http://127.0.0.1:8001/
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-24.04\home\liu\MyComfy\scripts\share-test.ps1" -SingleHost
 ```
 
-## 2. 为已部署的 core 启用测试网址
+如果使用独立数据库并按分机模式部署，请在业务机运行并省略 `-SingleHost`。如果部署时用 `--config` 指定了文件，请在命令末尾加 `-Config "/在WSL中的路径/deploy.config.json"`。
 
-在同一个 PowerShell 窗口执行下面的命令。这里按单机部署、发行版 `Ubuntu-24.04`、仓库 `/home/liu/MyComfy` 举例。分机部署时在业务机执行，去掉 `--single-host`。如果以前用 `--config` 指定了配置文件，开启和关闭测试时都传入那个文件。
+首次运行可能会提示主机操作者打开 Tailscale 的网页启用 Funnel。如果授权页面提示需要重新运行，完成授权后再执行同一条命令。两条隧道就绪后，可以复制窗口里对应的网址。
 
-```powershell
-wsl -d Ubuntu-24.04 --cd /home/liu/MyComfy python3 scripts/deploy.py --single-host --test-tunnel $deviceName
-```
+- **Workbench** 是工作台，用户在这里注册或登录。
+- **Admin** 是免登录后台，测试人员可以查看全局监控、预览工作流并发布模板。在地址后追加 `templates.html` 可直达模板页。
 
-脚本读取原部署配置，仅重新构建并启动 `core`。它会打印两个 HTTPS 网址，以及与实际业务端口匹配的两条 `tailscale funnel` 命令。此时工作台的注册、登录和提交任务使用打印的 HTTPS 来源。配置文件保留原值，MySQL、Redis、引擎和 Worker 可继续运行。
+把需要的网址发给测试人员，保持第二个窗口运行。可用手机移动网络验证两个链接。[Funnel 使用条件](https://tailscale.com/docs/features/tailscale-funnel)
 
-## 3. 启动隧道并分享链接
+## 测试结束
 
-在**两个 Windows PowerShell 窗口**各运行脚本打印的一条命令。默认网页端口对应下列命令。
+在窗口二按 **Ctrl+C**，脚本会结束本次启动的两条隧道，并用启动时的部署配置恢复 `core`。容器继续运行，已发布的模板和提交的任务保留。
 
-```powershell
-# 窗口一，工作台
-tailscale funnel --https=443 http://127.0.0.1:8000
-```
-
-```powershell
-# 窗口二，管理后台
-tailscale funnel --https=8443 http://127.0.0.1:8001
-```
-
-首次运行如果提示启用 Funnel，请由主机操作者打开终端给出的授权链接并完成设置。两个窗口显示公网地址后保持运行，用手机断开 Wi-Fi、通过移动网络打开链接即可验收。如果只测模板，可直接分享后台网址加 `/templates.html`。可在另一个 PowerShell 窗口用 `tailscale funnel status` 查看转发规则。[Funnel 使用条件](https://tailscale.com/docs/features/tailscale-funnel) · [命令说明](https://tailscale.com/docs/reference/tailscale-cli/funnel)
-
-## 4. 测试结束
-
-在两个运行隧道的窗口分别按 **Ctrl+C**，再在 PowerShell 恢复业务端原有的来源设置。
-
-```powershell
-wsl -d Ubuntu-24.04 --cd /home/liu/MyComfy python3 scripts/deploy.py --single-host --test-tunnel off
-```
-
-恢复后从原工作台地址登录。测试期间已经发布的模板和提交的任务保存在原数据库中。
+如果 Windows 被强制关机，来不及执行恢复步骤，可在窗口一运行 `python3 scripts/deploy.py --single-host --test-tunnel off` 恢复原工作台地址。使用自定义部署文件时同样传入原来的 `--config`。

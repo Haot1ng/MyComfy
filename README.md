@@ -62,7 +62,7 @@ python3 scripts/deploy.py --single-host
 
 这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
-要把这两个页面临时分享给外网测试人员，可以用 Tailscale Funnel 生成两个 HTTPS 链接。工作台使用原有账号，管理链接允许任何访客查看全局监控并发布模板。[开启和关闭外网测试](docs/https-tunnel-test.md)
+要把这两个页面临时分享给外网测试人员，在一个 WSL 窗口启动 MyComfy，再在一个 Windows PowerShell 窗口运行 `scripts/share-test.ps1`。脚本使用 Tailscale Funnel 同时打开两个 HTTPS 链接，按 Ctrl+C 可一起关闭。工作台使用原有账号，后台链接允许任何访客查看全局监控并发布模板。[两个窗口的启动命令](docs/https-tunnel-test.md)
 
 **需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
 

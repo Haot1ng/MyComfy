@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import pwd
 import signal
 import subprocess
 import sys
@@ -310,6 +311,12 @@ class Manager:
                 "SSL_CERT_FILE",
             }
         }
+        # Compose 可用宿主 UID 运行。即使镜像没有对应账号，也让 PyTorch 能解析缓存用户名。
+        uid = os.getuid()
+        try:
+            env["USER"] = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            env["USER"] = str(uid)
         env.update(
             {
                 "CUDA_VISIBLE_DEVICES": config.gpu,

@@ -2,13 +2,16 @@
 
 import json
 import os
+import pwd
 import socket
 import subprocess
 import sys
 import time
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -23,6 +26,40 @@ from mycomfy.engine.runtime import (
     stop_generation,
 )
 from mycomfy.engine.supervisor import process_identity
+
+
+@pytest.mark.parametrize("account_name", [None, "engine-user"])
+def test_engine_child_resolves_container_username(tmp_path, monkeypatch, account_name):
+    """验证引擎依赖可按运行 UID 取用户名，包括容器中无同 UID 账号的情况。"""
+    uid = os.getuid()
+    accounts = {} if account_name is None else {uid: SimpleNamespace(pw_name=account_name)}
+    monkeypatch.setattr(pwd, "getpwuid", accounts.__getitem__)
+    monkeypatch.setenv("LOGNAME", "host-login")
+    monkeypatch.setenv("USER", "host-user")
+
+    # 从受管子进程调用 PyTorch 使用的标准库接口，覆盖启动环境的筛选和传递。
+    script = tmp_path / "engine.py"
+    script.write_text(
+        'import getpass\nfrom pathlib import Path\nPath("username.txt").write_text(getpass.getuser())\n'
+    )
+    cfg = EngineConfig(
+        id="gpu0",
+        gpu="0",
+        port=8188,
+        root=str(tmp_path / "instance"),
+        python=sys.executable,
+        entrypoint=str(script),
+        manifest={},
+        observation_seconds=2,
+        timeout_seconds=10,
+        reconcile_seconds=3,
+    )
+    sessions = sessionmaker(create_engine("sqlite://"), expire_on_commit=False)
+    Base.metadata.create_all(sessions.kw["bind"])
+    manager = Manager(sessions)
+    manager.tick({cfg.id: cfg})
+    assert manager.children[cfg.id].wait(timeout=10) == 0
+    assert (tmp_path / "username.txt").read_text() == (account_name or str(uid))
 
 
 def test_container_shutdown_records_exit_and_allows_restart(tmp_path):

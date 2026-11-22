@@ -1,4 +1,4 @@
-"""Public and loopback-only HTTP applications."""
+"""公开 API 与通过本机监听器提供的管理应用。"""
 
 import hmac
 import ipaddress
@@ -49,11 +49,14 @@ from .group_admin import build_group_admin_router
 from .pagination import invalid_cursor, page, read_position
 from .permissions import Permission, access_profile, require_permission
 from .session_cache import SessionPrecheckCache
-from .web import install_web_routes
+from .web import ADMIN_FILES, install_web_routes
 
 logger = logging.getLogger(__name__)
 Limit = Annotated[int, Query(ge=1, le=100)]
 Password = Annotated[str, Field(min_length=1, max_length=1024)]
+TEST_ADMIN_READ_PATHS = {"/", "/index.html", "/local/v1/strategies"} | {
+    "/" + name for name in ADMIN_FILES
+}
 
 
 class Input(BaseModel):
@@ -90,8 +93,8 @@ def _error(request, exc):
     )
 
 
-def _local_request(request):
-    """校验直连对端、Host 和浏览器 Origin，限定本机管理入口。"""
+def _local_request(request, test_origin):
+    """验证管理监听器的直连对端，并返回外网测试请求所需的浏览器来源。"""
 
     def loopback(host):
         """识别回环 IP 或本机主机名。"""
@@ -100,40 +103,69 @@ def _local_request(request):
         except ValueError:
             return host == "localhost"
 
-    raw_host = request.headers.get("host", "")
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1 or not request.client or not loopback(request.client.host):
+        raise ApiError(403, "LOCAL_ONLY", "Loopback access required")
+
+    # 隧道在本机终止 TLS 并保留原始 Host；转发头不能用来选择信任的访问来源。
+    raw_host = hosts[0]
+    if test_origin:
+        configured = urlsplit(test_origin)
+        test_host = raw_host.lower()
+        if test_host == configured.netloc or (
+            configured.port is None and test_host == configured.netloc + ":443"
+        ):
+            origins = request.headers.getlist("origin")
+            if origins and origins != [test_origin]:
+                raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not allowed")
+            path = request.scope["path"]
+            read = request.method in {"GET", "HEAD"} and (
+                path in TEST_ADMIN_READ_PATHS or path.startswith("/local/v1/monitor/")
+            )
+            publish = request.method == "POST" and path == "/local/v1/strategy-versions"
+            if "authorization" in request.headers or not (read or publish):
+                raise ApiError(403, "TEST_ADMIN_FORBIDDEN", "Unavailable through the test tunnel")
+            return test_origin
+
+    # Funnel 标记只用于拒绝降级：即使隧道请求携带 localhost Host，也不能走本机维护路径。
+    if "tailscale-funnel-request" in request.headers:
+        raise ApiError(403, "LOCAL_ONLY", "Loopback access required")
     try:
         host = urlsplit("//" + raw_host)
         _ = host.port
         if host.username or host.password or host.path or host.query or host.fragment:
             raise ValueError
-        if not loopback(host.hostname) or not request.client or not loopback(request.client.host):
+        if not loopback(host.hostname):
             raise ValueError
     except (TypeError, ValueError):
         raise ApiError(403, "LOCAL_ONLY", "Loopback access required") from None
     origin = request.headers.get("origin")
     if origin is not None and origin != f"{request.url.scheme}://{raw_host}":
         raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not allowed")
+    return None
 
 
-def _maintenance(request, settings, media_type):
+def _maintenance(request, settings, media_type, test_origin):
     """核验模板页的同源交互，或用本机维护凭据授权程序调用。"""
     if (
         request.method == "POST"
         and request.url.path == "/local/v1/strategy-versions"
-        and request.headers.get("x-mycomfy-admin") == "templates"
+        and request.headers.getlist("x-mycomfy-admin") == ["templates"]
         and "authorization" not in request.headers
     ):
-        # 调用方已通过回环与 Host 核验。网页发布还必须提供同源 Origin 和专用请求头。
-        origin = f"{request.url.scheme}://{request.headers['host']}"
-        if (
-            request.headers.get("origin") != origin
-            or request.headers.get("sec-fetch-site", "same-origin") != "same-origin"
-        ):
+        # 浏览器使用隧道的 HTTPS 来源；本机模板页使用直连监听器的来源。
+        origin = test_origin or f"{request.url.scheme}://{request.headers['host']}"
+        if request.headers.getlist("origin") != [origin] or request.headers.getlist(
+            "sec-fetch-site"
+        ) not in ([], ["same-origin"]):
             raise ApiError(403, "ORIGIN_REJECTED", "Same-origin template page required")
-        if media_type != "application/json":
+        if media_type != "application/json" or len(request.headers.getlist("content-type")) != 1:
             raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json")
-        request.state.actor = "local-template-admin"
+        request.state.actor = "test-template-admin" if test_origin else "local-template-admin"
         return
+
+    if test_origin:
+        raise ApiError(403, "TEST_ADMIN_FORBIDDEN", "Template page request required")
 
     # 程序显式携带的维护凭据照常核验，其他本机维护操作只使用此路径。
     path = settings.maintenance_token_file
@@ -317,17 +349,19 @@ def create_app(settings, *, local=False, sessions=None):
         """分配请求标识，在路由前核验访问边界并在返回前登记审计。"""
         request.state.request_id = new_id("r")
         request.state.started = time.monotonic()
-        path = request.url.path
+        path = request.scope["path"]
         media_type = request.headers.get("content-type", "").split(";", 1)[0].lower().strip()
         try:
             if local:
-                _local_request(request)
+                test_origin = _local_request(request, settings.admin_test_origin)
                 if path.startswith("/local/v1/") and (
                     request.method not in {"GET", "HEAD", "OPTIONS"}
                     or path.rstrip("/") in {"/local/v1/groups", "/local/v1/users"}
                     or path.startswith(("/local/v1/groups/", "/local/v1/users/"))
                 ):
-                    await run_in_threadpool(_maintenance, request, settings, media_type)
+                    await run_in_threadpool(
+                        _maintenance, request, settings, media_type, test_origin
+                    )
             elif path.startswith("/api/v1/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
                 auth.check_origin(request, settings.public_origin)
                 # 避免失效标签页或无凭据调用在参数校验前占用解析资源。

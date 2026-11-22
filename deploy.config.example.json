@@ -23,7 +23,8 @@
   },
   "public": {
     "host": "127.0.0.1",
-    "origin": "http://127.0.0.1:8000"
+    "origin": "http://127.0.0.1:8000",
+    "admin_test_origin": null
   },
   "engine": {
     "comfyui": {

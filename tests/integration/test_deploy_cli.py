@@ -21,6 +21,9 @@ def checkout(tmp_path):
     shutil.copytree(
         source / "scripts", repo / "scripts", ignore=shutil.ignore_patterns("__pycache__")
     )
+    module = Path("src/mycomfy/origins.py")
+    (repo / module.parent).mkdir(parents=True)
+    shutil.copy(source / module, repo / module)
     return repo
 
 
@@ -32,6 +35,7 @@ def run_deploy(checkout, tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_DOCKER", real_docker)
     log = tmp_path / "docker.jsonl"
     monkeypatch.setenv("TEST_DOCKER_LOG", str(log))
+    monkeypatch.setenv("TEST_CORE_CONFIG", str(tmp_path / "core-web.json"))
     for name in list(os.environ):
         if name.startswith(("COMPOSE_", "MYSQL_", "REDIS_", "MYCOMFY_")):
             monkeypatch.delenv(name)
@@ -45,6 +49,10 @@ def run_deploy(checkout, tmp_path, monkeypatch):
         "    log.write(json.dumps(args) + '\\n')\n"
         "if 'config' in args:\n"
         "    os.execv(os.environ['TEST_DOCKER'], [os.environ['TEST_DOCKER'], *args])\n"
+        "if 'up' in args and args[-1] == 'core':\n"
+        "    keys = ('API_HOST', 'PUBLIC_ORIGIN', 'ADMIN_TEST_ORIGIN', 'COOKIE_SECURE')\n"
+        "    with open(os.environ['TEST_CORE_CONFIG'], 'w') as output:\n"
+        "        json.dump({k: os.getenv('MYCOMFY_' + k) for k in keys}, output)\n"
         "if '--recipe' in args:\n"
         "    with open(os.environ['TEST_RECIPE'], 'wb') as output:\n"
         "        output.write(sys.stdin.buffer.read())\n"
@@ -147,6 +155,49 @@ def test_conflicting_cli_roles_do_not_start_services(launch):
     result, calls = launch("--single-host", "--gpu-only")
     assert result.returncode == 2
     assert not calls
+
+
+def test_https_tunnel_enable_and_restore(checkout, run_deploy, tmp_path):
+    """开启时仅重建 core 并输出两条匹配自定义端口的隧道命令，关闭时复原来源。"""
+    path = checkout / "deploy.config.json"
+    config = json.loads((checkout / "deploy.config.example.json").read_text())
+    config["ports"].update(api=9000, admin=9001)
+    config["public"].update(origin="http://workstation:9000", host="0.0.0.0")
+    saved = json.dumps(config)
+    path.write_text(saved)
+    target = tmp_path / "core-web.json"
+    result, calls = run_deploy("--single-host", "--test-tunnel", "PC.My-Tail.ts.net.")
+    assert result.returncode == 0, result.stderr
+    assert [c[c.index("up") :] for c in calls if "up" in c] == [
+        ["up", "-d", "--no-deps", "--build", "--wait", "core"]
+    ]
+    assert not any("run" in c for c in calls)
+    assert json.loads(target.read_text()) == {
+        "API_HOST": "127.0.0.1",
+        "PUBLIC_ORIGIN": "https://pc.my-tail.ts.net",
+        "ADMIN_TEST_ORIGIN": "https://pc.my-tail.ts.net:8443",
+        "COOKIE_SECURE": "true",
+    }
+    assert "tailscale funnel --https=443 http://127.0.0.1:9000" in result.stdout
+    assert "tailscale funnel --https=8443 http://127.0.0.1:9001" in result.stdout
+
+    # 再次启动时从同一份原始配置恢复工作台登录来源和后台默认范围。
+    result, _ = run_deploy("--single-host", "--test-tunnel", "off")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text()) == {
+        "API_HOST": "0.0.0.0",
+        "PUBLIC_ORIGIN": "http://workstation:9000",
+        "ADMIN_TEST_ORIGIN": "",
+        "COOKIE_SECURE": "false",
+    }
+    assert path.read_text() == saved
+
+
+@pytest.mark.parametrize("value", ["https://a.ts.net", "a.ts.net/path", "a.ts.net:443", "off.ts"])
+def test_https_tunnel_invalid_name(run_deploy, value):
+    """域名填写错误时在调用 Docker 前报告。"""
+    result, calls = run_deploy("--test-tunnel", value)
+    assert result.returncode == 2 and not calls
 
 
 def test_fresh_checkout_uses_h3_template(checkout, tmp_path, run_deploy):

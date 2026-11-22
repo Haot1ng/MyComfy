@@ -22,7 +22,10 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
             {
                 "mysql": {"user": "app", "password": "example", "host": "db.internal"},
                 "redis": {"user": "default", "password": "example", "host": "cache.internal"},
-                "public": {"origin": "https://workspace.example"},
+                "public": {
+                    "origin": "https://workspace.example",
+                    "admin_test_origin": "https://admin.example:443/",
+                },
             }
         )
     )
@@ -51,6 +54,11 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
     # 显式启用数据库 profile 不会改变业务依赖；数据库可直接作为独立启动目标。
     combined = services("--profile", "database")
     assert set(combined) - set(application) == {"mysql", "redis"}
+    # 只有处理管理请求的 core 获得该来源，其他进程照常使用原有配置。
+    assert combined["core"]["environment"]["MYCOMFY_ADMIN_TEST_ORIGIN"] == "https://admin.example"
+    for name, service in combined.items():
+        if name != "core":
+            assert "MYCOMFY_ADMIN_TEST_ORIGIN" not in service["environment"]
     for name in ("mysql", "redis"):
         assert not combined[name].get("depends_on")
         assert combined[name]["ports"][0]["host_ip"] == "127.0.0.1"

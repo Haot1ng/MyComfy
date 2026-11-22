@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mycomfy.origins import normalize_test_origins
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -20,9 +22,10 @@ class Settings:
     sse_send_timeout_seconds: float = 10.0
     redis_url: str | None = field(default=None, repr=False)
     session_cache_ttl_seconds: int = 60
+    admin_test_origin: str | None = None
 
     def __post_init__(self):
-        """检查容量、调度周期和会话时长等必需为正数的配置。"""
+        """校验容量和时间配置，并保存浏览器用于同源比较的入口地址。"""
         if (
             min(
                 self.session_seconds,
@@ -37,6 +40,9 @@ class Settings:
             <= 0
         ):
             raise ValueError("Session, upload, batch, aging and polling settings must be positive")
+        public, admin = normalize_test_origins(self.public_origin, self.admin_test_origin)
+        object.__setattr__(self, "public_origin", public.rstrip("/"))
+        object.__setattr__(self, "admin_test_origin", admin)
 
     @classmethod
     def from_env(cls):
@@ -50,7 +56,8 @@ class Settings:
         return cls(
             database_url=os.environ["MYCOMFY_DATABASE_URL"],
             data_root=Path(os.environ.get("MYCOMFY_DATA_ROOT", "var")).resolve(),
-            public_origin=os.environ.get("MYCOMFY_PUBLIC_ORIGIN", "https://localhost").rstrip("/"),
+            public_origin=os.environ.get("MYCOMFY_PUBLIC_ORIGIN", "https://localhost"),
+            admin_test_origin=os.environ.get("MYCOMFY_ADMIN_TEST_ORIGIN"),
             cookie_secure=os.environ.get("MYCOMFY_COOKIE_SECURE", "true").lower() != "false",
             session_seconds=int(os.environ.get("MYCOMFY_SESSION_SECONDS", "86400")),
             max_upload_bytes=int(

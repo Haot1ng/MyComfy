@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import runpy
 from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+
+# 宿主 Python 无需安装业务包，仍与容器进程使用同一个标准库校验器。
+normalize_test_origins = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / "src/mycomfy/origins.py")
+)["normalize_test_origins"]
 
 
 def _object(value, field, allowed):
@@ -187,9 +193,12 @@ def read_config(
     engine_endpoint = _endpoint(engine_host, engine_port)
     redis_endpoint = _endpoint(redis_host, ports["redis"])
 
-    public = _object(config.get("public", {}), "public", {"host", "origin", "cookie_secure"})
+    public = _object(
+        config.get("public", {}), "public", {"host", "origin", "cookie_secure", "admin_test_origin"}
+    )
     host = _text(public.get("host", "127.0.0.1"), "public.host")
     origin = _text(public.get("origin", f"http://127.0.0.1:{ports['api']}"), "public.origin")
+    origin, admin_test_origin = normalize_test_origins(origin, public.get("admin_test_origin"))
     try:
         address = urlsplit(origin)
         port = address.port
@@ -233,6 +242,7 @@ def read_config(
         "MYCOMFY_GID": str(os.getgid()),
         "MYCOMFY_API_HOST": host,
         "MYCOMFY_PUBLIC_ORIGIN": origin.rstrip("/"),
+        "MYCOMFY_ADMIN_TEST_ORIGIN": admin_test_origin or "",
         "MYCOMFY_COOKIE_SECURE": str(cookie_secure).lower(),
     }
     if core_only:

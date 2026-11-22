@@ -9,6 +9,8 @@ import pytest
 from redis import Redis
 from sqlalchemy.engine import make_url
 
+from mycomfy.config import Settings
+
 read_config = runpy.run_path(
     str(Path(__file__).resolve().parents[2] / "scripts" / "deployment_config.py")
 )["read_config"]
@@ -30,7 +32,10 @@ def test_custom_accounts_and_paths(tmp_path):
                 "redis": {"user": "cache", "password": redis_password},
                 "ports": {"mysql": 3333, "redis": 6380, "api": 8080, "admin": 8081},
                 "paths": {"data": "files", "deployment": "/srv/engine-import"},
-                "public": {"origin": "https://video.example/"},
+                "public": {
+                    "origin": "https://video.example/",
+                    "admin_test_origin": "HTTPS://ADMIN.Example:443/",
+                },
                 "engine": recipe,
             }
         )
@@ -54,6 +59,7 @@ def test_custom_accounts_and_paths(tmp_path):
     assert values["MYCOMFY_CONFIG_DIR"] == str(repo / "var/config")
     assert values["MYCOMFY_DEPLOYMENT_DIR"] == "/srv/engine-import"
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "https://video.example"
+    assert values["MYCOMFY_ADMIN_TEST_ORIGIN"] == "https://admin.example"
     assert values["MYCOMFY_COOKIE_SECURE"] == "true"
     assert values["MYCOMFY_MYSQL_HOST"] == values["MYCOMFY_REDIS_HOST"] == "127.0.0.1"
     assert values["MYCOMFY_MYSQL_BIND_HOST"] == values["MYCOMFY_REDIS_BIND_HOST"] == "127.0.0.1"
@@ -72,6 +78,7 @@ def test_core_only_and_secret_errors(tmp_path):
     values, recipe, _ = read_config(path, tmp_path, core_only=True)
     assert recipe is None
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "http://127.0.0.1:8000"
+    assert values["MYCOMFY_ADMIN_TEST_ORIGIN"] == ""
     with pytest.raises(ValueError, match="engine"):
         read_config(path, tmp_path, core_only=False)
     data["mysql"]["password"] = "credential'not-for-logs"
@@ -81,6 +88,76 @@ def test_core_only_and_secret_errors(tmp_path):
     with pytest.raises(ValueError, match=r"mysql\.password") as error:
         read_config(path, tmp_path, core_only=True, database_init=True)
     assert data["mysql"]["password"] not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("admin", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("HTTPS://FRONT.example:8443/", "https://front.example:8443"),
+        ("https://127.0.0.1", "https://127.0.0.1"),
+        ("https://[2001:0DB8::0001]:443/", "https://[2001:db8::1]"),
+    ],
+)
+def test_admin_origin_from_environment(monkeypatch, admin, expected):
+    """直接启动服务也规范化 HTTPS 来源，缺省或空变量均关闭公网后台。"""
+    monkeypatch.setenv("MYCOMFY_DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("MYCOMFY_PUBLIC_ORIGIN", "https://front.example")
+    if admin is None:
+        monkeypatch.delenv("MYCOMFY_ADMIN_TEST_ORIGIN", raising=False)
+    else:
+        monkeypatch.setenv("MYCOMFY_ADMIN_TEST_ORIGIN", admin)
+    assert Settings.from_env().admin_test_origin == expected
+
+
+@pytest.mark.parametrize(
+    ("public", "admin", "field"),
+    [
+        ("https://front.example", value, r"public\.admin_test_origin")
+        for value in (
+            False,
+            "*",
+            "admin.example",
+            "http://admin.example",
+            "https://*.example",
+            "https://u@admin.example",
+            "https://admin.example?",
+            "https://admin.example#",
+            "https://admin.example/path",
+            "https://admin.example//",
+            "https://admin.example:",
+            "https://admin.example:0",
+            "https://admin.example:65536",
+            "https://bad_host",
+            "https://[face]suffix",
+            "https://127.1",
+            "https://0x7f000001",
+            "https://admin.example\n",
+            "HTTPS://FRONT.EXAMPLE:443/",
+        )
+    ]
+    + [
+        ("http://front.example", "https://admin.example", r"public\.origin"),
+        ("https://front.example//", "https://admin.example", r"public\.origin"),
+    ],
+)
+def test_invalid_test_origins_fail_before_deployment_and_startup(tmp_path, public, admin, field):
+    """两种部署入口都拒绝歧义、通配、非 HTTPS 或合并为同一来源的配置。"""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mysql": {"user": "app", "password": "p"},
+                "redis": {"user": "default", "password": "p"},
+                "public": {"origin": public, "admin_test_origin": admin},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match=field):
+        read_config(path, tmp_path, core_only=True)
+    with pytest.raises(ValueError, match=field):
+        Settings("sqlite://", tmp_path, public_origin=public, admin_test_origin=admin)
 
 
 def test_remote_endpoints_and_publish_addresses(tmp_path):

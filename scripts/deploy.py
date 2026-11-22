@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -57,6 +58,20 @@ def prepare_token(directory):
         raise ValueError(f"请检查 {token}，需要保存非空令牌并设置权限 0600")
 
 
+def funnel_host(value):
+    """接受 Tailscale 给本机分配的 DNS 名称，off 表示恢复原部署配置。"""
+    if value == "off":
+        return value
+    # status 返回的绝对域名末尾可能带一个点。只接受 DNS 标签，避免混入路径或端口。
+    host = value.lower().removesuffix(".")
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    if len(host) > 253 or not re.fullmatch(rf"(?:{label}\.)+ts\.net", host):
+        raise argparse.ArgumentTypeError(
+            "请填写 Tailscale 显示的完整设备名（以 .ts.net 结尾），或 off"
+        )
+    return host
+
+
 def main():
     """读取一份部署配置，按所选模式构建镜像、部署引擎并等待服务就绪。"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -77,7 +92,17 @@ def main():
     mode.add_argument(
         "--compose", nargs=argparse.REMAINDER, help="用同一份配置执行 Compose 命令，如 ps 或 logs"
     )
+    parser.add_argument(
+        "--test-tunnel",
+        type=funnel_host,
+        metavar="设备名或off",
+        help="为已部署的 core 配置两个 Tailscale Funnel 测试网址，off 恢复原配置",
+    )
     args = parser.parse_args()
+    if args.test_tunnel and (
+        args.db_only or args.core_only or args.gpu_only or args.compose is not None
+    ):
+        parser.error("--test-tunnel 仅可单独使用或与 --single-host 一起使用")
     repo = Path(__file__).resolve().parents[1]
     config_path = select_config(repo, args.config)
     process_env = {**os.environ, "PWD": str(repo)}
@@ -90,14 +115,17 @@ def main():
         settings, recipe, single_host = read_config(
             config_path,
             repo,
-            core_only=args.db_only or args.core_only or args.compose is not None,
+            core_only=bool(args.test_tunnel)
+            or args.db_only
+            or args.core_only
+            or args.compose is not None,
             database_init=args.db_only,
             redis_optional=args.gpu_only or args.compose is not None,
             single_host=single_host,
         )
         process_env.update(settings)
         compose += ["--env-file", os.devnull]
-    elif args.compose is None:
+    elif args.compose is None and not args.test_tunnel:
         # 已部署的项目仍可沿用原有 .env、deployment.json 和离线锁文件。
         subprocess.run(
             ["sh", "scripts/init-env.sh", "--generate-passwords"],
@@ -108,6 +136,15 @@ def main():
     if single_host or args.db_only:
         # 两阶段复用同一 Compose 项目和网络，后续运维也可用配置开关查看数据库。
         compose += ["--profile", "database"]
+
+    if args.test_tunnel and args.test_tunnel != "off":
+        # 只覆盖此次 core 启动。原配置中的数据库、端口和目录继续生效。
+        process_env.update(
+            MYCOMFY_API_HOST="127.0.0.1",
+            MYCOMFY_PUBLIC_ORIGIN=f"https://{args.test_tunnel}",
+            MYCOMFY_ADMIN_TEST_ORIGIN=f"https://{args.test_tunnel}:8443",
+            MYCOMFY_COOKIE_SECURE="true",
+        )
 
     def run_compose(*arguments, **options):
         """让部署和日常 Compose 命令使用相同的工作目录和配置快照。"""
@@ -132,9 +169,25 @@ def main():
     config = run_compose("config", "--format", "json", stdout=subprocess.PIPE).stdout
     services = json.loads(config)["services"]
     deploy_local_stack = single_host and not (args.gpu_only or args.core_only)
-    if deploy_local_stack and recipe is None:
+    if deploy_local_stack and config_path is None:
         # 旧版 .env 也可切换到单机，连接串使用随附数据库的实际账号和发布端口。
         process_env.update(legacy_single_host_environment(services))
+    if args.test_tunnel:
+        # 两个页面都由 core 提供，仅重建这一个容器，复用现有数据库和 GPU 部署。
+        run_compose("up", "-d", "--no-deps", "--build", "--wait", "core")
+        if args.test_tunnel == "off":
+            print("core 已恢复原部署配置。")
+            return
+        core = services["core"]
+        for flag, port, origin in (
+            ("--port", 443, "MYCOMFY_PUBLIC_ORIGIN"),
+            ("--local-port", 8443, "MYCOMFY_ADMIN_TEST_ORIGIN"),
+        ):
+            # Compose 已解析旧 .env 或 JSON 中的自定义监听端口，打印对应宿主机命令。
+            local_port = core["command"][core["command"].index(flag) + 1]
+            print(f"tailscale funnel --https={port} http://127.0.0.1:{local_port}")
+            print(core["environment"][origin])
+        return
     owner = services["engine" if args.gpu_only else "core"]
     data = bind_source(owner, owner["environment"]["MYCOMFY_DATA_ROOT"])
     data.mkdir(mode=0o700, parents=True, exist_ok=True)

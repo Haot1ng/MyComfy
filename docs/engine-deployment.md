@@ -20,7 +20,7 @@
 
 **更换工作流时**，按新工作流加载的文件修改 `engine.models`。远程模型的 `source` 填 HTTPS 地址，`sha256` 填对应的 64 位小写摘要。本地模型的 `source` 填相对于 `paths.deployment` 的路径，脚本会自动计算摘要，提供了 `sha256` 就会校验。`path` 填 ComfyUI 模型目录中的相对路径，分类和文件名要与工作流一致。若使用额外节点，在 `engine.nodes` 中为每个节点包填写仓库 `url` 和固定的 `version`。
 
-**发布到工作台时**，打开业务机管理后台的“工作流模板”，选择内置 H3 文生视频或图生视频策略，预览节点后选择维护令牌文件并发布。要使用自己的工作流，把 ComfyUI API 格式的工作流放入策略的 `workflow` 中，绑定提示词及图生视频所需的图片输入，声明视频输出，并在 `requirements.models` 中填写实际使用的模型标识和摘要。[打开工作流模板](http://127.0.0.1:8001/templates.html) · [导入步骤与 WSL 文件路径](../web/admin/README.md#导入模板) · [策略发布接口](web-api.md#本机维护)
+**发布到工作台时**，打开业务机管理后台的“工作流模板”，选择内置 H3 策略，预览节点后即可发布。要创建自己的模板，点击“新增模板”，填写名称和新标识，选择 H3 模板或导入 ComfyUI API 工作流。自定义工作流需根据实际节点绑定提示词、素材输入和视频输出。需要固定模型版本时，可导入完整策略，在 `requirements.models` 中声明对应的模型标识和摘要。[打开工作流模板](http://127.0.0.1:8001/templates.html) · [新增模板步骤](../web/admin/README.md#新增模板) · [策略发布接口](web-api.md#本机维护)
 
 在 GPU 主机运行 `python3 scripts/deploy.py --single-host` 即可启动本机 Docker 的 MySQL、Redis 及全部应用服务。仓库模板将数据库端口与网页端口绑定到本机，两个数据库服务的密码均为字符串 `123456`。如果在自定义配置中将顶层 `single_host` 设为 `true`，日常部署直接运行 `python3 scripts/deploy.py` 即可。使用外部数据库时，保留 `single_host` 默认值 `false`，待数据库就绪后运行 `python3 scripts/deploy.py`。分机时，先在业务机运行 `python3 scripts/deploy.py --core-only` 完成迁移，再在 GPU 机运行 `python3 scripts/deploy.py --gpu-only`。[配置读取顺序与分机部署](../README.md#已有部署与分机部署)
 

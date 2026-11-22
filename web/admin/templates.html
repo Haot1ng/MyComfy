@@ -4,10 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="referrer" content="no-referrer">
+  <meta name="referrer" content="same-origin">
   <title>工作流模板 · MyComfy</title>
   <link rel="stylesheet" href="./admin.css">
   <link rel="stylesheet" href="./templates.css">
+  <link rel="stylesheet" href="./template-editor.css">
   <link rel="stylesheet" href="./graph.css">
   <script type="module" src="./templates.js"></script>
 </head>
@@ -22,8 +23,9 @@
     <main id="content" tabindex="-1">
       <header class="topbar"><span class="crumb"><a href="/#/overview">本机管理</a><span aria-hidden="true">/</span><strong>工作流模板</strong></span></header>
       <div class="workspace">
-        <div class="pagehead"><h1>工作流模板</h1></div>
-        <section class="panel template-panel" aria-labelledby="source-title">
+        <div class="pagehead"><h1>工作流模板</h1><button type="button" class="highlight" id="new-template" aria-expanded="false" aria-controls="new-template-editor">新增模板</button></div>
+        <section id="new-template-editor" class="panel template-panel" aria-label="新增模板" hidden></section>
+        <section id="template-sources" class="panel template-panel" aria-labelledby="source-title">
           <div class="template-bar">
             <h2 id="source-title">选择模板</h2>
             <div class="template-actions">
@@ -49,13 +51,14 @@
         <section class="panel template-panel" aria-labelledby="publish-title">
           <h2 id="publish-title">发布到工作台</h2>
           <p id="publish-description" class="template-hint">选择完整策略模板后可发布新版本。</p>
-          <form id="publish-form">
-            <label for="maintenance-token">本机维护凭据文件</label>
-            <input type="file" id="maintenance-token" aria-describedby="token-location" autocomplete="off" required disabled>
-            <p id="token-location" class="template-hint">默认文件为项目下的 <code>var/config/maintenance-token</code>。WSL 部署可从 Windows 文件选择器的「Linux」中找到项目。</p>
-            <button id="publish-template" type="submit" class="highlight" disabled>发布新版本</button>
-          </form>
+          <button id="publish-template" type="button" class="highlight" disabled>发布新版本</button>
           <p id="publish-result" class="template-message" role="status"></p>
+        </section>
+        <section class="panel template-panel" aria-labelledby="published-title">
+          <div class="template-bar"><h2 id="published-title">已发布模板</h2><button type="button" id="refresh-published">刷新列表</button></div>
+          <p id="catalog-message" class="template-message" role="status"></p>
+          <ul id="published-templates" aria-label="已发布模板的最新版本"></ul>
+          <button type="button" id="more-published" hidden>加载更多</button>
         </section>
         <noscript>请启用 JavaScript 以预览和发布工作流模板。</noscript>
       </div>

@@ -104,7 +104,11 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                     )
                     assert client.post(local + publish, json={}).status_code == 403
                     assert client.post(local + publish, headers=forged, json={}).status_code == 422
-                    # 独立维护页及其模板只经回环端口提供；导入仍走相同的凭据校验。
+                    # 回环维护页包含模板发布入口，并禁止其他页面把它嵌入框架。
+                    template_page = client.get(local + "/templates.html").raise_for_status()
+                    assert (
+                        "frame-ancestors 'none'" in template_page.headers["Content-Security-Policy"]
+                    )
                     for asset in ("templates.html", "templates.js", "workflow-graph.js"):
                         assert client.get(local + "/" + asset).status_code == 200
                         assert client.get(public + "/" + asset, headers=forged).status_code == 404

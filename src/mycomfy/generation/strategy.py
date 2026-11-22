@@ -198,20 +198,29 @@ def validate_strategy(raw):
     return version.model_dump(mode="json")
 
 
-def sql_publish(db, raw, request_id):
-    """锁定系列并分配唯一版本号，保存不可变内容、摘要及请求关联。"""
+def sql_publish(db, raw, request_id, *, create_only=False):
+    """原子创建策略系列或发布其下一版本，保存不可变内容、摘要及请求关联。"""
     content = validate_strategy(raw)
     key = content["strategy_key"]
-    # 首次发布时系列行可能由并发请求创建，保存点仅回滚插入冲突。
-    series = db.get(StrategySeries, key, with_for_update=True)
-    if series is None:
+    if create_only:
+        # 数据库主键裁决并发创建；重复标识不会悄悄变成已有系列的新版本。
+        series = StrategySeries(key=key)
+        db.add(series)
         try:
-            with db.begin_nested():
-                db.add(StrategySeries(key=key))
-                db.flush()
-        except IntegrityError:
-            pass
+            db.flush()
+        except IntegrityError as exc:
+            raise ApiError(409, "STRATEGY_ALREADY_EXISTS", "该模板标识已存在") from exc
+    else:
+        # 版本发布允许加入已有系列，使用保存点恢复首次发布的并发插入冲突。
         series = db.get(StrategySeries, key, with_for_update=True)
+        if series is None:
+            try:
+                with db.begin_nested():
+                    db.add(StrategySeries(key=key))
+                    db.flush()
+            except IntegrityError:
+                pass
+            series = db.get(StrategySeries, key, with_for_update=True)
     series.latest_version += 1
     version = StrategyVersion(
         id=new_id("sv"),

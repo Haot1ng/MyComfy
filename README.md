@@ -22,7 +22,7 @@ MyComfy/
 └── docs/                         部署、运维与验收
 ```
 
-两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可预览工作流并发布策略。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
+两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
 
 后端可以跟随一次视频请求读代码。
 
@@ -60,7 +60,7 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 python3 scripts/deploy.py --single-host
 ```
 
-这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，发布所需的 H3 策略，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[导入步骤](web/admin/README.md#导入模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
 **需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
 
@@ -130,14 +130,14 @@ cp -n deploy.config.example.json deploy.config.json
 
 ### 从 Python 环境启动
 
-准备 MySQL 8.4 业务库和具有迁移权限的账号，并设置以下环境变量。数据库 URL 中的特殊字符须按 URL 规则编码。维护凭据文件存放随机令牌，文件模式设为 `0600`。
+准备 MySQL 8.4 业务库和具有迁移权限的账号，并设置以下环境变量。数据库 URL 中的特殊字符须按 URL 规则编码。使用命令行维护接口时，维护凭据文件存放随机令牌，文件模式设为 `0600`。
 
 | 环境变量 | 用途 |
 | --- | --- |
 | `MYCOMFY_DATABASE_URL` | SQLAlchemy 连接地址，形式为 `mysql+pymysql://USER:PASSWORD@HOST:3306/DATABASE` |
 | `MYCOMFY_DATA_ROOT` | API 与 Worker 共用的正式文件和运行数据目录 |
 | `MYCOMFY_PUBLIC_ORIGIN` | 用户网页与用户 API 的同源 HTTPS 地址 |
-| `MYCOMFY_MAINTENANCE_TOKEN_FILE` | 本机维护 API 的令牌文件路径 |
+| `MYCOMFY_MAINTENANCE_TOKEN_FILE` | 命令行策略发布、分组管理和密码重置等维护操作的令牌文件路径 |
 | `MYCOMFY_REDIS_URL` | 可选。写请求会话预检使用的 Redis 连接串，支持 ACL 用户名、密码和 TLS |
 | `MYCOMFY_SESSION_CACHE_TTL_SECONDS` | 预检缓存的最长保留时间，默认 60 秒，且不超过会话剩余有效期 |
 | `MYCOMFY_ENGINE_CONFIG` | 自动部署生成的 `engines.json` 路径 |
@@ -152,7 +152,7 @@ uv run --locked mycomfy runtime serve
 uv run --locked mycomfy worker
 ```
 
-用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。默认在服务所在机器打开 [本机监控](http://127.0.0.1:8001/) 可查看全局运行状态。该回环端口同时提供本机维护接口。维护端点接受 `Authorization: Bearer <token>`。登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。
+用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。本机管理入口提供全局监控和模板发布。模板页在业务机上直接发布，命令行维护调用可以使用 `Authorization: Bearer <token>`。用户工作台登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。[本机管理后台](http://127.0.0.1:8001/)
 
 ## 部署和验收
 

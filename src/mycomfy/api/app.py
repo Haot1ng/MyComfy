@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import load_only
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -114,8 +115,27 @@ def _local_request(request):
         raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not allowed")
 
 
-def _maintenance(request, settings):
-    """从受限凭据文件核验本机写请求的 Bearer 令牌。"""
+def _maintenance(request, settings, media_type):
+    """核验模板页的同源交互，或用本机维护凭据授权程序调用。"""
+    if (
+        request.method == "POST"
+        and request.url.path == "/local/v1/strategy-versions"
+        and request.headers.get("x-mycomfy-admin") == "templates"
+        and "authorization" not in request.headers
+    ):
+        # 调用方已通过回环与 Host 核验。网页发布还必须提供同源 Origin 和专用请求头。
+        origin = f"{request.url.scheme}://{request.headers['host']}"
+        if (
+            request.headers.get("origin") != origin
+            or request.headers.get("sec-fetch-site", "same-origin") != "same-origin"
+        ):
+            raise ApiError(403, "ORIGIN_REJECTED", "Same-origin template page required")
+        if media_type != "application/json":
+            raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json")
+        request.state.actor = "local-template-admin"
+        return
+
+    # 程序显式携带的维护凭据照常核验，其他本机维护操作只使用此路径。
     path = settings.maintenance_token_file
     if path is None:
         raise ApiError(503, "MAINTENANCE_DISABLED", "Maintenance credentials are unavailable")
@@ -307,7 +327,7 @@ def create_app(settings, *, local=False, sessions=None):
                     or path.rstrip("/") in {"/local/v1/groups", "/local/v1/users"}
                     or path.startswith(("/local/v1/groups/", "/local/v1/users/"))
                 ):
-                    await run_in_threadpool(_maintenance, request, settings)
+                    await run_in_threadpool(_maintenance, request, settings, media_type)
             elif path.startswith("/api/v1/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
                 auth.check_origin(request, settings.public_origin)
                 # 避免失效标签页或无凭据调用在参数校验前占用解析资源。
@@ -340,6 +360,9 @@ def create_app(settings, *, local=False, sessions=None):
             response = _error(request, ApiError(500, "INTERNAL_ERROR", "Unexpected server error"))
         if getattr(request.state, "web_asset", False):
             response.headers["Cache-Control"] = "no-cache"
+            if local and path == "/templates.html":
+                # 含发布按钮的本机页面只允许直接打开，阻止第三方网页嵌入并诱导点击。
+                response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         else:
             try:
                 await run_in_threadpool(finish_audit, request, response.status_code)
@@ -364,15 +387,24 @@ def create_app(settings, *, local=False, sessions=None):
     return app
 
 
+def _latest_strategies():
+    """只选择每个策略系列的当前版本，供工作台与本机模板列表使用。"""
+    return (
+        select(StrategyVersion)
+        .join(StrategySeries)
+        .where(StrategyVersion.version == StrategySeries.latest_version)
+    )
+
+
 def _local_routes(settings, sessions, cache):
     """构造本机策略发布与维护重置密码路由。"""
     router = APIRouter(prefix="/local/v1")
 
     @router.post("/strategy-versions", status_code=201)
-    def publish(request: Request, body: dict):
+    def publish(request: Request, body: dict, create_only: bool = False):
         """在策略版本事务中写入内容摘要、审计和版本号。"""
         with sessions.begin() as db:
-            version = sql_publish(db, body, request.state.request_id)
+            version = sql_publish(db, body, request.state.request_id, create_only=create_only)
             request.state.target = version.id
             _audit(db, request, 201)
             return {
@@ -381,6 +413,47 @@ def _local_routes(settings, sessions, cache):
                 "version": version.version,
                 "content_digest": version.content_digest,
             }
+
+    @router.get("/strategies")
+    def published_templates(limit: Limit = 50, cursor: str | None = None):
+        """按发布时间倒序分页读取各模板最新版本的名称、标识和版本号。"""
+        scope = ["local-strategies", "published_at.desc", "id.desc"]
+        position = read_position(cursor, scope, str, str)
+        # 列表只需元数据，避免从数据库加载可能很大的工作流与模型清单。
+        query = _latest_strategies().options(
+            load_only(
+                StrategyVersion.id,
+                StrategyVersion.strategy_key,
+                StrategyVersion.name,
+                StrategyVersion.version,
+                StrategyVersion.published_at,
+            )
+        )
+        if position:
+            try:
+                at = datetime.fromisoformat(position[0])
+            except ValueError:
+                raise invalid_cursor() from None
+            query = query.where(
+                or_(
+                    StrategyVersion.published_at < at,
+                    and_(StrategyVersion.published_at == at, StrategyVersion.id < position[1]),
+                )
+            )
+        with sessions() as db:
+            return page(
+                db,
+                query.order_by(StrategyVersion.published_at.desc(), StrategyVersion.id.desc()),
+                limit,
+                scope,
+                lambda row: [row.published_at.isoformat(), row.id],
+                lambda row: {
+                    "strategy_key": row.strategy_key,
+                    "strategy_version_id": row.id,
+                    "name": row.name,
+                    "version": row.version,
+                },
+            )
 
     @router.post("/users/{user_id}/password-reset", status_code=204)
     def reset(user_id: str, request: Request, body: PasswordReset):
@@ -480,11 +553,7 @@ def _public_routes(settings, sessions, store, capacity, cache):
             user, _ = _session(db, request, permission=Permission.VIEW_STRATEGIES)
             scope = [user.id, "strategies", "strategy_key.asc"]
             pos = read_position(cursor, scope, str)
-            query = (
-                select(StrategyVersion)
-                .join(StrategySeries)
-                .where(StrategyVersion.version == StrategySeries.latest_version)
-            )
+            query = _latest_strategies()
             if pos:
                 query = query.where(StrategyVersion.strategy_key > pos[0])
             return page(

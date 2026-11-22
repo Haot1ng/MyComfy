@@ -18,10 +18,11 @@
 #workflow-preview:not(:empty) {margin-top:14px;min-width:0}
 #paste-editor {margin-top:15px;display:grid;gap:8px;justify-items:start}
 #json-text {width:100%;resize:vertical;background:var(--base);border:1px solid var(--line);border-radius:7px;padding:10px;color:var(--text);font:13px/1.55 var(--mono)}
-#publish-form {display:grid;justify-items:start;gap:8px}
-#publish-form input {max-width:100%}
-#publish-form label,#paste-editor label {font-weight:600}
-#publish-form p {margin:0 0 4px}
+#paste-editor label {font-weight:600}
+#published-templates {list-style:none;padding:0;margin:8px 0}
+#published-templates li {display:flex;align-items:baseline;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+#published-templates .template-key {color:var(--muted);font:12px/1.4 var(--mono)}
+#published-templates .template-version {margin-left:auto;color:var(--accent);white-space:nowrap}
 .template-panel button:disabled {cursor:default}
 @media(max-width:520px) {
   .template-presets {grid-template-columns:minmax(0,1fr)}

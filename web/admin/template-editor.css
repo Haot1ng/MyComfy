@@ -1,0 +1,21 @@
+.template-editor fieldset {min-width:0; margin:0; padding:0; border:0}
+.template-editor .editor-controls {display:grid;gap:12px}
+.template-editor legend {margin:0 0 12px;padding:0;font-size:17px;font-weight:650}
+.template-editor h3 {font-size:15px;margin:12px 0 4px}
+.template-editor .editor-fields,.editor-binding {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.template-editor label {display:grid;gap:4px;min-width:0;font-size:13px;color:var(--muted)}
+.template-editor input,.template-editor select,.template-editor textarea {
+  width:100%;min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:6px;
+  background:var(--base);color:var(--text);font:inherit;
+}
+.template-editor textarea {resize:vertical;font-family:var(--mono)}
+.template-editor .editor-custom {display:grid;gap:10px;padding-top:12px;border-top:1px solid var(--line)}
+.template-editor .editor-custom legend {font-size:14px;margin:0}
+.template-editor button {justify-self:start}
+.template-editor p {margin:0}
+.editor-binding-head {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px}
+.editor-binding {margin-top:8px;padding:12px;border:1px solid var(--line);border-radius:7px}
+.editor-binding [data-remove] {grid-column:1/-1}
+@media(max-width:600px) {
+  .template-editor .editor-fields,.editor-binding {grid-template-columns:minmax(0,1fr)}
+}

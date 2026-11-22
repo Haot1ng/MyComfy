@@ -5,6 +5,7 @@ import struct
 import zlib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import Mock, patch
 
 import pytest
@@ -38,6 +39,7 @@ PUBLIC = "https://video.example"
 LOCAL = "http://127.0.0.1:8001"
 ORIGIN = {"Origin": PUBLIC}
 MAINTENANCE = {"Authorization": "Bearer test-maintenance"}
+TEMPLATE_PAGE = {"Origin": LOCAL, "X-MyComfy-Admin": "templates"}
 
 
 @pytest.fixture
@@ -529,6 +531,89 @@ def test_public_local_boundary_and_version_concurrency(clients):
         "/api/v1/strategies/clip/versions", params={"cursor": history["next_cursor"]}
     ).json()
     assert [v["version"] for v in tail["items"]] == [1]
+
+
+def test_template_page_authorization_is_scoped_to_local_publication(
+    clients, mysql_sessions, tmp_path
+):
+    """同源模板页可在没有凭据文件的环境中发布，其他维护写入仍需独立授权。"""
+    public, local = clients
+    url = "/local/v1/strategy-versions"
+    # 缺少任一浏览器条件或显式提供无效凭据，都不能获得模板写权限。
+    for headers in (
+        {"Origin": LOCAL},
+        {"X-MyComfy-Admin": "templates"},
+        {**TEMPLATE_PAGE, "Origin": PUBLIC},
+        {**TEMPLATE_PAGE, "X-MyComfy-Admin": "groups"},
+        {**TEMPLATE_PAGE, "Sec-Fetch-Site": "same-site"},
+        {**TEMPLATE_PAGE, "Sec-Fetch-Site": "cross-site"},
+        {**TEMPLATE_PAGE, "Authorization": "Bearer invalid"},
+    ):
+        assert local.post(url, headers=headers, json=strategy()).status_code == 403
+    for content_type in ("text/plain", "application/x-www-form-urlencoded"):
+        headers = {**TEMPLATE_PAGE, "Content-Type": content_type}
+        assert local.post(url, headers=headers, json=strategy()).status_code in (403, 415)
+    assert local.post(url, headers=TEMPLATE_PAGE, content=b"{}").status_code in (403, 415)
+    assert local.post("/local/v1/groups", headers=TEMPLATE_PAGE, json={}).status_code == 403
+    assert public.post(url, headers=TEMPLATE_PAGE, json=strategy()).status_code == 404
+    assert public.get("/local/v1/strategies").status_code == 404
+
+    # 删除夹具的临时令牌，验证合法同源浏览器请求独立于文件的存在。
+    (tmp_path / "maintenance-token").unlink()
+    result = local.post(
+        url, headers={**TEMPLATE_PAGE, "Sec-Fetch-Site": "same-origin"}, json=strategy()
+    )
+    assert result.status_code == 201, result.text
+    with mysql_sessions() as db:
+        audit = db.get(Audit, result.headers["X-Request-ID"])
+        assert audit.actor == "local-template-admin"
+        assert audit.target == result.json()["strategy_version_id"]
+
+
+def test_create_only_template_concurrency_and_local_catalog(clients):
+    """并发新建同一标识仅产生 v1，后续版本能在本机列表分页中正确呈现。"""
+    _, local = clients
+    versions = "/local/v1/strategy-versions"
+    catalog = "/local/v1/strategies"
+    start = Barrier(2)
+
+    def create(_):
+        """同时发送两份相同的模板创建请求，以观察唯一标识冲突。"""
+        start.wait(timeout=10)
+        return local.post(
+            versions, params={"create_only": True}, headers=TEMPLATE_PAGE, json=strategy()
+        )
+
+    with ThreadPoolExecutor(2) as pool:
+        responses = sorted(pool.map(create, range(2)), key=lambda r: r.status_code)
+    created, conflict = responses
+    assert created.status_code == 201 and created.json()["version"] == 1
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "STRATEGY_ALREADY_EXISTS"
+
+    # 先建立另一系列，再发布同一系列的 v2，验证最新模板排在首页。
+    second = local.post(
+        versions, json={**strategy(), "strategy_key": "clip-b"}, headers=MAINTENANCE
+    )
+    second.raise_for_status()
+    latest = local.post(versions, json={**strategy(), "name": "更新版"}, headers=TEMPLATE_PAGE)
+    latest.raise_for_status()
+    assert latest.json()["version"] == 2
+    first_page = local.get(catalog, params={"limit": 1}).raise_for_status().json()
+    assert first_page["items"] == [
+        {
+            "strategy_key": "clip",
+            "strategy_version_id": latest.json()["strategy_version_id"],
+            "name": "更新版",
+            "version": 2,
+        }
+    ]
+    next_page = (
+        local.get(catalog, params={"cursor": first_page["next_cursor"]}).raise_for_status().json()
+    )
+    assert [v["strategy_key"] for v in next_page["items"]] == ["clip-b"]
+    assert next_page["next_cursor"] is None
+    assert local.get(catalog, params={"cursor": "invalid"}).status_code == 400
 
 
 def test_content_detects_damage_records_alert_and_recovers_same_asset(

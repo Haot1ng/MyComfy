@@ -1,6 +1,6 @@
 # MyComfy V1 前台与管理后台 API
 
-用户前台通过同源 `/api/v1` 完成账号、批次生成和视频交付。本机管理后台通过 `/local/v1/monitor` 查询全局运行状态。维护人员通过本机凭据调用策略发布和密码重置接口。本文列出的请求和响应以当前实现为准，页面依赖的接口限制见末节。[V1 实现与验收规格](https://chatgpt.com/space/page_d83476ac4c1c81918dc24a4ed1be8e51)
+用户前台通过同源 `/api/v1` 完成账号、批次生成和视频交付。本机管理后台通过 `/local/v1/monitor` 查询全局运行状态，并提供工作流模板的创建和发布。密码重置等操作由持有维护凭据的本机程序调用。本文列出的请求和响应以当前实现为准，页面依赖的接口限制见末节。[V1 实现与验收规格](https://chatgpt.com/space/page_d83476ac4c1c81918dc24a4ed1be8e51)
 
 ## 入口与权限
 
@@ -8,7 +8,8 @@
 | --- | --- | --- |
 | 用户前台 | `/api/v1` | 网页和 API 使用同源 HTTPS。公开写请求校验 `Origin`。注册和登录以外的接口需要有效会话，任务、素材、产物和通知均按当前用户授权。 |
 | 本机只读监控 | `/local/v1/monitor` | 只读 GET，免账号登录。API 要求连接对端与 `Host` 为回环地址，携带的 `Origin` 必须匹配本机入口。 |
-| 模板导入页、本机维护程序 | `/local/v1` | 满足同样的本机入口限制，写请求另带 `Authorization: Bearer <token>`。凭据来自操作系统权限受限的维护令牌文件。 |
+| 本机模板页 | `/local/v1/strategies`、`/local/v1/strategy-versions` | 在业务机本地查看已发布系列。创建和发布时，服务核验回环访问、同源 `Origin`、JSON 内容类型和专用请求头。 |
+| 本机维护程序 | `/local/v1` | 通过本机入口使用 `Authorization: Bearer <token>` 调用策略发布、密码重置等维护操作。凭据来自操作系统权限受限的维护令牌文件。 |
 
 API 默认业务端口为 `8000`，本机端口为 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。管理网页和监控 API 仅使用本机回环入口。监控视图仅调用监控接口，独立的模板导入页在维护人员确认发布时调用策略版本接口。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [部署与运维](operations.md)
 
@@ -40,7 +41,7 @@ API 默认业务端口为 `8000`，本机端口为 `127.0.0.1:8001`。两个监�
 | 401 | `SESSION_INVALID` 表示会话失效。`AUTH_FAILED` 表示登录凭据或改密时提交的当前密码校验失败。 |
 | 403 | `ORIGIN_REJECTED`、`CSRF_REJECTED`、`LOCAL_ONLY` 或 `MAINTENANCE_FORBIDDEN`。分别检查来源、会话令牌、监听入口或维护凭据。 |
 | 404 | `NOT_FOUND`。资源不存在或不在当前调用方的可访问范围内。 |
-| 409 | `USERNAME_TAKEN` 或 `IDEMPOTENCY_CONFLICT`。分别处理用户名冲突和同一批次键绑定了不同内容。 |
+| 409 | `USERNAME_TAKEN` 或 `IDEMPOTENCY_CONFLICT`。分别处理用户名冲突和同一批次键绑定了不同内容。新增模板时，已有标识返回 `STRATEGY_ALREADY_EXISTS`。 |
 | 413、415 | `UPLOAD_TOO_LARGE`、`INVALID_MEDIA` 或 `UNSUPPORTED_MEDIA_TYPE`。检查大小、实际媒体内容或请求编码。 |
 | 416 | `INVALID_RANGE`。媒体请求的单段字节范围不可满足。 |
 | 422 | `VALIDATION_FAILED` 等参数或业务校验错误。按 `details` 映射到表单和任务项。 |
@@ -182,11 +183,13 @@ API 默认业务端口为 `8000`，本机端口为 `127.0.0.1:8001`。两个监�
 
 ## 本机维护
 
-本机管理后台的 `/templates.html` 可预览内置 H3 策略及本地 JSON 文件。选择维护令牌文件并确认发布后，页面将完整策略以 `application/json` 提交到策略版本接口，凭据通过 `Authorization: Bearer <token>` 传递。同一 `strategy_key` 的每次成功发布都会分配下一个版本号。[模板导入操作](../web/admin/README.md#导入模板)
+本机管理后台的 `/templates.html` 可基于内置 H3 或 ComfyUI API 工作流创建策略。点击发布后，页面发送 `Content-Type: application/json` 和 `X-MyComfy-Admin: templates`。服务要求连接对端与 Host 为回环地址，浏览器的 `Origin` 与当前入口完全匹配。请求带有 `Sec-Fetch-Site` 时，值须为 `same-origin`。这是对业务机本地使用者的授权，专用请求头本身属于公开协议。命令行维护程序仍可使用 Bearer 凭据发布。[新增模板操作](../web/admin/README.md#新增模板)
 
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
-| `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。版本号按系列分配，发布内容不可变。 |
+| `GET /local/v1/strategies` | 分页。 | `200 {items, next_cursor}`。每个系列返回最新版本的 `strategy_key, name, version, strategy_version_id`。 |
+| `POST /local/v1/strategy-versions?create_only=true` | 完整策略对象，使用新的 `strategy_key`。 | 新建时返回 `201` 和版本 `1`。标识已存在时返回 `409 STRATEGY_ALREADY_EXISTS`。 |
+| `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。首次发布为 `1`，后续按同一标识递增，已发布的内容不可变。 |
 | `POST /local/v1/users/{user_id}/password-reset` | `{new_password}` | `204`。同事务更新密码、撤销当前会话和记录审计。 |
 
 停止接单、恢复接单和解除隔离由运维命令处理。运行管理按实例 ID 和代次核对目标，解除隔离时记录处置依据。[维护路由](../src/mycomfy/api/app.py#L327) · [策略校验](../src/mycomfy/generation/strategy.py#L108) · [运维命令](operations.md)

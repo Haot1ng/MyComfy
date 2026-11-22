@@ -310,6 +310,33 @@ def asset_field_names(version):
     return {b["input"] for b in version.content["bindings"] if b["kind"] == "asset"}
 
 
+def input_labels(schema, names):
+    """读取固定版本输入的显示名，沿文档内引用取标题，缺失时保留参数键。"""
+    root = Registry().resolver_with_root(DRAFT202012.create_resource(schema))
+    properties = schema.get("properties", {})
+    labels = {}
+    for name in names:
+        labels[name] = name
+        rule = properties.get(name)
+        resolver = root
+        seen = set()
+        while isinstance(rule, dict) and id(rule) not in seen:
+            seen.add(id(rule))
+            if rule.get("title"):
+                labels[name] = rule["title"]
+                break
+            ref = rule.get("$ref")
+            if not isinstance(ref, str) or not ref.startswith("#"):
+                break
+            resolver = resolver.in_subresource(DRAFT202012.create_resource(rule))
+            try:
+                target = resolver.lookup(ref)
+            except Unresolvable:
+                break
+            rule, resolver = target.contents, target.resolver
+    return labels
+
+
 def strategy_payload(db, version):
     """构造策略版本摘要、表单及可受理性等用户可见字段。"""
     accepted = configured_for(db, version)

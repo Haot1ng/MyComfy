@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import literal, select, union_all
+from sqlalchemy.orm import load_only
 
 from mycomfy.database.models import (
     Asset,
@@ -19,7 +20,7 @@ from mycomfy.database.session import db_now, new_id, timestamp
 from mycomfy.errors import ApiError, not_found
 
 from .state import TERMINAL, advance, canonical_digest, emit
-from .strategy import asset_field_names, configured_strategy_ids, json_pointer
+from .strategy import asset_field_names, configured_strategy_ids, input_labels, json_pointer
 
 ClientKey = Annotated[str, Field(min_length=1, max_length=200)]
 
@@ -225,9 +226,9 @@ def batch_payload(db, batch_id):
     }
 
 
-def resource(db, model, id_value, user_id, *, lock=False):
+def resource(db, model, id_value, user_id, *, lock=False, options=()):
     """按资源 ID 和用户归属加载记录，写入方可请求行锁。"""
-    row = db.get(model, id_value, with_for_update=lock)
+    row = db.get(model, id_value, with_for_update=lock, options=options)
     if row is None or row.user_id != user_id:
         raise not_found()
     return row
@@ -258,6 +259,47 @@ def asset_payload(asset):
     }
 
 
+def original_payload(db, job, *, can_download):
+    """读取受理时的有效参数、固定策略的字段名称及关联的独立上传素材。"""
+    strategy = db.get(StrategyVersion, job.strategy_version_id)
+    bound_fields = asset_field_names(strategy)
+    asset_fields = [name for name in job.inputs if name in bound_fields]
+    input_assets = {}
+    if can_download and asset_fields:
+        requested = dict.fromkeys(
+            value
+            for name in asset_fields
+            for value in asset_ids(job.inputs[name])
+            if isinstance(value, str)
+        )
+        linked = select(JobInput.asset_id).where(JobInput.job_id == job.id)
+        records = _lookup_batch_ids(
+            db,
+            Asset,
+            requested,
+            Asset.id.in_(linked),
+            Asset.user_id == job.user_id,
+            Asset.job_id.is_(None),
+            Asset.execution_id.is_(None),
+            Asset.role == "input",
+        )
+        input_assets = {key: asset_payload(records[key]) for key in requested if key in records}
+    return {
+        "job_id": job.id,
+        "batch_id": job.batch_id,
+        "client_task_key": job.client_key,
+        "created_at": timestamp(job.created_at),
+        "strategy_version_id": strategy.id,
+        "strategy_key": strategy.strategy_key,
+        "strategy_name": strategy.name,
+        "strategy_version": strategy.version,
+        "inputs": job.inputs,
+        "field_labels": input_labels(strategy.content["input_schema"], job.inputs),
+        "asset_fields": asset_fields,
+        "input_assets": input_assets,
+    }
+
+
 def assets_visible(db, job):
     """依据任务绑定的策略版本判断取消后是否向用户开放产物。"""
     return (
@@ -283,14 +325,15 @@ def job_assets(db, job):
 def get_asset(db, asset_id, user_id):
     """验证文件归属以及取消后的开放规则，返回获准访问的文件记录。"""
     asset = resource(db, Asset, asset_id, user_id)
-    if asset.job_id and not assets_visible(db, db.get(Job, asset.job_id)):
-        raise not_found()
+    if asset.job_id:
+        job = db.get(Job, asset.job_id, options=(load_only(Job.state, Job.strategy_version_id),))
+        if not assets_visible(db, job):
+            raise not_found()
     return asset
 
 
 def job_payload(db, job, *, details=True):
     """生成任务快照，详情额外关联当前执行、失败原因及可见产物。"""
-    execution = db.get(Execution, job.current_execution_id) if job.current_execution_id else None
     payload = {
         "job_id": job.id,
         "batch_id": job.batch_id,
@@ -303,6 +346,13 @@ def job_payload(db, job, *, details=True):
         "retry_at": timestamp(job.retry_at),
     }
     if details:
+        execution = None
+        if job.current_execution_id:
+            execution = db.execute(
+                select(Execution.stage, Execution.phase, Execution.attempt_no).where(
+                    Execution.id == job.current_execution_id
+                )
+            ).one_or_none()
         payload.update(
             {
                 "current_execution_id": job.current_execution_id,

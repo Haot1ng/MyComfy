@@ -52,11 +52,16 @@ def access_profile(db, user_id):
     return {"groups": list(groups.values()), "permissions": sorted(permissions)}
 
 
-def require_permission(db, user_id, permission: Permission, *, write=False):
+def has_permission(db, user_id, permission: Permission, *, write=False):
     """以当前分组关系校验权限，写请求持有授权行锁直到事务结束。"""
     statement = permission_query(user_id).where(UserGroupPermission.permission == permission)
     if write:
         # 锁定实际授予权限的组关系，使权限撤销与业务写入按事务顺序生效。
         statement = statement.with_for_update(read=True)
-    if db.scalar(statement.limit(1)) is None:
+    return db.scalar(statement.limit(1)) is not None
+
+
+def require_permission(db, user_id, permission: Permission, *, write=False):
+    """在缺少本项权限时拒绝请求。"""
+    if not has_permission(db, user_id, permission, write=write):
         raise ApiError(403, "PERMISSION_DENIED", "Current groups do not grant this permission")

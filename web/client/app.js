@@ -1,6 +1,6 @@
 import {createSession, request} from "./session.js";
 import {mountComposer} from "./composer.js";
-import {mountHistory} from "./history.js";
+import {mountHistory, mountOriginal} from "./history.js";
 import {canVisitPage, hasPermission} from "./access.mjs";
 
 const root = document.getElementById("app");
@@ -337,10 +337,11 @@ async function renderRoute() {
   closeView();
   if (!user) return;
   const path = location.hash.slice(1) || "/home";
+  const original = /^\/job\/([^/]+)\/original$/.exec(path);
   const parent = /^\/(?:job|batch)\//.test(path) ? "/jobs" : path;
   const section = sections.find(([key]) => key === parent);
   if (!section || !canVisit(parent)) { location.replace("#/home"); return; }
-  const label = section[1];
+  const label = original ? "原始任务信息" : section[1];
   document.title = label + " · MyComfy";
   root.querySelector("#location").textContent = label;
   root.querySelectorAll("nav a").forEach(link => {
@@ -364,6 +365,7 @@ async function renderRoute() {
   try {
     let view;
     if (path === "/create") view = {dispose: await mountComposer(host, ctx)};
+    else if (original) view = await mountOriginal(host, ctx, decodeURIComponent(original[1]));
     else if (path === "/account") accountView(host);
     else if (path === "/home") { view = homeView(host, ctx); currentView = view; await view.refresh(); }
     else view = await mountHistory(host, ctx, path);

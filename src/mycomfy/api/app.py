@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import defer, load_only
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -47,7 +47,7 @@ from . import auth
 from .events import build_event_router, event_dispatcher
 from .group_admin import build_group_admin_router
 from .pagination import invalid_cursor, page, read_position
-from .permissions import Permission, access_profile, require_permission
+from .permissions import Permission, access_profile, has_permission, require_permission
 from .session_cache import SessionPrecheckCache
 from .web import ADMIN_FILES, install_web_routes
 
@@ -646,7 +646,7 @@ def _public_routes(settings, sessions, store, capacity, cache):
             jobs.resource(db, Batch, batch_id, user.id)
             scope = [user.id, "batch", batch_id, "position.asc"]
             pos = read_position(cursor, scope, int)
-            query = select(Job).where(Job.batch_id == batch_id)
+            query = select(Job).options(defer(Job.inputs)).where(Job.batch_id == batch_id)
             if pos:
                 query = query.where(Job.position > pos[0])
             counts = dict(
@@ -682,7 +682,7 @@ def _public_routes(settings, sessions, store, capacity, cache):
             user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
             scope = [user.id, "jobs", state, batch_id, "created_at.desc,id.desc"]
             pos = read_position(cursor, scope, str, str)
-            query = select(Job).where(Job.user_id == user.id)
+            query = select(Job).options(defer(Job.inputs)).where(Job.user_id == user.id)
             if pos:
                 try:
                     at = datetime.fromisoformat(pos[0])
@@ -711,7 +711,17 @@ def _public_routes(settings, sessions, store, capacity, cache):
         """返回用户可访问的任务状态、关联执行和可见文件。"""
         with sessions() as db:
             user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
-            return jobs.job_payload(db, jobs.resource(db, Job, job_id, user.id))
+            job = jobs.resource(db, Job, job_id, user.id, options=(defer(Job.inputs),))
+            return jobs.job_payload(db, job)
+
+    @router.get("/jobs/{job_id}/original")
+    def job_original(job_id: str, request: Request):
+        """按需读取本人的任务受理参数，并按文件读取权限附带输入素材元数据。"""
+        with sessions() as db:
+            user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
+            job = jobs.resource(db, Job, job_id, user.id)
+            can_download = has_permission(db, user.id, Permission.DOWNLOAD_ASSETS)
+            return jobs.original_payload(db, job, can_download=can_download)
 
     @router.post("/jobs/{job_id}/cancel")
     def cancel(job_id: str, request: Request, body: Cancel | None = None):
@@ -728,7 +738,7 @@ def _public_routes(settings, sessions, store, capacity, cache):
         """按固定策略的取消后开放规则分页返回任务产物。"""
         with sessions() as db:
             user, _ = _session(db, request, permission=Permission.VIEW_JOBS)
-            job = jobs.resource(db, Job, job_id, user.id)
+            job = jobs.resource(db, Job, job_id, user.id, options=(defer(Job.inputs),))
             scope = [user.id, "assets", job_id, "id.asc"]
             pos = read_position(cursor, scope, str)
             if not jobs.assets_visible(db, job):

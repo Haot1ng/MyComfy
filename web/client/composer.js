@@ -1,3 +1,5 @@
+import {parseInputJson} from './session.js';
+
 // The pending request is kept per account and tab until its batch ID is known.
 const pendingRequests = new Map();
 
@@ -43,17 +45,6 @@ function errorText(error) {
   }
   if (error.retryAfter && /^\d+$/.test(error.retryAfter)) message += ' · ' + error.retryAfter + ' 秒后重试';
   return error.requestId ? message + '（请求 ' + error.requestId + '）' : message;
-}
-
-// Preserve integer seeds larger than 2^53 when replaying a JSON snapshot.
-function parseInputJson(text) {
-  return JSON.parse(text, (name, value, context) => {
-    if (typeof value !== 'number') return value;
-    if (!Number.isFinite(value)) throw new Error('数值超出范围');
-    if (!Number.isInteger(value) || Number.isSafeInteger(value)) return value;
-    if (context?.source && typeof JSON.rawJSON === 'function') return JSON.rawJSON(context.source);
-    throw new Error('当前浏览器无法精确表示此整数');
-  });
 }
 
 async function allPages(api, path) {

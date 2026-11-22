@@ -95,6 +95,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | `GET /batches/{batch_id}` | 批次 ID、分页 | `200 {batch_id, counts, items, next_cursor}`，`counts` 是整个批次按已有任务状态分组的计数，缺少的状态按零处理。 |
 | `GET /jobs` | 可选 `state`、`batch_id` 及分页 | `200`，当前用户的任务摘要列表。 |
 | `GET /jobs/{job_id}` | 任务 ID | `200`，任务详情及其可见产物。 |
+| `GET /jobs/{job_id}/original` | 本人的任务 ID，需 `jobs.view` | `200`，任务受理时的输入、素材引用及所用策略版本。仅在进入“原始任务信息”页后请求。 |
 | `POST /jobs/{job_id}/cancel` | 可省略请求体，或传 `{reason}`，最长 255 字符 | `200 {job_id, state, job_version}`。非终态原子取消，终态请求返回已提交的结论。 |
 
 ```json
@@ -113,6 +114,17 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 - 每批至少一项，默认最多 20 项，由 `MYCOMFY_MAX_BATCH_TASKS` 配置。每项独立选择策略版本。`client_task_key` 在批内唯一，两种客户端键均为 1 至 200 字符。
 - 整批校验通过后才创建记录。对逐项 `422`，按任务键或索引和字段路径展示错误。未受理的批次修改后可沿用原键。已受理的批次，同一用户以同键同内容重放可取回原 ID，键相同但内容变化返回 `409 IDEMPOTENCY_CONFLICT`。响应丢失时保留原键和请求快照，按原任务和数组顺序重放。
 - 任务摘要含 `job_id`、`batch_id`、`strategy_version_id`、`client_task_key`、`state`、`job_version`、`created_at`、`blocked_reason`、`retry_at`。详情增加 `current_execution_id`、`stage`、`execution_phase`、`progress`、`attempt_no`、`failure`、`assets`。未知值按 `null` 处理。
+
+**原始任务信息**返回 `job_id`、`batch_id`、`client_task_key`、`created_at` 和任务绑定的 `strategy_key`、`strategy_name`、`strategy_version`、`strategy_version_id`。页面用以下字段还原这次任务的表单。
+
+| 字段 | 含义 |
+| --- | --- |
+| `inputs` | 受理时保存的有效参数，包含已应用的策略默认值。提示词使用该策略定义的输入名。 |
+| `field_labels` | 输入字段名到原策略版本字段标题的映射，缺少标题时使用字段名。 |
+| `asset_fields` | 此次输入中引用素材的字段名。按 `inputs` 中的单个 ID 或 ID 数组展示，保留数组顺序和重复引用。 |
+| `input_assets` | 以输入中引用的素材 ID 为键的文件元数据表，文件格式见下文。仅有 `jobs.view` 时可读自己的输入和素材引用，持有 `assets.download` 时才返回素材元数据。 |
+
+源素材的预览和下载分别在用户点击相应操作时请求文件内容。缺少任务查看权限返回 `403 PERMISSION_DENIED`，查询其他用户或不存在的任务返回 `404`。
 
 | `state` | 页面含义 |
 | --- | --- |

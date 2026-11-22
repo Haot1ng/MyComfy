@@ -533,6 +533,111 @@ def test_public_local_boundary_and_version_concurrency(clients):
     assert [v["version"] for v in tail["items"]] == [1]
 
 
+@pytest.fixture
+def original_job(clients):
+    """用实际上传与批次接口记录含多行提示词、素材列表和默认参数的任务。"""
+    user, local = clients
+    headers = login(user, "original-owner")
+    upload = user.post("/api/v1/assets", headers=headers, files={"file": ("图.png", png_sample())})
+    asset = upload.raise_for_status().json()
+    config = strategy()
+    properties = config["input_schema"]["properties"]
+    properties["text"]["title"] = "初版提示词"
+    properties["image"] = {"type": "array", "items": {"type": "string"}}
+    properties["seed"] = {"type": "integer", "default": 0}
+    config["workflow"]["1"]["inputs"]["seed"] = 0
+    config["bindings"].append(
+        {"input": "seed", "node_id": "1", "node_input": "seed", "kind": "value"}
+    )
+    version = (
+        local.post("/local/v1/strategy-versions", json=config, headers=MAINTENANCE)
+        .raise_for_status()
+        .json()
+    )
+    asset_id = asset["asset_id"]
+    inputs = {"text": "  林间清晨\n逆光下的落叶  ", "image": [asset_id.upper(), asset_id]}
+    first = {"client_task_key": "分镜一", "strategy_version_id": version["strategy_version_id"]}
+    tasks = [
+        {**first, "inputs": inputs},
+        {**first, "client_task_key": "分镜二", "inputs": {"text": "纯文字"}},
+    ]
+    batch = (
+        user.post(
+            "/api/v1/batches", headers=headers, json={"client_batch_key": "镜头", "tasks": tasks}
+        )
+        .raise_for_status()
+        .json()
+    )
+    return batch, version, {**inputs, "seed": 0}, asset
+
+
+def test_job_original_preserves_admitted_inputs_and_strategy(clients, original_job):
+    """发布新版后仍按任务原版显示标题、输入和素材，普通任务接口不附带原始输入。"""
+    user, local = clients
+    batch, version, inputs, asset = original_job
+    latest = local.post(
+        "/local/v1/strategy-versions", json={**strategy(), "name": "新版本"}, headers=MAINTENANCE
+    )
+    assert latest.raise_for_status().json()["version"] == 2
+    job_id = batch["tasks"][0]["job_id"]
+    url = f"/api/v1/jobs/{job_id}"
+    detail = user.get(url).raise_for_status().json()
+    original = user.get(f"{url}/original").raise_for_status().json()
+    assert original == {
+        "job_id": job_id,
+        "batch_id": batch["batch_id"],
+        "client_task_key": "分镜一",
+        "created_at": detail["created_at"],
+        "strategy_version_id": version["strategy_version_id"],
+        "strategy_key": "clip",
+        "strategy_name": "演示",
+        "strategy_version": 1,
+        "inputs": inputs,
+        "field_labels": {"text": "初版提示词", "image": "image", "seed": "seed"},
+        "asset_fields": ["image"],
+        "input_assets": {requested_id: asset for requested_id in inputs["image"]},
+    }
+    assert user.get(asset["content_url"]).content == png_sample()
+    second_id = batch["tasks"][1]["job_id"]
+    second = user.get(f"/api/v1/jobs/{second_id}/original").raise_for_status().json()
+    assert second["inputs"] == {"text": "纯文字", "seed": 0}
+    assert second["asset_fields"] == [] and second["input_assets"] == {}
+    private_fields = {"inputs", "input_assets", "asset_fields", "field_labels"}
+    assert private_fields.isdisjoint(detail)
+    for listing in ("/api/v1/jobs", f"/api/v1/batches/{batch['batch_id']}"):
+        rows = user.get(listing).raise_for_status().json()["items"]
+        assert {row["job_id"] for row in rows} == {job_id, second_id}
+        assert all(private_fields.isdisjoint(row) for row in rows)
+
+
+def test_job_original_enforces_job_and_file_permissions(clients, original_job):
+    """本人可按现有分组回看输入，文件元数据和内容另行鉴权，其他账户无法读取。"""
+    user, local = clients
+    batch, _, inputs, asset = original_job
+    url = f"/api/v1/jobs/{batch['tasks'][0]['job_id']}/original"
+    owner = user.get("/api/v1/me").raise_for_status().json()["user_id"]
+    group = {"key": "jobs-only", "name": "任务查阅", "permissions": ["jobs.view"]}
+    local.post("/local/v1/groups", json=group, headers=MAINTENANCE).raise_for_status()
+    membership = f"/local/v1/users/{owner}/groups"
+    local.put(
+        membership, json={"group_keys": [group["key"]]}, headers=MAINTENANCE
+    ).raise_for_status()
+    limited = user.get(url).raise_for_status().json()
+    assert limited["inputs"] == inputs and limited["asset_fields"] == ["image"]
+    assert limited["input_assets"] == {}
+    assert user.get(asset["content_url"]).status_code == 403
+
+    local.put(
+        f"/local/v1/groups/{group['key']}",
+        json={"name": "文件下载", "permissions": ["assets.download"]},
+        headers=MAINTENANCE,
+    ).raise_for_status()
+    denied = user.get(url)
+    assert denied.status_code == 403 and denied.json()["error"]["code"] == "PERMISSION_DENIED"
+    login(user, "other-viewer")
+    assert user.get(url).status_code == 404
+
+
 def test_template_page_authorization_is_scoped_to_local_publication(
     clients, mysql_sessions, tmp_path
 ):

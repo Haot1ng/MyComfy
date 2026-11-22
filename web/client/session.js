@@ -5,7 +5,30 @@ const jobEvents = [
   "asset.available", "asset.unavailable",
 ];
 
-export async function request(path, options = {}) {
+// 任务参数中的整数种子可能超过 JavaScript 的安全整数范围。
+export function parseInputJson(text) {
+  return JSON.parse(text, (name, value, context) => {
+    if (typeof value !== "number") return value;
+    if (!Number.isFinite(value)) throw new Error("数值超出范围");
+    if (!Number.isInteger(value) || Number.isSafeInteger(value)) return value;
+    if (context?.source && typeof JSON.rawJSON === "function") return JSON.rawJSON(context.source);
+    throw new Error("当前浏览器无法精确表示此整数");
+  });
+}
+
+function parseDisplayJson(text) {
+  if (typeof JSON.rawJSON === "function") return parseInputJson(text);
+  // Older browsers can still display large seeds as exact decimal text.
+  // Skip quoted strings so numbers inside prompts and asset IDs stay untouched.
+  const tokens = /"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  return JSON.parse(text.replace(tokens, token => {
+    if (token.startsWith('"')) return token;
+    const value = Number(token);
+    return Number.isInteger(value) && !Number.isSafeInteger(value) ? JSON.stringify(token) : token;
+  }));
+}
+
+export async function request(path, {preserveNumbers = false, ...options} = {}) {
   const headers = new Headers(options.headers);
   let body = options.body;
   if (body != null && !(body instanceof FormData)) {
@@ -16,7 +39,9 @@ export async function request(path, options = {}) {
     ...options, headers, body, credentials: "same-origin", cache: "no-store",
   });
   if (response.status === 204) return null;
-  const data = await response.json().catch(() => null);
+  const data = preserveNumbers && response.ok
+    ? parseDisplayJson(await response.text())
+    : await response.json().catch(() => null);
   if (!response.ok) {
     const error = new Error(data?.error?.message || "服务暂时不可用，请稍后重试");
     Object.assign(error, {

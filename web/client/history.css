@@ -108,6 +108,24 @@
 .hist-file-detail { color: var(--hist-sub); font-size: .78rem; }
 .hist-file-detail summary { cursor: pointer; }
 .hist-file-detail .hist-facts { margin-bottom: 0; }
+.hist-original-fields { margin: 0; }
+.hist-original-fields > div { padding: .85rem 0; border-top: 1px solid var(--hist-rule); }
+.hist-original-fields > div:last-child { padding-bottom: 0; }
+.hist-original-fields dt { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; font-weight: 600; overflow-wrap: anywhere; }
+.hist-original-fields dt code { color: var(--hist-sub); font-weight: 400; }
+.hist-original-fields dd { margin: .4rem 0 0; }
+.hist-original-fields pre {
+  max-width: 100%; margin: 0; padding: .7rem .8rem; background: #f8f7fa;
+  border-radius: .4rem; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6;
+}
+.hist-original-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.hist-section-heading .hist-original-actions { justify-content: flex-end; font-size: .85rem; }
+.hist-original-assets { margin: 0; padding-inline-start: 1.4rem; }
+.hist-original-asset { padding: .45rem .3rem; }
+.hist-original-asset small { display: block; margin: .2rem 0; overflow-wrap: anywhere; }
+.hist-original-asset .hist-note { display: block; }
+.hist-original-preview img, .hist-original-preview video { display: block; max-width: 100%; max-height: min(55vh, 28rem); border-radius: .5rem; margin-top: .6rem; }
+.hist-original-preview audio { max-width: 100%; margin-top: .6rem; }
 .history-view .hist-note { padding: .65rem .8rem; border-radius: .45rem; background: #f4f0f9; font-size: .85rem; }
 .hist-inbox { list-style: none; padding: 0; margin: 0; overflow: hidden; }
 .hist-notice { display: flex; justify-content: space-between; align-items: center; gap: .8rem; padding: 1rem; border-bottom: 1px solid var(--hist-rule); }

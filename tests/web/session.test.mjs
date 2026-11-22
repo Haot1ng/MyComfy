@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import {setTimeout as wait} from "node:timers/promises";
 import test from "node:test";
-import {createSession} from "../../web/client/session.js";
+import {createSession, request} from "../../web/client/session.js";
 
 const identity = {user_id: "user-a", session_generation: "3", csrf_token: "csrf-example"};
+
+test("display original inputs on browsers without raw JSON numbers", async t => {
+  const original = Object.getOwnPropertyDescriptor(JSON, "rawJSON");
+  Object.defineProperty(JSON, "rawJSON", {configurable: true, value: undefined});
+  t.after(() => original ? Object.defineProperty(JSON, "rawJSON", original) : delete JSON.rawJSON);
+  const prompt = '镜头 "18446744073709551615"\n下一幕';
+  const body = '{"inputs":{"prompt":' + JSON.stringify(prompt) + ',"seed":18446744073709551615}}';
+  t.mock.method(globalThis, "fetch", async () => new Response(body));
+  const result = await request("/jobs/j1/original", {preserveNumbers: true});
+  assert.deepEqual(result.inputs, {prompt, seed: "18446744073709551615"});
+});
 
 test("recover a disconnect between event receipt and snapshot refresh", async t => {
   const streams = [];

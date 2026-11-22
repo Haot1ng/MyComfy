@@ -83,23 +83,31 @@ function prettySize(size) {
   return (size / 1048576).toFixed(1) + " MiB";
 }
 
-function assetCard(asset, ctx) {
+function mediaDescription(asset) {
   const metadata = asset.media || {};
   const info = [asset.media_type, prettySize(asset.size)];
   if (metadata.width && metadata.height) info.push(metadata.width + " × " + metadata.height);
   if (metadata.duration != null) info.push(metadata.duration.toFixed(1) + " 秒");
   if (metadata.fps != null) info.push(Number(metadata.fps.toFixed(2)) + " fps");
+  return info.join(" · ");
+}
+
+function downloadLink(url, complete) {
+  const download = element("a", "btn", complete ? "下载" : "下载部分文件");
+  const downloadUrl = new URL(url);
+  downloadUrl.searchParams.set("download", "1");
+  download.href = downloadUrl.href;
+  download.download = "";
+  return download;
+}
+
+function assetCard(asset, ctx) {
   const header = element("div", "hist-asset-head",
-    element("div", null, element("strong", null, asset.role), element("p", "muted", info.join(" · "))));
+    element("div", null, element("strong", null, asset.role), element("p", "muted", mediaDescription(asset))));
   const card = element("article", "hist-asset", header);
   if (asset.available && asset.content_url && ctx.can("assets.download")) {
     const url = new URL(ctx.mediaUrl(asset.content_url), location.origin);
-    const download = element("a", "btn", asset.complete ? "下载" : "下载部分文件");
-    const downloadUrl = new URL(url);
-    downloadUrl.searchParams.set("download", "1");
-    download.href = downloadUrl.href;
-    download.download = "";
-    header.append(download);
+    header.append(downloadLink(url, asset.complete));
     if (asset.complete && asset.media_type.startsWith("video/")) {
       const video = element("video");
       if (video.canPlayType(asset.media_type)) {
@@ -164,6 +172,152 @@ function batchCounts(counts) {
   return element("div", "card hist-summary", element("h2", null, "共 " + total + " 个任务"), bar, legend);
 }
 
+function releaseMedia(node) {
+  for (const media of node.querySelectorAll("img, video, audio")) {
+    media.pause?.();
+    media.removeAttribute("src");
+    media.load?.();
+  }
+}
+
+function originalAsset(id, asset, label, ctx) {
+  const card = element("li", "hist-original-asset", element("code", "hist-id", id));
+  if (!ctx.can("assets.download")) {
+    card.append(element("small", "muted", "当前权限仅可查看素材引用"));
+    return card;
+  }
+  if (asset) card.append(element("small", "muted", mediaDescription(asset)));
+  if (!asset?.available || !asset.content_url) {
+    card.append(element("span", "hist-note", "素材暂不可读取"));
+    return card;
+  }
+  const url = new URL(ctx.mediaUrl(asset.content_url), location.origin);
+  const actions = element("div", "hist-original-actions", downloadLink(url, asset.complete));
+  card.append(actions);
+  const kind = asset.media_type.split("/")[0];
+  if (!asset.complete || !["image", "audio", "video"].includes(kind)) return card;
+
+  const display = element("div", "hist-original-preview");
+  const toggle = button("预览", () => {
+    if (display.firstChild) {
+      releaseMedia(display);
+      display.replaceChildren();
+      toggle.textContent = "预览";
+      toggle.setAttribute("aria-expanded", "false");
+      return;
+    }
+    if (!ctx.can("assets.download") || ctx.signal.aborted) return;
+    const media = element(kind === "image" ? "img" : kind);
+    if (kind === "image") {
+      media.alt = label;
+    } else {
+      media.controls = true;
+      media.preload = "metadata";
+      media.setAttribute("aria-label", label);
+      if (kind === "video") media.playsInline = true;
+    }
+    media.addEventListener("error", () => {
+      if (media.parentNode === display) {
+        media.replaceWith(element("p", "hist-note", "预览失败，可下载后查看。"));
+      }
+    }, { once: true });
+    media.src = url.href;
+    display.append(media);
+    toggle.textContent = "收起预览";
+    toggle.setAttribute("aria-expanded", "true");
+  });
+  toggle.setAttribute("aria-expanded", "false");
+  actions.prepend(toggle);
+  card.append(display);
+  return card;
+}
+
+function renderOriginal(data, ctx) {
+  const about = element("section", "card hist-panel", element("h2", null, data.client_task_key),
+    facts([
+      ["提交时间", dateText(data.created_at)],
+      ["所属批次", link(data.batch_id, "/batch/" + encodeURIComponent(data.batch_id), ctx)],
+      ["策略", data.strategy_name || data.strategy_key], ["版本", data.strategy_version],
+      ["策略版本 ID", data.strategy_version_id],
+    ]));
+  const parameters = element("dl", "hist-original-fields");
+  const materials = element("dl", "hist-original-fields");
+  const assetFields = new Set(data.asset_fields);
+  for (const [name, value] of Object.entries(data.inputs)) {
+    const label = Object.hasOwn(data.field_labels, name) ? data.field_labels[name] : name;
+    const title = element("dt", null, label, label !== name ? element("code", "hist-id", name) : null);
+    if (assetFields.has(name)) {
+      const ids = Array.isArray(value) ? value : [value];
+      const content = element("dd");
+      if (ids.length) {
+        const assets = element("ol", "hist-original-assets");
+        for (const id of ids) {
+          const asset = Object.hasOwn(data.input_assets, id) ? data.input_assets[id] : null;
+          assets.append(originalAsset(id, asset, label, ctx));
+        }
+        content.append(assets);
+      } else {
+        content.append(element("span", "muted", "空列表 []"));
+      }
+      materials.append(element("div", null, title, content));
+    } else {
+      const text = typeof value === "string" && value !== "" ? value : JSON.stringify(value, null, 2);
+      parameters.append(element("div", null, title, element("dd", null, element("pre", null, text))));
+    }
+  }
+  const sections = [about];
+  if (parameters.childElementCount || !materials.childElementCount) {
+    sections.push(element("section", "card hist-panel", element("h2", null, "输入参数"),
+      parameters.childElementCount ? parameters : empty("没有输入参数")));
+  }
+  if (materials.childElementCount) {
+    sections.push(element("section", "card hist-panel", element("h2", null, "输入素材"), materials));
+  }
+  return sections;
+}
+
+export function mountOriginal(host, ctx, jobId) {
+  const path = "/job/" + encodeURIComponent(jobId);
+  const body = element("div", "hist-results");
+  const header = element("header", "hist-header", element("div", null,
+    link("返回任务详情", path, ctx, "hist-back"), element("h1", null, "原始任务信息"),
+    element("p", "hist-page-id", jobId)));
+  const root = element("section", "history-view", header, body);
+  host.replaceChildren(root);
+  const controller = new AbortController();
+
+  function dispose() {
+    controller.abort();
+    releaseMedia(root);
+    ctx.signal.removeEventListener("abort", dispose);
+    root.remove();
+  }
+  async function load() {
+    if (controller.signal.aborted) return;
+    const loading = element("p", "hist-loading", "正在读取原始任务信息…");
+    loading.setAttribute("role", "status");
+    body.replaceChildren(loading);
+    try {
+      const data = await ctx.api("/jobs/" + encodeURIComponent(jobId) + "/original", {
+        signal: controller.signal, preserveNumbers: true,
+      });
+      if (!controller.signal.aborted) body.replaceChildren(...renderOriginal(data, ctx));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const title = error.status === 404 ? "任务不存在或无权查看" : "无法读取原始任务信息";
+      const reason = [error.message, error.requestId && "请求 ID " + error.requestId].filter(Boolean).join(" · ");
+      const notice = element("div", "hist-error", element("strong", null, title),
+        element("span", null, reason), button("重试", load));
+      notice.setAttribute("role", "alert");
+      body.replaceChildren(notice);
+    }
+  }
+  ctx.signal.addEventListener("abort", dispose, { once: true });
+  if (ctx.signal.aborted) dispose();
+  else void load();
+  return { dispose };
+}
+
 export async function mountHistory(host, ctx, path) {
   const parts = path.split("/");
   const view = parts[1];
@@ -213,20 +367,12 @@ export async function mountHistory(host, ctx, path) {
   const fileArea = element("section", "card hist-panel", element("h2", null, "生成文件"), fileGrid);
   const detailArea = element("section", "card hist-panel");
 
-  function releaseVideo(card) {
-    const video = card.querySelector("video");
-    if (!video) return;
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-  }
-
   function dispose() {
     disposed = true;
     clearTimeout(pollTimer);
     readController?.abort();
     writes.abort();
-    for (const cached of fileNodes.values()) releaseVideo(cached.node);
+    for (const cached of fileNodes.values()) releaseMedia(cached.node);
     fileNodes.clear();
     ctx.signal?.removeEventListener("abort", dispose);
     root.remove();
@@ -330,7 +476,7 @@ export async function mountHistory(host, ctx, path) {
     const visible = new Set(assets.map(asset => asset.asset_id));
     for (const [key, cached] of fileNodes) {
       if (!visible.has(key)) {
-        releaseVideo(cached.node);
+        releaseMedia(cached.node);
         cached.node.remove();
         fileNodes.delete(key);
       }
@@ -346,7 +492,7 @@ export async function mountHistory(host, ctx, path) {
       let cached = fileNodes.get(key);
       if (cached?.signature !== signature) {
         const node = assetCard(asset, ctx);
-        if (cached) releaseVideo(cached.node);
+        if (cached) releaseMedia(cached.node);
         cached?.node.replaceWith(node);
         cached = { signature, node };
         fileNodes.set(key, cached);
@@ -390,7 +536,9 @@ export async function mountHistory(host, ctx, path) {
     currentJob = job;
     if (terminal.has(job.state)) confirmCancel = false;
     if (detailArea.parentNode !== results) results.replaceChildren(detailArea, fileArea);
-    const top = element("div", "hist-section-heading", element("h2", null, job.client_task_key), badge(job.state));
+    const top = element("div", "hist-section-heading", element("h2", null, job.client_task_key),
+      element("div", "hist-original-actions",
+        link("原始任务信息", "/job/" + encodeURIComponent(job.job_id) + "/original", ctx), badge(job.state)));
     detailArea.replaceChildren(top, facts([
       ["提交时间", dateText(job.created_at)],
       ["所属批次", link(job.batch_id, "/batch/" + encodeURIComponent(job.batch_id), ctx)],

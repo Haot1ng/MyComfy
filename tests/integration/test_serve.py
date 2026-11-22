@@ -104,6 +104,19 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                     )
                     assert client.post(local + publish, json={}).status_code == 403
                     assert client.post(local + publish, headers=forged, json={}).status_code == 422
+                    # 独立维护页及其模板只经回环端口提供；导入仍走相同的凭据校验。
+                    for asset in ("templates.html", "templates.js", "workflow-graph.js"):
+                        assert client.get(local + "/" + asset).status_code == 200
+                        assert client.get(public + "/" + asset, headers=forged).status_code == 404
+                    for kind in ("t2v", "i2v"):
+                        asset = f"/presets/h3-{kind}.strategy.json"
+                        assert client.get(public + asset, headers=forged).status_code == 404
+                        template = client.get(local + asset).raise_for_status().json()
+                        assert client.post(local + publish, json=template).status_code == 403
+                        result = client.post(local + publish, headers=forged, json=template)
+                        assert result.status_code == 201
+                        assert result.json()["strategy_key"] == f"minimax-h3-{kind}"
+                        assert result.json()["version"] == 1
             finally:
                 server.should_exit = True
                 thread.join(timeout=5)

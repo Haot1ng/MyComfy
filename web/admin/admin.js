@@ -1,35 +1,5 @@
+import { pages, renderAdminNav } from "./navigation.js";
 import { renderOverview } from "./overview.js";
-
-const pages = {
-  overview: { title: "运行总览", symbol: "▦" },
-  requests: {
-    title: "请求审计", symbol: "⇄", filters: ["request_id", "batch_id", "job_id", "execution_id", "instance_id", "user_id"],
-    columns: ["id", "action", "result", "duration_ms", "target", "created_at"],
-  },
-  batches: {
-    title: "批次", symbol: "▤", filters: ["batch_id", "user_id"], columns: ["id", "user_id", "created_at"],
-  },
-  jobs: {
-    title: "任务", symbol: "≡", filters: ["job_id", "batch_id", "user_id"],
-    columns: ["id", "state", "batch_id", "blocked_reason", "created_at"],
-  },
-  executions: {
-    title: "执行记录", symbol: "▷", filters: ["execution_id", "job_id", "batch_id", "instance_id", "user_id"],
-    columns: ["id", "phase", "stage", "attempt_no", "job_id", "instance_id"],
-  },
-  instances: {
-    title: "实例与 GPU", symbol: "▣", filters: ["instance_id"],
-    columns: ["id", "generation", "process_alive", "api_reachable", "accepting", "occupied", "stale", "metrics_stale"],
-  },
-  files: {
-    title: "文件", symbol: "▱", filters: ["job_id", "execution_id", "instance_id", "user_id"],
-    columns: ["id", "role", "media_type", "size", "complete", "available", "job_id"],
-  },
-  logs: {
-    title: "引擎日志", symbol: "≔", filters: ["execution_id", "instance_id", "job_id", "batch_id", "user_id", "level"],
-    columns: ["sampled_at", "instance_id", "generation", "execution_id", "message"],
-  },
-};
 
 const labels = {
   id:"ID", action:"请求", result:"结果", duration_ms:"耗时", target:"目标资源", actor:"调用方",
@@ -121,17 +91,6 @@ function bytes(value) {
   if (value < 1024) return value + " B";
   const unit = Math.min(4, Math.floor(Math.log(value) / Math.log(1024)));
   return (value / 1024 ** unit).toLocaleString("zh-CN", {maximumFractionDigits:2}) + " " + ["B", "KiB", "MiB", "GiB", "TiB"][unit];
-}
-
-function makeNav() {
-  for (const [view, page] of Object.entries(pages)) {
-    const anchor = link("", view);
-    anchor.dataset.view = view;
-    const symbol = element("span", page.symbol, "navsymbol");
-    symbol.setAttribute("aria-hidden", "true");
-    anchor.append(symbol, document.createTextNode(page.title));
-    byId("nav").append(anchor);
-  }
 }
 
 function localTime(value) {
@@ -429,7 +388,7 @@ function navigate() {
   void fetchView();
 }
 
-makeNav();
+renderAdminNav(byId("nav"));
 reload.addEventListener("click", fetchView);
 auto.addEventListener("change", schedule);
 document.querySelector(".skip").addEventListener("click", event => {

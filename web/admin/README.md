@@ -1,9 +1,16 @@
-# MyComfy 本机监控
+# MyComfy 本机管理后台
 
-启动 `mycomfy api --port 8000 --local-port 8001` 后，在服务所在机器打开 [本机监控](http://127.0.0.1:8001/)。页面使用原生 ES 模块与本地 CSS，从同源的 `/local/v1/monitor` 读取数据。
+启动 `mycomfy api --port 8000 --local-port 8001` 后，在服务所在机器打开 [本机监控](http://127.0.0.1:8001/)。监控视图从同源的 `/local/v1/monitor` 读取数据，模板维护使用侧栏中的“工作流模板”。
 
 总览展示队列、等待、重试、隔离、发布积压、容量和告警。请求审计提供可关联的目标 ID，批次详情可定位到任务，任务可查看执行历史、文件和日志，执行可追踪到实例代次与 GPU 采样。总览及实例页在可见时每 10 秒刷新，可手动暂停。列表使用服务端游标，可组合对象 ID 与时间范围筛选。浏览器后退或前进会恢复对应筛选和分页位置。
 
-监控页面通过本机入口免登录只读访问。API 校验连接对端、Host 和 Origin，维护凭据由本机维护程序持有。采样与告警由服务独立运行。[前后台 API](../../docs/web-api.md) · [运维说明](../../docs/operations.md)
+监控页面通过本机入口免登录只读访问。API 校验连接对端、Host 和 Origin。采样与告警由服务独立运行。[前后台 API](../../docs/web-api.md) · [运维说明](../../docs/operations.md)
 
 用户分组由本机维护程序通过带凭据的 API 管理。维护 API 提供权限清单、用户的分组与授权查询、分组创建及修改接口。[分组维护 API](../../src/mycomfy/api/group_admin.py)
+
+## 导入模板
+
+1. 在业务机浏览器打开管理后台的“工作流模板”，选择内置的 MiniMax H3 文生视频、图生视频，或选择自己的 MyComfy 策略 JSON 文件。[打开工作流模板](http://127.0.0.1:8001/templates.html)
+2. 在预览中选择节点，核对提示词、素材输入与视频输出的连接。ComfyUI API 工作流和编辑器保存的画布 JSON 也可用来查看节点。要发布自定义模板，需将可执行工作流放在策略的 `workflow` 中，并声明表单、输入绑定、环境要求和视频产物等字段。[完整策略格式](../../docs/web-api.md#本机维护)
+3. 选择本机的 `maintenance-token` 文件并发布。默认部署把它放在仓库的 `var/config/maintenance-token`。例如，WSL 仓库是 `/home/liu/MyComfy` 且发行版为 `Ubuntu-24.04` 时，可在 Windows 文件选择框输入 `\\wsl.localhost\Ubuntu-24.04\home\liu\MyComfy\var\config\maintenance-token`。自定义了 `paths.config` 的部署，请到该目录选择文件。
+4. 发布成功后，记下页面显示的版本号与版本 ID。进入用户工作台的“创建批次”，在“生成策略”中选择刚发布的模板。文生视频填写提示词，图生视频还需上传首帧图片。同一策略再次发布会创建新版本。[打开用户工作台](http://127.0.0.1:8000/#/create)

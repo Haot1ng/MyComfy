@@ -16,7 +16,20 @@ CLIENT_FILES = (
     "history.css",
     "studio.webp",
 )
-ADMIN_FILES = ("admin.js", "admin.css", "overview.js", "overview.css")
+ADMIN_FILES = (
+    "admin.js",
+    "admin.css",
+    "navigation.js",
+    "overview.js",
+    "overview.css",
+    "templates.html",
+    "templates.js",
+    "templates.css",
+    "workflow-graph.js",
+    "graph.css",
+    "presets/h3-t2v.strategy.json",
+    "presets/h3-i2v.strategy.json",
+)
 
 
 def install_web_routes(app, *, local):

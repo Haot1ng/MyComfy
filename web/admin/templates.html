@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <title>工作流模板 · MyComfy</title>
+  <link rel="stylesheet" href="./admin.css">
+  <link rel="stylesheet" href="./templates.css">
+  <link rel="stylesheet" href="./graph.css">
+  <script type="module" src="./templates.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳至内容</a>
+  <div class="shell">
+    <aside>
+      <a class="brand" href="/#/overview" aria-label="MyComfy 监控总览"><span class="brandmark" aria-hidden="true"><i></i><i></i><i></i></span>MyComfy</a>
+      <nav id="nav" aria-label="本机管理导航"></nav>
+      <div class="access"><span class="pin" aria-hidden="true"></span>本机管理</div>
+    </aside>
+    <main id="content" tabindex="-1">
+      <header class="topbar"><span class="crumb"><a href="/#/overview">本机管理</a><span aria-hidden="true">/</span><strong>工作流模板</strong></span></header>
+      <div class="workspace">
+        <div class="pagehead"><h1>工作流模板</h1></div>
+        <section class="panel template-panel" aria-labelledby="source-title">
+          <div class="template-bar">
+            <h2 id="source-title">选择模板</h2>
+            <div class="template-actions">
+              <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,application/json"></label>
+              <button id="paste-toggle" type="button" aria-expanded="false" aria-controls="paste-editor">粘贴 JSON</button>
+            </div>
+          </div>
+          <div class="template-presets" role="group" aria-label="内置模板">
+            <button type="button" data-preset="h3-t2v" aria-pressed="false"><strong>MiniMax H3 文生视频</strong><span>提示词 → 视频</span></button>
+            <button type="button" data-preset="h3-i2v" aria-pressed="false"><strong>MiniMax H3 图生视频</strong><span>首帧图片 + 提示词 → 视频</span></button>
+          </div>
+          <div id="paste-editor" hidden>
+            <label for="json-text">模板或工作流 JSON</label>
+            <textarea id="json-text" rows="6" spellcheck="false" autocomplete="off"></textarea>
+            <button id="preview-paste" type="button">预览 JSON</button>
+          </div>
+        </section>
+        <section class="panel template-panel" aria-labelledby="preview-title">
+          <div class="template-bar"><h2 id="preview-title">节点预览</h2><span id="preview-source" class="template-source"></span></div>
+          <p id="preview-message" class="template-message" role="status"></p>
+          <div id="workflow-preview"></div>
+        </section>
+        <section class="panel template-panel" aria-labelledby="publish-title">
+          <h2 id="publish-title">发布到工作台</h2>
+          <p id="publish-description" class="template-hint">选择完整策略模板后可发布新版本。</p>
+          <form id="publish-form">
+            <label for="maintenance-token">本机维护凭据文件</label>
+            <input type="file" id="maintenance-token" aria-describedby="token-location" autocomplete="off" required disabled>
+            <p id="token-location" class="template-hint">默认文件为项目下的 <code>var/config/maintenance-token</code>。WSL 部署可从 Windows 文件选择器的「Linux」中找到项目。</p>
+            <button id="publish-template" type="submit" class="highlight" disabled>发布新版本</button>
+          </form>
+          <p id="publish-result" class="template-message" role="status"></p>
+        </section>
+        <noscript>请启用 JavaScript 以预览和发布工作流模板。</noscript>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

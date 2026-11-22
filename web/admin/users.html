@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="same-origin">
+  <title>用户管理 · MyComfy</title>
+  <link rel="stylesheet" href="./admin.css">
+  <link rel="stylesheet" href="./users.css">
+  <script type="module" src="./users.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳至内容</a>
+  <div class="shell">
+    <aside>
+      <a class="brand" href="./#/overview" aria-label="MyComfy 监控总览"><span class="brandmark" aria-hidden="true"><i></i><i></i><i></i></span>MyComfy</a>
+      <nav id="nav" aria-label="管理后台导航"></nav>
+    </aside>
+    <main id="content" tabindex="-1">
+      <header class="topbar"><span class="crumb"><a href="./#/overview">管理后台</a><span aria-hidden="true">/</span><strong>用户管理</strong></span></header>
+      <div class="workspace">
+        <div class="pagehead"><h1>用户管理</h1><button id="refresh" type="button">刷新列表</button></div>
+        <p id="list-status" class="feedback" role="status"></p>
+        <section class="panel" aria-label="用户列表">
+          <div class="tablebox">
+            <table aria-label="已注册用户">
+              <thead><tr><th scope="col">用户名</th><th scope="col">用户 ID</th><th scope="col">当前权限组</th><th scope="col">生效权限</th><th scope="col">操作</th></tr></thead>
+              <tbody id="users"></tbody>
+            </table>
+          </div>
+          <p id="list-empty" class="empty" hidden></p>
+          <div class="pagination">
+            <span id="page-number" role="status"></span>
+            <button id="previous" type="button" disabled>上一页</button><button id="next" type="button" disabled>下一页</button>
+          </div>
+        </section>
+        <noscript>启用 JavaScript 后可查看用户并调整分组。</noscript>
+      </div>
+    </main>
+  </div>
+  <dialog id="editor" aria-labelledby="editor-title">
+    <form id="group-form">
+      <h2 id="editor-title">编辑权限组</h2>
+      <p id="account"></p>
+      <fieldset id="choices" disabled><legend>所属权限组</legend><div id="options"></div></fieldset>
+      <p id="edit-status" class="feedback" role="status"></p>
+      <div class="editor-actions">
+        <button id="cancel" type="button">取消</button>
+        <button id="save" class="highlight" type="submit" disabled>保存分组</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -6,12 +6,13 @@ from fastapi import APIRouter, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import load_only
 
 from mycomfy.database.models import User, UserGroup, UserGroupMember, UserGroupPermission
 from mycomfy.errors import ApiError, not_found
 
 from .pagination import page, read_position
-from .permissions import Permission, access_profile
+from .permissions import Permission, access_profile, access_profiles
 
 GROUP_KEY_PATTERN = r"^[a-z][a-z0-9_-]{0,47}$"
 GroupKey = Annotated[str, StringConstraints(pattern=GROUP_KEY_PATTERN)]
@@ -104,14 +105,14 @@ def build_group_admin_router(sessions, audit):
         limit: int = Query(50, ge=1, le=200),
         cursor: str | None = None,
     ):
-        """按账户 ID 分页列出可分组的用户，供维护者选择。"""
+        """按账户 ID 分页列出用户名、所属分组和权限并集。"""
         scope = ["maintenance-users", "id.asc"]
         position = read_position(cursor, scope, str)
-        statement = select(User).order_by(User.id)
+        statement = select(User).options(load_only(User.id, User.username)).order_by(User.id)
         if position is not None:
             statement = statement.where(User.id > position[0])
         with sessions() as db:
-            return page(
+            result = page(
                 db,
                 statement,
                 limit,
@@ -119,6 +120,11 @@ def build_group_admin_router(sessions, audit):
                 lambda user: [user.id],
                 lambda user: {"user_id": user.id, "username": user.username},
             )
+            # 先按用户分页，再批量填充组与权限，确保多组用户完整地出现在同一页。
+            profiles = access_profiles(db, [item["user_id"] for item in result["items"]])
+            for item in result["items"]:
+                item.update(profiles[item["user_id"]])
+        return result
 
     @router.get("/users/{user_id}/groups")
     def get_memberships(user_id: str, request: Request):

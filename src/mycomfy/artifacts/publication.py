@@ -349,7 +349,7 @@ def publish_one(sessions, store, publication_id):
     return registered
 
 
-def publish_pending(sessions, store, limit=20):
+def publish_pending(sessions, store, limit=20, *, before_file=None):
     """按稳定游标轮询未完成意图，让持续失败的文件不会阻塞后续任务。"""
     pending = select(Publication.id).where(
         Publication.phase.in_(("PENDING", "VERIFIED", "CONFLICT", "REGISTERED"))
@@ -363,6 +363,9 @@ def publish_pending(sessions, store, limit=20):
             ids = list(db.scalars(pending.order_by(Publication.id).limit(limit)))
     complete = 0
     for publication_id in ids:
+        # 每个文件都有独立的复制与解码时间预算，队列长度不影响健康判定。
+        if before_file is not None:
+            before_file()
         store._publication_cursor = publication_id
         try:
             complete += int(publish_one(sessions, store, publication_id))

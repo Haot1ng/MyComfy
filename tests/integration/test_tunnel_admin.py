@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from mycomfy.api.app import create_app
 from mycomfy.config import Settings
-from mycomfy.database.models import Audit, Base
+from mycomfy.database.models import Audit, Base, User
 from mycomfy.database.session import make_sessions
 
 HOST = "test-node.example.ts.net:8443"
@@ -74,31 +74,129 @@ def test_anonymous_admin_browser_flow(backend):
             assert audit.actor == "test-template-admin" and audit.target == version
 
 
-def test_tunnel_cannot_use_maintenance_or_other_routes(backend):
-    """测试入口仅接受管理界面所需读写，即使调用方知道本机令牌也不能越权。"""
-    with listener(*backend) as admin:
-        for path in ("/local/v1/users", "/local/v1/groups", "/api/v1/me", "/app.js"):
-            assert admin.get(path, headers=PROXY).status_code == 403
-            assert admin.get(path, headers={**PROXY, **BEARER}).status_code == 403
-        assert admin.get("/templates.html", headers={**PROXY, **BEARER}).status_code == 403
-        for method, path in (
-            ("POST", "/local/v1/users/user/password-reset"),
-            ("POST", "/local/v1/groups"),
-            ("DELETE", "/local/v1/groups/group"),
-            ("POST", "/local/v1/monitor/overview"),
-            ("PUT", PUBLISH),
-            ("OPTIONS", PUBLISH),
+@pytest.mark.parametrize(
+    ("entry", "origin", "actor"),
+    [({}, "http://127.0.0.1:8001", "local-user-admin"), (PROXY, ORIGIN, "test-user-admin")],
+    ids=["direct", "tunnel"],
+)
+def test_same_user_management_and_maintenance_policy(backend, entry, origin, actor):
+    """两个后台入口使用相同的用户管理、程序维护和未知路由规则。"""
+    settings, factory = backend
+    # 故意使用乱序 ID 和一个无组用户，核对续页不会漏掉或重复记录。
+    with factory.begin() as db:
+        db.add_all(
+            User(id=id_, username=name, password_hash="sensitive-hash")
+            for id_, name in [("u-c", "陈"), ("u-a", "安"), ("u-b", "白")]
+        )
+    user_list = "/local/v1/users"
+    group_list = "/local/v1/groups"
+    memberships = user_list + "/u-a/groups"
+    reset = user_list + "/u-a/password-reset"
+    read = {**entry, "X-MyComfy-Admin": "users", "Sec-Fetch-Site": "same-origin"}
+    write = {**read, "Origin": origin}
+    bearer = {**entry, **BEARER}
+
+    with listener(settings, factory) as admin:
+        for path in ("/api/v1/me", "/app.js", "/local/v1/unknown"):
+            assert admin.get(path, headers=entry).status_code == 404
+            assert admin.get(path, headers=bearer).status_code == 404
+        for path in ("/", "/index.html", "/templates.html", "/users.html"):
+            response = admin.get(path, headers=bearer).raise_for_status()
+            assert response.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+        # 维护凭据与浏览器页面身份权限不同，在两个后台地址上的核验一致。
+        for path in (user_list, group_list, memberships):
+            assert admin.get(path, headers=entry).status_code == 403
+            assert (
+                admin.get(path, headers={**read, "Authorization": "Bearer wrong"}).status_code
+                == 403
+            )
+            assert admin.get(path, headers=bearer).status_code == 200
+        for code in ("viewer", "editor", "empty"):
+            perms = [] if code == "empty" else ["jobs.view"]
+            body = {"key": code, "name": code, "permissions": perms}
+            assert admin.post(group_list, headers=write, json=body).status_code == 403
+            assert admin.post(group_list, headers=bearer, json=body).status_code == 201
+        updated = {"name": "编辑", "permissions": ["jobs.view", "jobs.submit"]}
+        assert admin.put(group_list + "/editor", headers=write, json=updated).status_code == 403
+        assert admin.put(group_list + "/editor", headers=bearer, json=updated).status_code == 200
+        assert len(admin.get(group_list, headers=read).json()["items"]) == 3
+        password = {"new_password": "fixture-password"}
+        assert admin.post(reset, headers=write, json=password).status_code == 403
+        reset_result = admin.post(reset, headers=bearer, json=password)
+        assert reset_result.status_code == 204
+        with factory() as db:
+            audit = db.get(Audit, reset_result.headers["X-Request-ID"])
+            assert audit.actor == ("test-maintenance" if entry else "local-maintenance")
+            assert audit.target == "u-a"
+        assert (
+            admin.get(user_list, headers={**bearer, "Origin": "https://invalid.test"}).status_code
+            == 403
+        )
+
+        desired = {"group_keys": ["viewer", "editor", "empty"]}
+        expected = {
+            "groups": [
+                {"key": "editor", "name": "编辑"},
+                {"key": "empty", "name": "empty"},
+                {"key": "viewer", "name": "viewer"},
+            ],
+            "permissions": ["jobs.submit", "jobs.view"],
+        }
+        # GET 的浏览器可省 Origin，但跨站标记、缺少页面标识或重复来源均须拒绝。
+        for bad in (
+            {"X-MyComfy-Admin": "users"},
+            {"Sec-Fetch-Site": "same-origin"},
+            {"X-MyComfy-Admin": "users", "Origin": "https://invalid.test"},
+            {**write, "Sec-Fetch-Site": "cross-site"},
         ):
-            assert admin.request(method, path, headers=PAGE).status_code == 403
-            assert admin.request(method, path, headers={**PAGE, **BEARER}).status_code == 403
-        # 直连路径继续支持现有程序凭据，隧道请求不能用回环 Host 模拟它。
-        assert admin.get("/local/v1/users", headers=BEARER).status_code == 200
+            assert admin.get(user_list, headers={**entry, **bad}).status_code == 403
         assert (
             admin.get(
-                "/local/v1/users", headers={**BEARER, "Tailscale-Funnel-Request": "?1"}
+                user_list, headers={**entry, "Origin": origin, "X-MyComfy-Admin": "users"}
+            ).status_code
+            == 200
+        )
+        assert admin.put(memberships, headers=read, json=desired).status_code == 403
+        assert (
+            admin.put(
+                memberships, headers={**write, "Sec-Fetch-Site": "same-site"}, json=desired
             ).status_code
             == 403
         )
+        assert admin.put(memberships, headers=write, content=b"{}").status_code == 415
+        assert (
+            admin.put(
+                memberships, headers={**write, "Content-Type": "text/plain"}, content=b"{}"
+            ).status_code
+            == 415
+        )
+        saved = admin.put(memberships, headers=write, json=desired)
+        assert saved.status_code == 200 and saved.json() == expected
+        assert admin.get(memberships, headers=read).json() == expected
+        with factory() as db:
+            audit = db.get(Audit, saved.headers["X-Request-ID"])
+            assert audit.actor == actor and audit.target == "u-a"
+
+        empty = {"groups": [], "permissions": []}
+        first = admin.get(user_list, headers=read, params={"limit": 2}).json()
+        assert first["items"] == [
+            {"user_id": "u-a", "username": "安", **expected},
+            {"user_id": "u-b", "username": "白", **empty},
+        ]
+        second = admin.get(
+            user_list, headers=read, params={"limit": 2, "cursor": first["next_cursor"]}
+        ).json()
+        assert second == {
+            "items": [{"user_id": "u-c", "username": "陈", **empty}],
+            "next_cursor": None,
+        }
+        assert admin.get(user_list, headers=read, params={"cursor": "invalid"}).status_code == 400
+        assert (
+            admin.put(memberships, headers=write, json={"group_keys": ["missing"]}).status_code
+            == 422
+        )
+        assert admin.get(memberships, headers=read).json() == expected
+        assert admin.put(memberships, headers=write, json={"group_keys": []}).json() == empty
 
 
 def test_browser_publication_requires_same_origin_json_and_page_header(backend):
@@ -113,7 +211,7 @@ def test_browser_publication_requires_same_origin_json_and_page_header(backend):
             {**PAGE, "X-MyComfy-Admin": "groups"},
             {**PAGE, "Sec-Fetch-Site": "same-site"},
             {**PAGE, "Sec-Fetch-Site": "cross-site"},
-            {**PAGE, **BEARER},
+            {**PAGE, "Authorization": "Bearer incorrect"},
         ):
             assert admin.post(PUBLISH, headers=headers, json={}).status_code == 403
         assert admin.post(PUBLISH, headers=PAGE, content=b"{}").status_code == 415

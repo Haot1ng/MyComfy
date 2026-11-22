@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import logging
+import os
 import signal
 import time
 from contextlib import contextmanager
@@ -51,6 +52,7 @@ from .state import (
     settle_failure,
 )
 from .strategy import compatible, configured_for
+from .worker_health import FILE_GRACE, POLL_GRACE, ignore_progress, report_health
 
 log = logging.getLogger(__name__)
 
@@ -480,7 +482,7 @@ class Worker:
                 # 中断回执丢失也必须继续占槽，直到实际执行结束。
                 log.warning("Interrupt unconfirmed, execution=%s", execution_id)
 
-    def process(self, instance_id, execution_id):
+    def process(self, instance_id, execution_id, *, progress=ignore_progress):
         """处理准备、提交或恢复的一步，恢复入口只允许 PREPARED 获取发送权。"""
         with self.sessions.begin() as db:
             owned = take_owned(db, instance_id, execution_id)
@@ -513,7 +515,10 @@ class Worker:
         if phase == "QUARANTINED":
             return
         if phase == "PREPARING":
+            # 新任务和崩溃后恢复的任务都可能需要复制大输入文件。
+            progress(FILE_GRACE)
             self.prepare(instance_id, execution_id)
+            progress(POLL_GRACE)
             phase = "PREPARED"
         mapping = {
             node: step["stage"]
@@ -536,7 +541,7 @@ class Worker:
         finally:
             adapter.close()
 
-    def tick(self, *, publish=True, claim=True):
+    def tick(self, *, publish=True, claim=True, progress=ignore_progress):
         """先恢复已有占用，再为空闲实例领取，最后推动已持久化的发布记录。"""
         from mycomfy.artifacts.publication import cleanup_inputs, publish_pending
 
@@ -549,11 +554,14 @@ class Worker:
         processed = set()
         for instance_id, active in rows:
             if active:
-                self.process(instance_id, active)
+                # GPU 推理在引擎进程中执行，每次轮询只核对一次进展。
+                progress(POLL_GRACE)
+                self.process(instance_id, active, progress=progress)
                 processed.add(active)
         if claim and not self.draining.is_set():
             self.refresh_queue()
             for instance_id, _ in rows:
+                progress(POLL_GRACE)
                 try:
                     active = self.claim(instance_id)
                 except ApiError as exc:
@@ -561,10 +569,10 @@ class Worker:
                         raise
                     continue
                 if active:
-                    self.process(instance_id, active)
+                    self.process(instance_id, active, progress=progress)
                     processed.add(active)
         if publish:
-            publish_pending(self.sessions, self.store)
+            publish_pending(self.sessions, self.store, before_file=lambda: progress(FILE_GRACE))
         with self.sessions.begin() as db:
             active = set(
                 db.scalars(
@@ -576,6 +584,7 @@ class Worker:
         for finished in self.channels.keys() - active:
             self.channels.pop(finished).close()
         for finished in processed - active:
+            progress(FILE_GRACE)
             cleanup_inputs(self.sessions, self.store, finished)
 
     def drained(self):
@@ -603,7 +612,10 @@ def run_worker(settings, *, once=False):
     from mycomfy.artifacts.storage import LocalStore
 
     sessions = make_sessions(settings.database_url)
-    with coordinator_lock(settings.data_root):
+    with (
+        coordinator_lock(settings.data_root),
+        report_health(os.environ.get("MYCOMFY_WORKER_HEALTH_FILE")) as heartbeat,
+    ):
         worker = Worker(settings, sessions, LocalStore(settings.data_root))
         worker.capacity.initialize(sessions)
 
@@ -616,12 +628,19 @@ def run_worker(settings, *, once=False):
             for sig in (signal.SIGTERM, signal.SIGINT):
                 previous[sig] = signal.signal(sig, request_drain)
         try:
+            progress = heartbeat
             while True:
                 try:
-                    worker.tick()
+                    worker.tick(progress=progress)
+                    # 即使队列始终为空，成功完成轮询也证明协调器和数据库可用。
+                    heartbeat(settings.poll_seconds + POLL_GRACE)
+                    progress = heartbeat
                     if once or (worker.draining.is_set() and worker.drained()):
                         return
                 except SQLAlchemyError:
+                    # 持续失败的循环不能通过短暂成功的子查询延长健康期限。
+                    heartbeat(0)
+                    progress = ignore_progress
                     if once:
                         raise
                     # 未确认的提交仍在数据库中占槽，重新连接后按原执行恢复。

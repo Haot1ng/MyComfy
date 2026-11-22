@@ -29,14 +29,17 @@ export const pages = {
   },
 };
 
-/** 构建本机管理侧栏，监控视图共用哈希路由，模板维护使用独立页面。 */
+/** 构建管理侧栏，监控视图共用哈希路由，维护页面使用各自的 HTML 入口。 */
 export function renderAdminNav(nav, currentView) {
   const links = document.createDocumentFragment();
-  const monitorPath = currentView === "templates" ? "./#/" : "#/";
-  const views = {...pages, templates: {title: "工作流模板", symbol: "◇"}};
+  const views = {
+    ...pages,
+    templates: {title: "工作流模板", symbol: "◇", href: "./templates.html"},
+    users: {title: "用户管理", symbol: "◎", href: "./users.html"},
+  };
   for (const [view, page] of Object.entries(views)) {
     const anchor = document.createElement("a");
-    anchor.href = view === "templates" ? "./templates.html" : monitorPath + view;
+    anchor.href = page.href || (Object.hasOwn(pages, currentView) ? "#/" : "./#/") + view;
     anchor.dataset.view = view;
     if (view === currentView) anchor.setAttribute("aria-current", "page");
     const symbol = document.createElement("span");

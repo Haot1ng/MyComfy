@@ -276,7 +276,14 @@ def test_user_group_permissions_gate_the_same_actions_as_the_frontend(clients, m
     assert local.put(membership, json={"group_keys": []}).status_code == 403
     assert user.get("/local/v1/groups", headers=MAINTENANCE).status_code == 404
     listed = local.get("/local/v1/users", headers=MAINTENANCE).json()["items"]
-    assert {"user_id": user_id, "username": "group-user"} in listed
+    assert listed == [
+        {
+            "user_id": user_id,
+            "username": "group-user",
+            "groups": me["groups"],
+            "permissions": me["permissions"],
+        }
+    ]
 
     for key, name, permissions in (
         ("viewer", "浏览组", ["jobs.view", "notifications.view"]),

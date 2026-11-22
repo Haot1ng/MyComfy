@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 import logging
 import os
+import re
 import stat
 import time
 from contextlib import asynccontextmanager
@@ -49,14 +50,11 @@ from .group_admin import build_group_admin_router
 from .pagination import invalid_cursor, page, read_position
 from .permissions import Permission, access_profile, has_permission, require_permission
 from .session_cache import SessionPrecheckCache
-from .web import ADMIN_FILES, install_web_routes
+from .web import install_web_routes
 
 logger = logging.getLogger(__name__)
 Limit = Annotated[int, Query(ge=1, le=100)]
 Password = Annotated[str, Field(min_length=1, max_length=1024)]
-TEST_ADMIN_READ_PATHS = {"/", "/index.html", "/local/v1/strategies"} | {
-    "/" + name for name in ADMIN_FILES
-}
 
 
 class Input(BaseModel):
@@ -93,8 +91,18 @@ def _error(request, exc):
     )
 
 
+def _user_admin_operation(request):
+    """识别用户列表、分组目录和单个用户的分组读写，不匹配其他维护路由。"""
+    path = request.scope["path"]
+    if path in {"/local/v1/users", "/local/v1/groups"}:
+        return request.method == "GET"
+    return request.method in {"GET", "PUT"} and bool(
+        re.fullmatch(r"/local/v1/users/[^/]+/groups", path)
+    )
+
+
 def _local_request(request, test_origin):
-    """验证管理监听器的直连对端，并返回外网测试请求所需的浏览器来源。"""
+    """校验管理监听器的直连对端和目标 Host，识别配置的 HTTPS 浏览器来源。"""
 
     def loopback(host):
         """识别回环 IP 或本机主机名。"""
@@ -118,13 +126,6 @@ def _local_request(request, test_origin):
             origins = request.headers.getlist("origin")
             if origins and origins != [test_origin]:
                 raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not allowed")
-            path = request.scope["path"]
-            read = request.method in {"GET", "HEAD"} and (
-                path in TEST_ADMIN_READ_PATHS or path.startswith("/local/v1/monitor/")
-            )
-            publish = request.method == "POST" and path == "/local/v1/strategy-versions"
-            if "authorization" in request.headers or not (read or publish):
-                raise ApiError(403, "TEST_ADMIN_FORBIDDEN", "Unavailable through the test tunnel")
             return test_origin
 
     # Funnel 标记只用于拒绝降级：即使隧道请求携带 localhost Host，也不能走本机维护路径。
@@ -139,35 +140,41 @@ def _local_request(request, test_origin):
             raise ValueError
     except (TypeError, ValueError):
         raise ApiError(403, "LOCAL_ONLY", "Loopback access required") from None
-    origin = request.headers.get("origin")
-    if origin is not None and origin != f"{request.url.scheme}://{raw_host}":
+    origins = request.headers.getlist("origin")
+    if origins and origins != [f"{request.url.scheme}://{raw_host}"]:
         raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not allowed")
     return None
 
 
 def _maintenance(request, settings, media_type, test_origin):
-    """核验模板页的同源交互，或用本机维护凭据授权程序调用。"""
-    if (
-        request.method == "POST"
-        and request.url.path == "/local/v1/strategy-versions"
-        and request.headers.getlist("x-mycomfy-admin") == ["templates"]
-        and "authorization" not in request.headers
-    ):
-        # 浏览器使用隧道的 HTTPS 来源；本机模板页使用直连监听器的来源。
+    """按页面和操作核验浏览器同源交互，或用本机维护凭据授权程序调用。"""
+    page = request.headers.getlist("x-mycomfy-admin")
+    templates = (
+        page == ["templates"]
+        and request.method == "POST"
+        and request.scope["path"] == "/local/v1/strategy-versions"
+    )
+    users = page == ["users"] and _user_admin_operation(request)
+    if (templates or users) and "authorization" not in request.headers:
         origin = test_origin or f"{request.url.scheme}://{request.headers['host']}"
-        if request.headers.getlist("origin") != [origin] or request.headers.getlist(
-            "sec-fetch-site"
-        ) not in ([], ["same-origin"]):
-            raise ApiError(403, "ORIGIN_REJECTED", "Same-origin template page required")
-        if media_type != "application/json" or len(request.headers.getlist("content-type")) != 1:
+        origins = request.headers.getlist("origin")
+        sites = request.headers.getlist("sec-fetch-site")
+        # 浏览器同源 GET 常省略 Origin；仅在浏览器明确标识同源读取时接受该情形。
+        same_origin = origins == [origin] or (
+            request.method == "GET" and not origins and sites == ["same-origin"]
+        )
+        if not same_origin or sites not in ([], ["same-origin"]):
+            raise ApiError(403, "ORIGIN_REJECTED", "Same-origin admin page required")
+        if request.method != "GET" and (
+            media_type != "application/json" or len(request.headers.getlist("content-type")) != 1
+        ):
             raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json")
-        request.state.actor = "test-template-admin" if test_origin else "local-template-admin"
+        location = "test" if test_origin else "local"
+        area = "template" if templates else "user"
+        request.state.actor = f"{location}-{area}-admin"
         return
 
-    if test_origin:
-        raise ApiError(403, "TEST_ADMIN_FORBIDDEN", "Template page request required")
-
-    # 程序显式携带的维护凭据照常核验，其他本机维护操作只使用此路径。
+    # 两种管理入口都使用同一个维护凭据，带有显式凭据的请求不能回退到页面授权。
     path = settings.maintenance_token_file
     if path is None:
         raise ApiError(503, "MAINTENANCE_DISABLED", "Maintenance credentials are unavailable")
@@ -186,7 +193,7 @@ def _maintenance(request, settings, media_type, test_origin):
     supplied = request.headers.get("authorization", "").encode()
     if not hmac.compare_digest(b"Bearer " + token, supplied):
         raise ApiError(403, "MAINTENANCE_FORBIDDEN", "Maintenance credentials required")
-    request.state.actor = "local-maintenance"
+    request.state.actor = "test-maintenance" if test_origin else "local-maintenance"
 
 
 def _audit(db, request, status):
@@ -394,8 +401,8 @@ def create_app(settings, *, local=False, sessions=None):
             response = _error(request, ApiError(500, "INTERNAL_ERROR", "Unexpected server error"))
         if getattr(request.state, "web_asset", False):
             response.headers["Cache-Control"] = "no-cache"
-            if local and path == "/templates.html":
-                # 含发布按钮的本机页面只允许直接打开，阻止第三方网页嵌入并诱导点击。
+            if local and (path == "/" or path.endswith(".html")):
+                # 管理页面统一禁止被其他页面嵌入，防止诱导点击权限操作。
                 response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         else:
             try:

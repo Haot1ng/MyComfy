@@ -35,21 +35,34 @@ def permission_query(user_id):
 
 def access_profile(db, user_id):
     """读取分组和权限并集，返回页面可直接使用的访问配置。"""
+    return access_profiles(db, [user_id])[user_id]
+
+
+def access_profiles(db, user_ids):
+    """一次读取本页各用户的全部分组和生效权限，包含尚未分组的账户。"""
+    groups = {user_id: {} for user_id in user_ids}
+    permissions = {user_id: set() for user_id in groups}
+    if not groups:
+        return {}
     rows = db.execute(
-        select(UserGroup.key, UserGroup.name, UserGroupPermission.permission)
-        .join(UserGroupMember, UserGroupMember.group_key == UserGroup.key)
+        select(
+            UserGroupMember.user_id, UserGroup.key, UserGroup.name, UserGroupPermission.permission
+        )
+        .select_from(UserGroupMember)
+        .join(UserGroup, UserGroup.key == UserGroupMember.group_key)
         .outerjoin(UserGroupPermission, UserGroupPermission.group_key == UserGroup.key)
-        .where(UserGroupMember.user_id == user_id)
-        .order_by(UserGroup.key)
+        .where(UserGroupMember.user_id.in_(groups))
+        .order_by(UserGroupMember.user_id, UserGroup.key)
     )
-    # 同一条查询读取两者，保留成员所属但没有授权的分组。
-    groups = {}
-    permissions = set()
-    for key, name, permission in rows:
-        groups[key] = {"key": key, "name": name}
+    # 权限按用户取并集；外连接保留零权限的组。
+    for user_id, key, name, permission in rows:
+        groups[user_id][key] = {"key": key, "name": name}
         if permission is not None:
-            permissions.add(permission)
-    return {"groups": list(groups.values()), "permissions": sorted(permissions)}
+            permissions[user_id].add(permission)
+    return {
+        user_id: {"groups": list(memberships.values()), "permissions": sorted(permissions[user_id])}
+        for user_id, memberships in groups.items()
+    }
 
 
 def has_permission(db, user_id, permission: Permission, *, write=False):

@@ -83,6 +83,9 @@ services:
       context: .
       target: worker
     command: ["migrate"]
+    # 迁移与 Worker 共用镜像，一次性命令通过退出码报告结果。
+    healthcheck:
+      disable: true
     network_mode: host
     environment: *app-environment
     restart: "no"

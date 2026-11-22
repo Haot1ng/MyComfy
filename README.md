@@ -22,7 +22,7 @@ MyComfy/
 └── docs/                         部署、运维与验收
 ```
 
-两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
+两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略，“用户管理”可查看全部账号并调整所属权限组。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
 
 后端可以跟随一次视频请求读代码。
 
@@ -62,7 +62,7 @@ python3 scripts/deploy.py --single-host
 
 这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
-要把这两个页面临时分享给外网测试人员，在一个 WSL 窗口启动 MyComfy，再在一个 Windows PowerShell 窗口运行 `scripts/share-test.ps1`。脚本使用 Tailscale Funnel 同时打开两个 HTTPS 链接，按 Ctrl+C 可一起关闭。工作台使用原有账号，后台链接允许任何访客查看全局监控并发布模板。[两个窗口的启动命令](docs/https-tunnel-test.md)
+要把这两个页面临时分享给外网测试人员，在一个 WSL 窗口启动 MyComfy，再在一个 Windows PowerShell 窗口运行 `scripts/share-test.ps1`。脚本使用 Tailscale Funnel 同时打开两个 HTTPS 链接，按 Ctrl+C 可一起关闭。工作台使用原有账号，后台链接允许任何访客查看全局监控、发布模板、浏览所有账号并修改任意用户的分组。[两个窗口的启动命令](docs/https-tunnel-test.md)
 
 **需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
 
@@ -76,7 +76,7 @@ cp -n deploy.config.example.json deploy.config.json
 | `single_host` | 顶层布尔值。设置为 `true` 后，直接运行 `python3 scripts/deploy.py` 即可在这台 GPU 主机的 Docker 中部署全部服务。省略或设为 `false` 时，无参部署连接已就绪的数据服务。 |
 | `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
 | `public.host`、`public.origin` | `public.host` 是业务机监听 API 的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
-| `public.admin_test_origin` | 可选，默认关闭。设置后，指定 HTTPS 来源可经保留原始 Host 的本机代理免登录查看监控、创建和发布模板。工作台和管理后台需使用两个不同的 HTTPS 来源。临时测试可用 `--test-tunnel` 自动配置。 |
+| `public.admin_test_origin` | 可选，默认关闭。设置后，指定 HTTPS 来源可经保留原始 Host 的本机代理打开完整管理后台。其页面与操作权限和本机管理地址一致。工作台和管理后台需使用两个不同的 HTTPS 来源。临时测试可用 `--test-tunnel` 自动配置。 |
 | `mysql.bind_host`、`redis.bind_host` | 可选。运行随附数据库容器时，端口发布到数据库服务器的哪个本机 IP，默认都是 `127.0.0.1`。分机示例见下文。 |
 | `mysql.user`、`mysql.password` | MySQL 应用账号和密码。随附容器在空数据卷上创建 `mycomfy` 库并初始化所填账号，初始化凭据请避开单引号和反斜杠。复用已有数据卷时填写已有凭据。 |
 | `redis.user`、`redis.password` | Redis 缓存账号和密码。两个服务的密码均填原值，由脚本编码连接串。 |
@@ -94,7 +94,7 @@ cp -n deploy.config.example.json deploy.config.json
 | `mysql`、`redis`、`migrate` | 保存业务状态、缓存会话预检、在服务启动前迁移数据库。 |
 | `core` | 托管 API、工作台和本机管理后台。公网 HTTPS 代理可通过 JSON 的 `public.origin` 设置外部来源，并设置 `public.cookie_secure` 为 `true`。 |
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
-| `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。 |
+| `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。镜像自带健康检查，在 `docker ps` 的 STATUS 列显示协调循环的状态。队列为空时，能正常完成轮询的 Worker 同样显示 `healthy`。 |
 
 用 `--config /路径/部署配置.json` 可指定配置文件。运行 `python3 scripts/deploy.py --compose --profile database ps` 查看同一项目的数据库和应用状态。计划停机前先排空在途任务。只停业务端用 `python3 scripts/deploy.py --compose stop core`，GPU 端用 `python3 scripts/deploy.py --compose stop worker engine`，数据库可以继续服务。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
 
@@ -155,7 +155,7 @@ uv run --locked mycomfy runtime serve
 uv run --locked mycomfy worker
 ```
 
-用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。本机管理入口提供全局监控和模板发布。模板页在业务机上直接发布，命令行维护调用可以使用 `Authorization: Bearer <token>`。用户工作台登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。[本机管理后台](http://127.0.0.1:8001/)
+用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。管理后台提供全局监控、工作流模板和用户分组管理。后台页面免登录，命令行维护调用可以使用 `Authorization: Bearer <token>`。用户工作台登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。[本机管理后台](http://127.0.0.1:8001/)
 
 ## 部署和验收
 

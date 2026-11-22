@@ -29,6 +29,9 @@ RUN chmod -R a+rX mycomfy
 ENTRYPOINT ["python", "-m", "mycomfy.cli"]
 
 FROM runtime AS worker
+ENV MYCOMFY_WORKER_HEALTH_FILE=/tmp/mycomfy-worker.heartbeat
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+    CMD ["python", "-m", "mycomfy.generation.worker_health"]
 USER mycomfy
 CMD ["worker"]
 

@@ -14,20 +14,22 @@ Redis 用于批次提交、任务取消和用户改密的中间件预检。缓�
 
 迁移 `0004` 创建 `standard` 标准组，并把现有用户加入该组，保留升级前的功能访问。注册的用户也默认加入标准组。一个用户可属于多个组，权限按并集合并。分组列表为空时，用户仍可登录、查看自己的会话及改密，业务接口按权限拒绝。
 
-分组接口仅通过本机维护入口开放，每次调用使用维护 Bearer 凭据。
+在后台“用户管理”页可查看全部账号、设置所属分组。直连和公网 Admin 链接适用相同的规则。维护程序也可通过任一已启用的 Admin 入口使用 Bearer 凭据调用下表接口，其中创建和修改分组定义需要该凭据。[用户管理页](../web/admin/README.md#用户管理)
 
 | 接口 | 用途 |
 | --- | --- |
 | `GET /local/v1/groups` | 读取分组、各组权限和可选权限清单 |
 | `POST /local/v1/groups` | 创建分组，传 `key`、`name`、`permissions` |
 | `PUT /local/v1/groups/{group_key}` | 更新组名和权限，传 `name`、`permissions` |
-| `GET /local/v1/users` | 分页查找账户 ID 和用户名 |
+| `GET /local/v1/users` | 分页查看账户 ID、用户名、所属分组与生效权限 |
 | `GET /local/v1/users/{user_id}/groups` | 读取用户当前的组和生效权限 |
 | `PUT /local/v1/users/{user_id}/groups` | 传入 `group_keys`，替换该用户所属分组 |
 
 例如，创建 `viewer` 分组并授予 `jobs.view`，然后把用户的 `group_keys` 设置为 `["viewer"]`。该用户通过 `GET /api/v1/me` 获取新权限后能看到任务页面，提交或取消会收到 `403 PERMISSION_DENIED`。组权限保存在 MySQL，修改后即可影响现有会话的业务请求。C 端分组权限与本机维护凭据分别校验。[前端权限接入](../web/client/README.md)
 
 ## 监控与停止接单
+
+用 `docker ps --filter name=mycomfy-worker` 可以查看 Worker 容器的健康状态。启动阶段为 `starting`，调度循环正常推进后为 `healthy`。探针每 10 秒读取本容器协调器的心跳，持续数据库错误或超过当前处理阶段的期限会触发失败。连续三次检查失败后，Docker 显示 `unhealthy`。恢复轮询后会重新显示 `healthy`。GPU 是否就绪由 `engine` 的探针另外检查。
 
 启动本机 API 后，访问 `GET /local/v1/monitor/overview` 查看排队数、最早等待时间、重试、隔离、发布积压、卷水位和告警。集合 `requests`、`batches`、`jobs`、`executions`、`instances`、`metrics` 和 `files` 支持列表及按 ID 查看详情。按执行筛选 `/local/v1/monitor/logs?execution_id=...` 可翻页读取引擎日志。执行详情保留实例代次、节点、预算和历史日志位置。采样过期时查看实例心跳与进程存活、HTTP 可达、可接单和实际占用各项。
 

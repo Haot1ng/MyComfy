@@ -1,18 +1,18 @@
 # MyComfy V1 前台与管理后台 API
 
-用户前台通过同源 `/api/v1` 完成账号、批次生成和视频交付。本机管理后台通过 `/local/v1/monitor` 查询全局运行状态，并提供工作流模板的创建和发布。密码重置等操作由持有维护凭据的本机程序调用。本文列出的请求和响应以当前实现为准，页面依赖的接口限制见末节。[V1 实现与验收规格](https://chatgpt.com/space/page_d83476ac4c1c81918dc24a4ed1be8e51)
+用户前台通过同源 `/api/v1` 完成账号、批次生成和视频交付。管理后台通过 `/local/v1/monitor` 查询全局运行状态，页面支持创建和发布工作流模板、查看用户并调整权限组。维护程序用 Bearer 凭据调用密码重置等接口。本文列出的请求和响应以当前实现为准，页面依赖的接口限制见末节。[V1 实现与验收规格](https://chatgpt.com/space/page_d83476ac4c1c81918dc24a4ed1be8e51)
 
 ## 入口与权限
 
 | 调用方 | 接口前缀 | 访问条件 |
 | --- | --- | --- |
 | 用户前台 | `/api/v1` | 网页和 API 使用同源 HTTPS。公开写请求校验 `Origin`。注册和登录以外的接口需要有效会话，任务、素材、产物和通知均按当前用户授权。 |
-| 本机只读监控 | `/local/v1/monitor` | 只读 GET，免账号登录。API 要求连接对端与 `Host` 为回环地址，携带的 `Origin` 必须匹配本机入口。 |
-| 本机模板页 | `/local/v1/strategies`、`/local/v1/strategy-versions` | 在业务机本地查看已发布系列。创建和发布时，服务核验回环访问、同源 `Origin`、JSON 内容类型和专用请求头。 |
-| 可选外网测试后台 | 管理页面、`/local/v1/monitor`、模板列表和发布接口 | 显式配置 `public.admin_test_origin` 后，经回环代理并匹配该 HTTPS 入口的请求可匿名查看监控和使用模板页。发布模板仍要求页面的精确同源请求，审计身份为 `test-template-admin`。 |
-| 本机维护程序 | `/local/v1` | 通过本机入口使用 `Authorization: Bearer <token>` 调用策略发布、密码重置等维护操作。凭据来自操作系统权限受限的维护令牌文件。 |
+| 后台监控 | `/local/v1/monitor` | 免账号登录，只读查询。 |
+| 后台模板页 | `/local/v1/strategies`、`/local/v1/strategy-versions` | 查看已发布模板，或用同源 JSON 请求发布模板。 |
+| 后台用户管理页 | `/local/v1/users`、`/local/v1/groups`、`/local/v1/users/{user_id}/groups` | 查看全部账号、分组和权限，保存所选用户的新分组。 |
+| 维护程序 | `/local/v1` | 通过管理入口使用 `Authorization: Bearer <token>` 可调用分组定义、密码重置等维护操作。 |
 
-API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。默认在业务机本地打开管理页。启用外网测试后，可以通过单独的 HTTPS 网址打开。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [外网测试](https-tunnel-test.md) · [部署与运维](operations.md)
+API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。默认在业务机本地打开管理页。启用外网测试后，同一个后台也通过配置的 HTTPS 地址提供，菜单、数据和授权规则一致。任何拿到该链接的人都可以修改用户分组。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [外网测试](https-tunnel-test.md) · [部署与运维](operations.md)
 
 ## 通用约定
 
@@ -196,13 +196,17 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 
 ## 本机维护
 
-本机管理后台的 `/templates.html` 可基于内置 H3 或 ComfyUI API 工作流创建策略。点击发布后，页面发送 `Content-Type: application/json` 和 `X-MyComfy-Admin: templates`。服务要求连接对端与 Host 为回环地址，浏览器的 `Origin` 与当前入口完全匹配。请求带有 `Sec-Fetch-Site` 时，值须为 `same-origin`。这是对业务机本地使用者的授权，专用请求头本身属于公开协议。命令行维护程序仍可使用 Bearer 凭据发布。[新增模板操作](../web/admin/README.md#新增模板)
+模板页 `/templates.html` 发布时发送 `X-MyComfy-Admin: templates`。用户管理页 `/users.html` 读取账号、分组和保存更改时发送 `X-MyComfy-Admin: users`。后台要求请求由回环对端送达，原始 Host 对应本机入口或配置的 HTTPS 管理来源。浏览器提交写请求时，`Origin` 必须精确匹配所在的管理入口，内容类型为 `application/json`。请求带有 `Sec-Fetch-Site` 时须为 `same-origin`。维护程序可在同一地址使用 Bearer 凭据。[管理后台操作](../web/admin/README.md)
 
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
 | `GET /local/v1/strategies` | 分页。 | `200 {items, next_cursor}`。每个系列返回最新版本的 `strategy_key, name, version, strategy_version_id`。 |
 | `POST /local/v1/strategy-versions?create_only=true` | 完整策略对象，使用新的 `strategy_key`。 | 新建时返回 `201` 和版本 `1`。标识已存在时返回 `409 STRATEGY_ALREADY_EXISTS`。 |
 | `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。首次发布为 `1`，后续按同一标识递增，已发布的内容不可变。 |
+| `GET /local/v1/users` | 游标分页，`limit` 默认 50，最大 200。 | `200 {items, next_cursor}`。各项含 `user_id, username, groups, permissions`。 |
+| `GET /local/v1/groups` | 无。 | `200 {items, available_permissions}`。列出可选组和每组权限点。 |
+| `GET /local/v1/users/{user_id}/groups` | 用户 ID。 | `200 {groups, permissions}`。 |
+| `PUT /local/v1/users/{user_id}/groups` | `{"group_keys":["standard"]}` 或空列表 `{"group_keys":[]}`。 | `200 {groups, permissions}`。事务内替换完整组集合，返回新权限并集。 |
 | `POST /local/v1/users/{user_id}/password-reset` | `{new_password}` | `204`。同事务更新密码、撤销当前会话和记录审计。 |
 
 停止接单、恢复接单和解除隔离由运维命令处理。运行管理按实例 ID 和代次核对目标，解除隔离时记录处置依据。[维护路由](../src/mycomfy/api/app.py#L327) · [策略校验](../src/mycomfy/generation/strategy.py#L108) · [运维命令](operations.md)

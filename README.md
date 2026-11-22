@@ -50,6 +50,8 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 
 ## 启动服务
 
+按操作查命令、配置文件和容器行为，见 [deploy.py 部署命令手册](docs/deploy-cli.md)。
+
 ### 全栈 Docker Compose（Linux / Windows WSL 2）
 
 **在同一台 GPU 机器上部署**，需要 Python 3、Docker Compose 2.30.0 或更新版本，以及可在容器中使用的 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用支持 WSL 的 NVIDIA 驱动和 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)

@@ -26,6 +26,23 @@
 
 安装引擎时，临时容器会检出 ComfyUI 和节点，读取各自的 `requirements.txt`，生成带哈希的依赖锁并安装。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。
 
+## 五图 H3 分段编码模板
+
+需要用五张图生成 20 秒视频时，可导入 [384×384 模板](../examples/strategies/h3-five-image-20s-segmented-384.strategy.json) 或 [640×640 模板](../examples/strategies/h3-five-image-20s-segmented-640.strategy.json)。内存紧张的机器可先使用 384 版。两版均保留全片风格提示和四段可分别编辑的运镜。
+
+1. **更新引擎。** 已部署的 WSL 单机在项目根目录依次执行下面的命令。如果开着测试隧道，先结束隧道窗口，等它恢复业务端配置。使用自定义配置文件时沿用原来的 `--config`。分机部署可只在 GPU 机使用 `--gpu-only --stop` 和 `--gpu-only`。
+
+   ```bash
+   git pull --ff-only origin main &&
+   python3 scripts/deploy.py --stop &&
+   python3 scripts/deploy.py --single-host
+   ```
+
+2. **导入模板。** 在管理后台的“工作流模板”中选择“打开 JSON 文件”，选上面的完整策略，预览后点击“发布新版本”。在前台创建新任务时选“五图持续运镜（分段生成）”，依次上传五张图片。对于仓库固定的 ComfyUI v0.33.0，部署器会安装随包提供的 `MyComfySegmentedH3Video` 节点，并将其内容摘要登记到引擎清单；调度会按模板所需的节点版本检查引擎。
+3. **查看输出。** 四对相邻图片依次生成，每次只解码当前一段，将 120 帧逐帧交给 FFmpeg 编码成 H.264 临时文件，再处理下一对。最后通过 concat 和 `-c:v copy` 将四段封装成一个无声 MP4，24 fps、480 帧。五张参考图在第 0、120、240、360、479 帧（从 0 计）。任务详情可下载最终视频，当前代次的 `engine.log` 会记录分段序号。
+
+每次执行仍是一个 ComfyUI 请求。中途失败或取消时，已经编码的片段只作临时文件，重新执行将从第一段开始。分段处理节省的是四段解码画面和整片拼接数组同时驻留的内存；模型权重、单段采样和 VAE 解码仍各有内存需求。
+
 ## 安装清单
 
 以下格式供已有 `.env` 和预制依赖锁的部署使用。旧版入口读取 `var/deployment/deployment.json`，其中包含实际引擎及节点的 40 位提交号、模型和锁文件的 SHA-256、引擎容器可见的 GPU 编号或 GPU UUID。相对文件路径以此清单所在目录为基准。

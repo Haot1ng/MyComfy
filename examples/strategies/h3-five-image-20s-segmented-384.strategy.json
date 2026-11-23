@@ -1,0 +1,466 @@
+{
+  "strategy_key": "h3-five-image-20s-segmented-384",
+  "name": "五图持续运镜（分段生成）· 20 秒 · 384×384｜MiniMax H3",
+  "workflow": {
+    "1": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      },
+      "_meta": {
+        "title": "H3 首尾帧生成模型"
+      }
+    },
+    "2": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      },
+      "_meta": {
+        "title": "H3 提示词编码器"
+      }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+      },
+      "_meta": {
+        "title": "H3 视频 VAE"
+      }
+    },
+    "10": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "image-1.png"
+      },
+      "_meta": {
+        "title": "图 1 · 开场全貌"
+      }
+    },
+    "11": {
+      "class_type": "ImageFromBatch",
+      "inputs": {
+        "image": [
+          "10",
+          0
+        ],
+        "batch_index": 0,
+        "length": 1
+      },
+      "_meta": {
+        "title": "图 1 · 取首张画面"
+      }
+    },
+    "12": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "11",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 384,
+        "height": 384,
+        "crop": "center"
+      },
+      "_meta": {
+        "title": "图 1 · 统一方形构图"
+      }
+    },
+    "20": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "image-2.png"
+      },
+      "_meta": {
+        "title": "图 2 · 靠近主体"
+      }
+    },
+    "21": {
+      "class_type": "ImageFromBatch",
+      "inputs": {
+        "image": [
+          "20",
+          0
+        ],
+        "batch_index": 0,
+        "length": 1
+      },
+      "_meta": {
+        "title": "图 2 · 取首张画面"
+      }
+    },
+    "22": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "21",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 384,
+        "height": 384,
+        "crop": "center"
+      },
+      "_meta": {
+        "title": "图 2 · 统一方形构图"
+      }
+    },
+    "30": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "image-3.png"
+      },
+      "_meta": {
+        "title": "图 3 · 关键细节"
+      }
+    },
+    "31": {
+      "class_type": "ImageFromBatch",
+      "inputs": {
+        "image": [
+          "30",
+          0
+        ],
+        "batch_index": 0,
+        "length": 1
+      },
+      "_meta": {
+        "title": "图 3 · 取首张画面"
+      }
+    },
+    "32": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "31",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 384,
+        "height": 384,
+        "crop": "center"
+      },
+      "_meta": {
+        "title": "图 3 · 统一方形构图"
+      }
+    },
+    "40": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "image-4.png"
+      },
+      "_meta": {
+        "title": "图 4 · 换个视角"
+      }
+    },
+    "41": {
+      "class_type": "ImageFromBatch",
+      "inputs": {
+        "image": [
+          "40",
+          0
+        ],
+        "batch_index": 0,
+        "length": 1
+      },
+      "_meta": {
+        "title": "图 4 · 取首张画面"
+      }
+    },
+    "42": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "41",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 384,
+        "height": 384,
+        "crop": "center"
+      },
+      "_meta": {
+        "title": "图 4 · 统一方形构图"
+      }
+    },
+    "50": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "image-5.png"
+      },
+      "_meta": {
+        "title": "图 5 · 结尾定格"
+      }
+    },
+    "51": {
+      "class_type": "ImageFromBatch",
+      "inputs": {
+        "image": [
+          "50",
+          0
+        ],
+        "batch_index": 0,
+        "length": 1
+      },
+      "_meta": {
+        "title": "图 5 · 取首张画面"
+      }
+    },
+    "52": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "51",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 384,
+        "height": 384,
+        "crop": "center"
+      },
+      "_meta": {
+        "title": "图 5 · 统一方形构图"
+      }
+    },
+    "202": {
+      "class_type": "MyComfySegmentedH3Video",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "clip": [
+          "2",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ],
+        "image_1": [
+          "12",
+          0
+        ],
+        "image_2": [
+          "22",
+          0
+        ],
+        "image_3": [
+          "32",
+          0
+        ],
+        "image_4": [
+          "42",
+          0
+        ],
+        "image_5": [
+          "52",
+          0
+        ],
+        "prompt": "主体的身份、材质和光线随五张参考图自然衔接。画面稳定，主体比例自然。",
+        "shot_1_prompt": "镜头开始时已在水平向右移动，焦距稳定。从第一张图的全貌横移至第二张图的构图；抵达时仍维持相同速度，运动延伸到下一镜。",
+        "shot_2_prompt": "从首帧即延续向右的横移，逐渐带出一小段绕主体的弧线，让主体的侧面随视角变化自然显露；到尾图时仍沿弧线向右经过。",
+        "shot_3_prompt": "镜头已在向右绕行，前半段顺势将弧线拉平。用一次缓慢的焦点转移带出尾图的细节，主体大小稳定，横向运动贯穿尾帧。",
+        "shot_4_prompt": "镜头承接向右的运动，平顺滑入最后一张图的构图；前半段保持速度，最后一秒才渐渐减速，让视线落在主体上，结尾稳定。",
+        "seed": 2026112301,
+        "filename_prefix": "video/H3_FiveImage_Segmented_384"
+      },
+      "_meta": {
+        "title": "四段顺序生成并导出 · 24 fps · 20 秒"
+      }
+    }
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "image_1": {
+        "type": "string",
+        "minLength": 1,
+        "title": "图 1 · 开场全貌",
+        "description": "上传一张静态图片（建议 JPG 或 PNG），主体尽量居中。"
+      },
+      "image_2": {
+        "type": "string",
+        "minLength": 1,
+        "title": "图 2 · 靠近主体",
+        "description": "上传一张静态图片（建议 JPG 或 PNG），主体尽量居中。"
+      },
+      "image_3": {
+        "type": "string",
+        "minLength": 1,
+        "title": "图 3 · 关键细节",
+        "description": "上传一张静态图片（建议 JPG 或 PNG），主体尽量居中。"
+      },
+      "image_4": {
+        "type": "string",
+        "minLength": 1,
+        "title": "图 4 · 换个视角",
+        "description": "上传一张静态图片（建议 JPG 或 PNG），主体尽量居中。"
+      },
+      "image_5": {
+        "type": "string",
+        "minLength": 1,
+        "title": "图 5 · 最终构图",
+        "description": "上传一张静态图片（建议 JPG 或 PNG），主体尽量居中。"
+      },
+      "prompt": {
+        "type": "string",
+        "title": "全片主体与风格（可选）",
+        "description": "四段共用的主体、色调与光线。镜头动作分别在下方填写。",
+        "default": "主体的身份、材质和光线随五张参考图自然衔接。画面稳定，主体比例自然。"
+      },
+      "shot_1_prompt": {
+        "type": "string",
+        "title": "图 1 → 图 2 · 横移入画（可选）",
+        "default": "镜头开始时已在水平向右移动，焦距稳定。从第一张图的全貌横移至第二张图的构图；抵达时仍维持相同速度，运动延伸到下一镜。"
+      },
+      "shot_2_prompt": {
+        "type": "string",
+        "title": "图 2 → 图 3 · 侧绕显形（可选）",
+        "default": "从首帧即延续向右的横移，逐渐带出一小段绕主体的弧线，让主体的侧面随视角变化自然显露；到尾图时仍沿弧线向右经过。"
+      },
+      "shot_3_prompt": {
+        "type": "string",
+        "title": "图 3 → 图 4 · 移焦换景（可选）",
+        "default": "镜头已在向右绕行，前半段顺势将弧线拉平。用一次缓慢的焦点转移带出尾图的细节，主体大小稳定，横向运动贯穿尾帧。"
+      },
+      "shot_4_prompt": {
+        "type": "string",
+        "title": "图 4 → 图 5 · 收束落幅（可选）",
+        "default": "镜头承接向右的运动，平顺滑入最后一张图的构图；前半段保持速度，最后一秒才渐渐减速，让视线落在主体上，结尾稳定。"
+      }
+    },
+    "required": [
+      "image_1",
+      "image_2",
+      "image_3",
+      "image_4",
+      "image_5"
+    ],
+    "additionalProperties": false
+  },
+  "bindings": [
+    {
+      "input": "image_1",
+      "node_id": "10",
+      "node_input": "image",
+      "kind": "asset"
+    },
+    {
+      "input": "image_2",
+      "node_id": "20",
+      "node_input": "image",
+      "kind": "asset"
+    },
+    {
+      "input": "image_3",
+      "node_id": "30",
+      "node_input": "image",
+      "kind": "asset"
+    },
+    {
+      "input": "image_4",
+      "node_id": "40",
+      "node_input": "image",
+      "kind": "asset"
+    },
+    {
+      "input": "image_5",
+      "node_id": "50",
+      "node_input": "image",
+      "kind": "asset"
+    },
+    {
+      "input": "prompt",
+      "node_id": "202",
+      "node_input": "prompt",
+      "kind": "value"
+    },
+    {
+      "input": "shot_1_prompt",
+      "node_id": "202",
+      "node_input": "shot_1_prompt",
+      "kind": "value"
+    },
+    {
+      "input": "shot_2_prompt",
+      "node_id": "202",
+      "node_input": "shot_2_prompt",
+      "kind": "value"
+    },
+    {
+      "input": "shot_3_prompt",
+      "node_id": "202",
+      "node_input": "shot_3_prompt",
+      "kind": "value"
+    },
+    {
+      "input": "shot_4_prompt",
+      "node_id": "202",
+      "node_input": "shot_4_prompt",
+      "kind": "value"
+    }
+  ],
+  "requirements": {
+    "comfyui": "2f35f4a08176d993cded35dac3332be4f7287f41",
+    "models": {
+      "h3-fl2va": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+      "h3-text": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "h3-video-vae": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+    },
+    "nodes": {
+      "MyComfySegmentedH3Video": "e1bf7ceb5bbca121a38d7aae607ecb52cb6b43310d5b7707b40d0556ceff6128"
+    }
+  },
+  "progress_mapping": [
+    {
+      "node_ids": [
+        "10",
+        "11",
+        "12",
+        "20",
+        "21",
+        "22",
+        "30",
+        "31",
+        "32",
+        "40",
+        "41",
+        "42",
+        "50",
+        "51",
+        "52"
+      ],
+      "stage": "准备五张参考图"
+    },
+    {
+      "node_ids": [
+        "202"
+      ],
+      "stage": "四段顺序生成与视频导出"
+    }
+  ],
+  "output_contract": [
+    {
+      "role": "video",
+      "node_id": "202",
+      "media_types": [
+        "video/mp4"
+      ],
+      "require_decodable": true,
+      "width": 384,
+      "height": 384,
+      "fps": 24,
+      "min_duration": 20.0,
+      "max_duration": 20.0
+    }
+  ],
+  "scheduling": {},
+  "retry": {},
+  "artifacts": {}
+}

@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from . import bundled
+
 Name = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")]
 Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 
@@ -82,6 +84,7 @@ class EngineLayout(Record):
 class Deployment(EngineLayout):
     comfyui: Repo
     nodes: dict[Name, Repo] = Field(default_factory=dict)
+    bundled_nodes: dict[Name, Sha256] | None = None
     python: str = sys.executable
     requirements_lock: str
     requirements_sha256: Sha256
@@ -192,12 +195,14 @@ def provision(manifest_path, root):
     lock = (base / spec.requirements_lock).resolve()
     if file_digest(lock) != spec.requirements_sha256:
         raise ValueError("Python 依赖锁文件摘要不符")
+    bundled_nodes = bundled.select_nodes(spec.comfyui.commit, spec.nodes, spec.bundled_nodes)
     root.mkdir(parents=True, exist_ok=True)
     with (root / "deploy.lock").open("a") as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
         hardware = {gpu: probe_gpu(gpu) for gpu in {i.gpu for i in spec.instances}}
         # 安装环境路径固定，避免移动虚拟环境后破坏其可执行文件内的绝对路径。
-        description = spec.model_dump(exclude={"instances"})
+        # 纯 Python 内置节点按摘要独立安装，保持原有模型、ComfyUI 和 GPU 虚拟环境可复用。
+        description = spec.model_dump(exclude={"instances", "bundled_nodes"})
         release_id = hashlib.sha256(json.dumps(description, sort_keys=True).encode()).hexdigest()
         release = root / "releases" / release_id
         release.mkdir(parents=True, exist_ok=True)
@@ -263,18 +268,26 @@ def provision(manifest_path, root):
             )
         model_paths = {Path(model.path).parts[0] for model in spec.models.values()}
         extra = release / "model-paths.yaml"
-        write_json(
-            extra,
-            {
-                "mycomfy": {
-                    "base_path": str(release / "models"),
-                    **{key: key for key in sorted(model_paths)},
-                }
-            },
-        )
+        paths = {
+            "mycomfy": {
+                "base_path": str(release / "models"),
+                **{key: key for key in sorted(model_paths)},
+            }
+        }
+        if bundled_nodes:
+            version = bundled_nodes[bundled.H3_NODE]
+            directory = bundled.install_node(root, version)
+            paths["mycomfy_bundled"] = {"custom_nodes": str(directory)}
+            # 每代运行时持有自己的搜索路径文件；切换节点版本不改写旧代次读到的路径。
+            extra = root / "generated" / "paths" / release_id / f"{version}.yaml"
+        if bundled_nodes and extra.exists():
+            if json.loads(extra.read_bytes()) != paths:
+                raise ValueError(f"已有模型或节点路径配置发生变化 {extra}")
+        else:
+            write_json(extra, paths)
         verified = {
             "comfyui": spec.comfyui.commit,
-            "nodes": {key: node.commit for key, node in spec.nodes.items()},
+            "nodes": {**{key: node.commit for key, node in spec.nodes.items()}, **bundled_nodes},
             "models": {key: model.sha256 for key, model in spec.models.items()},
             "requirements_sha256": spec.requirements_sha256,
         }
@@ -306,6 +319,7 @@ def main(argv=None):
         lock = args.manifest.parent / spec.requirements_lock
         if file_digest(lock) != spec.requirements_sha256:
             raise ValueError("依赖锁文件摘要不符")
+        bundled.select_nodes(spec.comfyui.commit, spec.nodes, spec.bundled_nodes)
         print(f"已校验 {len(spec.instances)} 个实例配置")
     else:
         print(provision(args.manifest, args.root))

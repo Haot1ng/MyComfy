@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mycomfy.engine import deploy
+from mycomfy.engine import bundled, deploy
 from mycomfy.engine.runtime import load_config
 
 
@@ -118,6 +119,25 @@ def test_verified_deploy_twice_offline(tmp_path, monkeypatch):
     model.unlink()
     deploy.provision(manifest, root)
     assert cfg_path.read_bytes() == expected
+
+    # 将同一检出模拟为受支持的 H3 版本。手写清单升级后，旧进程仍能使用原路径与环境。
+    monkeypatch.setattr(bundled, "H3_COMFYUI", engine["commit"])
+    monkeypatch.setattr(bundled, "media_ready", lambda: True)
+    original_paths = Path(cfg.extra_model_paths).read_bytes()
+    assert bundled.H3_NODE not in cfg.manifest["nodes"]
+    deploy.provision(manifest, root)
+    upgraded = load_config(cfg_path)["sample"]
+    version = bundled.node_digest(bundled.SOURCE)
+    assert upgraded.python == cfg.python
+    assert upgraded.entrypoint == cfg.entrypoint
+    assert upgraded.manifest["nodes"] == {"Example": node["commit"], bundled.H3_NODE: version}
+    paths = json.loads(Path(upgraded.extra_model_paths).read_bytes())
+    assert json.loads(original_paths)["mycomfy"] == paths["mycomfy"]
+    assert Path(cfg.extra_model_paths).read_bytes() == original_paths
+    installed = Path(paths["mycomfy_bundled"]["custom_nodes"]) / bundled.H3_NODE
+    assert bundled.node_digest(installed) == version
+    assert sorted(p.name for p in installed.iterdir()) == list(bundled.H3_FILES)
+    expected = cfg_path.read_bytes()
     (root / "model-objects" / model_hash).write_bytes(b"damaged")
     with pytest.raises(ValueError, match="摘要不符"):
         deploy.provision(manifest, root)
@@ -146,6 +166,8 @@ def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, mon
 
     source = tmp_path / "engine"
     initial = create_repository(source, {"main.py": "", "requirements.txt": "torch\n"})
+    monkeypatch.setattr(bundled, "H3_COMFYUI", initial["commit"])
+    monkeypatch.setattr(bundled, "media_ready", lambda: True)
     subprocess.run(
         [
             "git",
@@ -186,6 +208,7 @@ def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, mon
     first = recipe.materialize(settings, root, tmp_path)
     original = deploy.Deployment.model_validate_json(first.read_bytes())
     assert original.comfyui.commit == initial["commit"]
+    assert original.bundled_nodes == {bundled.H3_NODE: bundled.node_digest(bundled.SOURCE)}
     assert original.models["video"].sha256 == deploy.file_digest(model)
     assert original.instances[0].id == "gpu0"
 
@@ -238,3 +261,42 @@ def test_recipe_requires_remote_model_digest_before_resolving(tmp_path):
     with pytest.raises(ValueError, match="SHA-256"):
         recipe.materialize(settings, tmp_path / "engines", tmp_path)
     assert not (tmp_path / "engines").exists()
+
+
+def test_bundled_node_preserves_old_versions_and_detects_tampering(tmp_path, monkeypatch):
+    """升级只新增一份小节点包，旧版固定清单可重放，损坏的历史版本不能继续登记。"""
+    source = tmp_path / "source"
+    shutil.copytree(bundled.SOURCE, source, ignore=shutil.ignore_patterns("__pycache__"))
+    monkeypatch.setattr(bundled, "SOURCE", source)
+    root = tmp_path / "engines"
+    first = bundled.node_digest(source)
+    previous = bundled.install_node(root, first)
+    # 模拟下一版应用仅改变分段实现，移除旧源码后仍能复用已安装的正确版本。
+    with (source / "segment.py").open("a") as stream:
+        stream.write("\n# next revision\n")
+    second = bundled.node_digest(source)
+    current = bundled.install_node(root, second)
+    assert current != previous
+    assert bundled.install_node(root, first) == previous
+    assert bundled.node_digest(current / bundled.H3_NODE) == second
+    with pytest.raises(ValueError, match="未提供"):
+        bundled.install_node(root, "0" * 64)
+    assert not (root / "bundled-nodes" / ("0" * 64)).exists()
+    (previous / bundled.H3_NODE / "segment.py").write_text("damaged")
+    with pytest.raises(ValueError, match="摘要不符"):
+        bundled.install_node(root, first)
+    assert bundled.install_node(root, second) == current
+
+
+def test_bundled_node_requires_compatible_engine_and_media(monkeypatch):
+    """手写清单与生成清单都须满足提交和编码工具要求，其他工作流仍可继续部署。"""
+    monkeypatch.setattr(bundled, "media_ready", lambda: False)
+    pinned = {bundled.H3_NODE: bundled.node_digest(bundled.SOURCE)}
+    assert bundled.select_nodes("a" * 40, {}) == {}
+    assert bundled.select_nodes(bundled.H3_COMFYUI, {}) == {}
+    with pytest.raises(ValueError, match="libx264"):
+        bundled.select_nodes(bundled.H3_COMFYUI, {}, pinned)
+    with pytest.raises(ValueError, match="不兼容"):
+        bundled.select_nodes("a" * 40, {}, pinned)
+    with pytest.raises(ValueError, match="不兼容"):
+        bundled.select_nodes(bundled.H3_COMFYUI, {bundled.H3_NODE: "external"}, pinned)

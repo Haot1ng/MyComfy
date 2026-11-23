@@ -1,0 +1,2 @@
+# 模板按节点源码的字节摘要选择引擎。Windows 与 WSL 检出时使用相同换行。
+src/mycomfy/engine/comfy_nodes/*.py text eol=lf

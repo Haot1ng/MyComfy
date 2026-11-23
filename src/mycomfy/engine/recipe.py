@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field
 
+from . import bundled
 from .deploy import (
     Deployment,
     EngineLayout,
@@ -177,6 +178,7 @@ def materialize(recipe, root, base):
         spec = Deployment(
             comfyui=comfyui,
             nodes=nodes,
+            bundled_nodes=bundled.select_nodes(comfyui.commit, nodes),
             models=models,
             instances=recipe.instances,
             requirements_lock=str(lock),

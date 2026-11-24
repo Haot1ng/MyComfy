@@ -26,7 +26,7 @@ MyComfy/
 ```
 
 <details>
-<summary>展开完整文件树（189 个文件，含用途注释）</summary>
+<summary>展开完整文件树（190 个文件，含用途注释）</summary>
 
 ```text
 MyComfy/
@@ -219,6 +219,7 @@ MyComfy/
 │   ├── unit/                                                  # 单元测试
 │   │   ├── test_contracts.py                                  # 核对批次摘要、策略约束与函数注释
 │   │   ├── test_deployment_config.py                          # 验证部署 YAML 解析与参数传递
+│   │   ├── test_engine_observation.py                         # 验证历史与队列查询、错误和任务匹配
 │   │   ├── test_funnel_client.py                              # 验证双端口 Funnel 转发与清理
 │   │   ├── test_optional_image_bindings.py                    # 验证可选图片缺省时的节点与连线裁剪
 │   │   ├── test_segment_video.py                              # 验证 FFmpeg 分段编码、拼接与清理

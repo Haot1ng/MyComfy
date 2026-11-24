@@ -9,6 +9,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from urllib.parse import urlsplit
 
 import httpx
@@ -27,12 +28,63 @@ class NotSent(Exception):
 class Unconfirmed(Exception):
     """The sender must reconcile this attempt before deciding its outcome."""
 
+    def __init__(self, reason, *, lookup=None):
+        """保留原异常原因，并在查询故障时携带本轮各端点的诊断摘要。"""
+        super().__init__(reason)
+        self.lookup = lookup or {}
+
 
 @dataclass
 class Observation:
     state: str
     outputs: dict = field(default_factory=dict)
     stage: str | None = None
+    lookup: dict = field(default_factory=dict, compare=False)
+
+
+def match_history(body, prompt_id):
+    """从当前 prompt 的历史中提取已确认的终态及产物。"""
+    if prompt_id not in body:
+        return "missing", None
+    history = body[prompt_id]
+    if not isinstance(history, dict) or not isinstance(history.get("status", {}), dict):
+        raise TypeError("Invalid history entry")
+    status = history.get("status", {})
+    messages = status.get("messages", [])
+    if not isinstance(messages, list):
+        raise TypeError("Invalid history messages")
+    if any(isinstance(m, list) and m and m[0] == "execution_interrupted" for m in messages):
+        state = "INTERRUPTED"
+    elif status.get("status_str") == "error":
+        state = "FAILED"
+    elif status.get("completed") is True and status.get("status_str") == "success":
+        state = "SUCCEEDED"
+    else:
+        return "incomplete", None
+    return state.lower(), Observation(state, history.get("outputs", {}))
+
+
+def match_queue(body, prompt_id):
+    """识别运行或排队中的原 prompt，无法解析的队列不能证明任务已消失。"""
+    fields = (
+        ("queue_running", "matched_running", "running"),
+        ("queue_pending", "matched_pending", "engine_queue"),
+    )
+    malformed = "queue_running" not in body and "queue_pending" not in body
+    for name, status, stage in fields:
+        rows = body.get(name, [])
+        if not isinstance(rows, list):
+            malformed = True
+            continue
+        # 某一条损坏的记录不应覆盖同一响应中其他记录提供的有效命中。
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 2:
+                malformed = True
+            elif row[1] == prompt_id:
+                return status, Observation("RUNNING", stage=stage)
+    if malformed:
+        raise ValueError("Invalid queue entries")
+    return "missing", None
 
 
 class ComfyAdapter:
@@ -87,32 +139,36 @@ class ComfyAdapter:
             raise Unconfirmed("PROMPT_ID_UNCONFIRMED")
 
     def observe(self, prompt_id):
-        """按原提交标识查询历史和队列，只有明确的完成记录才产生终态。"""
-        try:
-            reply = self.client.get(f"/history/{prompt_id}")
-            reply.raise_for_status()
-            history = reply.json().get(prompt_id)
-            if isinstance(history, dict):
-                status = history.get("status", {})
-                messages = status.get("messages", [])
-                if any(item and item[0] == "execution_interrupted" for item in messages):
-                    return Observation("INTERRUPTED", history.get("outputs", {}))
-                if status.get("status_str") == "error":
-                    return Observation("FAILED", history.get("outputs", {}))
-                if status.get("completed") is True and status.get("status_str") == "success":
-                    return Observation("SUCCEEDED", history.get("outputs", {}))
-            reply = self.client.get("/queue")
-            reply.raise_for_status()
-            queue = reply.json()
-            for field, stage in (("queue_running", "running"), ("queue_pending", "engine_queue")):
-                if any(
-                    isinstance(row, list) and len(row) > 1 and row[1] == prompt_id
-                    for row in queue.get(field, [])
-                ):
-                    return Observation("RUNNING", stage=stage)
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
-            raise Unconfirmed("ENGINE_LOOKUP_UNAVAILABLE") from exc
-        return Observation("UNKNOWN")
+        """核对历史和队列并记录各自的耗时与结果，任一可靠命中即可结束本轮。"""
+        lookup = {}
+        probes = (
+            ("history", f"/history/{prompt_id}", match_history),
+            ("queue", "/queue", match_queue),
+        )
+        for name, path, match in probes:
+            detail = lookup[name] = {}
+            started = monotonic()
+            try:
+                reply = self.client.get(path)
+                detail["http_status"] = reply.status_code
+                reply.raise_for_status()
+                body = reply.json()
+                if not isinstance(body, dict):
+                    raise TypeError("Invalid lookup response")
+                detail["status"], observation = match(body, prompt_id)
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                # 即使历史超时也继续查队列；审计只保留异常类型，不写入正文或工作流。
+                detail.update(status="error", error=type(exc).__name__)
+                continue
+            finally:
+                detail["duration_ms"] = round((monotonic() - started) * 1000)
+            if observation is not None:
+                observation.lookup = lookup
+                return observation
+
+        if any(detail["status"] == "error" for detail in lookup.values()):
+            raise Unconfirmed("ENGINE_LOOKUP_UNAVAILABLE", lookup=lookup)
+        return Observation("UNKNOWN", lookup=lookup)
 
     def interrupt(self, prompt_id):
         """按提交标识请求定向中断，由后续核对确认实际执行结束。"""

@@ -35,6 +35,8 @@ Redis 用于批次提交、任务取消和用户改密的中间件预检。缓�
 
 启动本机 API 后，访问 `GET /local/v1/monitor/overview` 查看排队数、最早等待时间、重试、隔离、发布积压、卷水位和告警。集合 `requests`、`batches`、`jobs`、`executions`、`instances`、`metrics` 和 `files` 支持列表及按 ID 查看详情。按执行筛选 `/local/v1/monitor/logs?execution_id=...` 可翻页读取引擎日志。执行详情保留实例代次、节点、预算和历史日志位置。采样过期时查看实例心跳与进程存活、HTTP 可达、可接单和实际占用各项。
 
+排查执行丢失时，打开管理后台的执行详情，查看 `result.last_lookup`。其中的 `history`、`queue` 分别记录已查询接口的结果和耗时（`duration_ms`），收到响应时附 HTTP 状态码，读取失败时附异常类型。例如历史为 `error / ReadTimeout`、队列为 `matched_running`，表示同一任务仍在运行，Worker 会继续跟踪。历史已确认终态时可直接结算，只会记录历史查询。探测结果变化时立即保存，稳定期间按观察间隔刷新。若执行最终显示 `STOPPED_GENERATION_RECONCILED`，查看 `result.reconciliation_trigger.reason` 区分持续未确认到期（`RECONCILE_TIME_LIMIT`）、执行总时限到期（`TOTAL_TIME_LIMIT`）和已发现引擎代次退出（`GENERATION_ALREADY_ENDED`）。升级前结束的执行只保留当时采集的数据。
+
 本机服务每 10 秒检查隔离、待核对执行、发布故障、受损文件、低磁盘余量及事件积压。告警激活与解除写入 `mycomfy.alerts` 日志，进程日志通过系统日志收集器路由到部署指定的接收人。事件积压告警秒数由 `MYCOMFY_EVENT_ALERT_SECONDS` 设置。引擎采样和日志轮转由运行管理处理，关闭监控页面后仍持续运行。
 
 计划维护前，从监控读取实例 ID 和当前代次，执行：

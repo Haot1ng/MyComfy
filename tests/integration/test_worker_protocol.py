@@ -35,7 +35,9 @@ class EngineDouble:
         self.posts = []
         self.interrupts = []
         self.running = set()
+        self.pending = set()
         self.history = {}
+        self.history_error = None
         self.drop_receipt = False
         self.reject = False
 
@@ -57,8 +59,16 @@ class EngineDouble:
                 raise httpx.ReadTimeout("simulated response loss")
             return httpx.Response(200, json={"prompt_id": payload["prompt_id"]})
         if path == "/queue":
-            return httpx.Response(200, json={"queue_running": [[0, p] for p in self.running]})
+            return httpx.Response(
+                200,
+                json={
+                    "queue_running": [[0, p] for p in self.running],
+                    "queue_pending": [[0, p] for p in self.pending],
+                },
+            )
         if path.startswith("/history/"):
+            if self.history_error is not None:
+                raise self.history_error
             prompt = path.rsplit("/", 1)[-1]
             return httpx.Response(
                 200, json={prompt: self.history[prompt]} if prompt in self.history else {}
@@ -306,23 +316,120 @@ def test_retry_budget(setup_worker):
 
 
 @pytest.mark.mysql
-def test_unconfirmed_exit_quarantines_instance(setup_worker):
-    """R02 无法证明旧进程退出时保留占用，禁止启动替代执行。"""
+@pytest.mark.parametrize(("queue", "stage"), [("pending", "engine_queue"), ("running", "running")])
+def test_queue_match_after_reconcile_deadline_recovers_execution(setup_worker, queue, stage):
+    """历史超时后，用同一 prompt 的队列记录恢复执行，即使上次未确认已超过核对期限。"""
+    worker, engine = setup_worker
+    worker.tick()
+    prompt = engine.posts[0]["prompt_id"]
+    engine.running.clear()
+    engine.history_error = httpx.ReadTimeout("simulated history outage")
+    worker.tick()
+    with worker.sessions.begin() as db:
+        execution = db.scalars(select(Execution)).one()
+        execution_id = execution.id
+        assert execution.phase == "UNCONFIRMED"
+        assert execution.result["transitions"][-1]["evidence"] == "ENGINE_LOOKUP_UNAVAILABLE"
+        assert db.get(Job, "job").state == "RECOVERING"
+        execution.updated_at = db_now(db) - timedelta(seconds=31)
+
+    # 与本任务无关的记录并存，Worker 必须用本次提交的 prompt_id 判断归属。
+    engine.pending.add("other-prompt")
+    getattr(engine, queue).add(prompt)
+    worker.tick()
+    worker.tick()
+    with worker.sessions() as db:
+        execution = db.get(Execution, execution_id)
+        assert (execution.phase, execution.stage) == ("RUNNING", stage)
+        assert db.get(EngineInstance, "engine").active_execution_id == execution_id
+        assert db.get(Job, "job").state == "EXECUTING"
+        assert "reconciliation_trigger" not in execution.result
+        assert [t["phase"] for t in execution.result["transitions"]].count("RUNNING") == 1
+        lookup = execution.result["last_lookup"]
+        assert lookup["at"]
+        assert lookup["history"]["status"] == "error"
+        assert lookup["history"]["error"] == "ReadTimeout"
+        assert lookup["queue"]["status"] == f"matched_{queue}"
+        assert lookup["queue"]["http_status"] == 200
+        assert lookup["history"]["duration_ms"] >= 0 and lookup["queue"]["duration_ms"] >= 0
+    assert len(engine.posts) == 1
+
+
+@pytest.mark.mysql
+def test_unconfirmed_exit_quarantines_instance(setup_worker, monkeypatch):
+    """R02 重复核对的诊断不延后截止时间；无法证明进程退出时保留占用和最后证据。"""
     worker, engine = setup_worker
     engine.drop_receipt = True
     worker.tick()
     engine.running.clear()
-    with worker.sessions.begin() as db:
+    with worker.sessions() as db:
         execution = db.scalars(select(Execution)).one()
-        execution.updated_at = db_now(db) - timedelta(minutes=30)
+        since = execution.updated_at
+    # 两次观测到的故障类型不同；停机时必须留下触发该决定的最近一次查询结果。
+    engine.history_error = httpx.ReadTimeout("simulated history outage")
+    now = since + timedelta(seconds=20)
+    monkeypatch.setattr("mycomfy.generation.worker.db_now", lambda db: now)
+    worker.tick()
+    with worker.sessions() as db:
+        current = db.get(Execution, execution.id)
+        assert current.phase == "UNCONFIRMED" and current.updated_at == since
+        assert current.result["last_lookup"]["history"]["error"] == "ReadTimeout"
+    now = since + timedelta(seconds=31)
+    engine.history_error = httpx.ConnectError("simulated disconnect")
     worker.tick()
     worker.tick()
     with worker.sessions.begin() as db:
         instance = db.get(EngineInstance, "engine")
         assert instance.quarantine_reason == "PROCESS_EXIT_UNCONFIRMED"
         assert instance.active_execution_id == execution.id
+        result = db.get(Execution, execution.id).result
+        assert result["reconciliation_trigger"]["reason"] == "RECONCILE_TIME_LIMIT"
+        assert result["last_lookup"]["history"]["error"] == "ConnectError"
+        assert result["last_lookup"]["queue"]["status"] == "missing"
+        assert result["last_lookup"]["queue"]["http_status"] == 200
         assert db.get(Job, "job").state == "RECOVERING"
     assert len(engine.posts) == 1
+
+
+@pytest.mark.mysql
+@pytest.mark.parametrize("already_ended", [False, True])
+def test_reconciliation_records_first_trigger_before_stop(setup_worker, already_ended):
+    """区分已退出与总时限；模拟停机后 Worker 重启也保留首次触发原因。"""
+    worker, engine = setup_worker
+    worker.tick()
+    worker.tick()
+    run_dir = worker.settings.data_root
+    with worker.sessions.begin() as db:
+        execution = db.scalars(select(Execution)).one()
+        execution_id = execution.id
+        instance = db.get(EngineInstance, "engine")
+        instance.runtime = {**instance.runtime, "run_dir": str(run_dir)}
+        if not already_ended:
+            execution.authorized_at = db_now(db) - timedelta(seconds=121)
+
+    ended = run_dir / "ended.json"
+    if already_ended:
+        ended.write_text('{"generation": 7}')
+    expected = "GENERATION_ALREADY_ENDED" if already_ended else "TOTAL_TIME_LIMIT"
+
+    def stop_then_restart(sessions, instance_id, generation):
+        """核查停止调用前已提交诊断记录，模拟退出凭据落盘后协调器被重启。"""
+        with sessions() as db:
+            trigger = db.get(Execution, execution_id).result["reconciliation_trigger"]
+            assert trigger["reason"] == expected
+        ended.write_text(json.dumps({"generation": generation}))
+        raise RuntimeError("simulated worker restart")
+
+    worker.stop_generation = stop_then_restart
+    with pytest.raises(RuntimeError, match="simulated worker restart"):
+        worker.process("engine", execution_id)
+    worker.stop_generation = lambda *args: True
+    worker.process("engine", execution_id)
+    with worker.sessions() as db:
+        execution = db.get(Execution, execution_id)
+        assert execution.phase == "LOST"
+        assert execution.result["reconciliation_trigger"]["reason"] == expected
+        assert len(engine.posts) == 1
 
 
 @pytest.mark.mysql

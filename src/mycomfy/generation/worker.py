@@ -89,6 +89,27 @@ def record_phase(execution, phase, now, evidence):
     execution.result = result
 
 
+def record_lookup(execution, lookup, now, *, force=False):
+    """保存一次历史和队列探测摘要，不改变状态的起始时间或延长核对期限。"""
+    if not lookup:
+        return
+    result = execution.result or {}
+    previous = result.get("last_lookup", {})
+    # 状态码、命中或异常变化立即记录；稳定轮询只按观察间隔刷新耗时，避免逐秒改写 MySQL。
+    if previous and not force:
+        interval = execution.workspace.get(
+            "observation_seconds", execution.workspace.get("timeout_seconds", 120)
+        )
+        boundary = timestamp(now - timedelta(seconds=interval))
+        if previous["at"] > boundary and all(
+            previous.get(endpoint, {}).get(key) == sample.get(key)
+            for endpoint, sample in lookup.items()
+            for key in ("status", "http_status", "error")
+        ):
+            return
+    execution.result = {**result, "last_lookup": {"at": timestamp(now), **lookup}}
+
+
 def take_owned(db, instance_id, execution_id):
     """依次锁定实例、任务及执行并复核所有权，过时代次无法释放新槽位。"""
     instance = db.get(EngineInstance, instance_id, with_for_update=True)
@@ -377,8 +398,18 @@ class Worker:
             register_outputs(db, execution, job, version, outputs, now)
             instance.active_execution_id = None
 
-    def stop_and_reconcile(self, instance_id, execution, contracts):
-        """停止超时的旧代次并核对独占输出目录，进程树存活性不明时保持隔离。"""
+    def stop_and_reconcile(self, instance_id, execution, contracts, trigger):
+        """保存触发核对的依据，确认本代次退出后核对其独占输出目录。"""
+        with self.sessions.begin() as db:
+            owned = take_owned(db, instance_id, execution.id)
+            if not owned:
+                return
+            current = owned[2]
+            result = dict(current.result or {})
+            # 先提交触发原因；若停机期间 Worker 重启，后续看到退出凭据仍保留第一次判断。
+            if "reconciliation_trigger" not in result:
+                result["reconciliation_trigger"] = {"reason": trigger, "at": timestamp(db_now(db))}
+                current.result = result
         try:
             confirmed = self.stop_generation(self.sessions, instance_id, execution.generation)
         except (OSError, ValueError, KeyError):
@@ -398,8 +429,16 @@ class Worker:
         outcome = "SUCCEEDED" if complete_set else "LOST"
         self.finish(instance_id, execution.id, outcome, outputs, "STOPPED_GENERATION_RECONCILED")
 
-    def observe(self, instance_id, execution_id, adapter, sample=None):
+    def observe(self, instance_id, execution, adapter, sample=None):
         """按原代次及 prompt_id 对照队列或历史，并在期限到达时受控停止。"""
+        execution_id = execution.id
+        unknown_reason = "QUEUE_HISTORY_INCONCLUSIVE"
+        # HTTP 可能超时，查询期间不占用 MySQL 行锁。回写前重新确认槽位仍归本次执行。
+        try:
+            result = adapter.observe(execution.prompt_id)
+        except Unconfirmed as exc:
+            unknown_reason = "ENGINE_LOOKUP_UNAVAILABLE"
+            result = Observation("UNKNOWN", lookup=exc.lookup)
         with self.sessions.begin() as db:
             owned = take_owned(db, instance_id, execution_id)
             if not owned:
@@ -408,11 +447,22 @@ class Worker:
             if execution.phase == "QUARANTINED" or instance.quarantine_reason:
                 return
             now = db_now(db)
+            runtime = execution.workspace
+            reconcile_due = (
+                result.state == "UNKNOWN"
+                and execution.phase == "UNCONFIRMED"
+                and (now - execution.updated_at).total_seconds() >= runtime["reconcile_seconds"]
+            )
+            total_due = result.state == "RUNNING" and now >= execution.authorized_at + timedelta(
+                seconds=runtime["timeout_seconds"]
+            )
+            record_lookup(
+                execution,
+                result.lookup,
+                now,
+                force=reconcile_due or total_due or result.state not in {"UNKNOWN", "RUNNING"},
+            )
             contracts = db.get(StrategyVersion, job.strategy_version_id).content["output_contract"]
-        try:
-            result = adapter.observe(execution.prompt_id)
-        except Unconfirmed:
-            result = Observation("UNKNOWN")
         if result.state in {"SUCCEEDED", "FAILED", "INTERRUPTED"}:
             try:
                 outputs = completed_outputs(execution, contracts, result.outputs)
@@ -427,17 +477,15 @@ class Worker:
                 return
             self.finish(instance_id, execution_id, result.state, outputs, "TERMINAL_HISTORY")
             return
-        runtime = execution.workspace
         if result.state == "UNKNOWN":
-            elapsed = (now - execution.updated_at).total_seconds()
-            if execution.phase == "UNCONFIRMED" and elapsed >= runtime["reconcile_seconds"]:
-                self.stop_and_reconcile(instance_id, execution, contracts)
+            if reconcile_due:
+                self.stop_and_reconcile(instance_id, execution, contracts, "RECONCILE_TIME_LIMIT")
             else:
-                self.recovering(instance_id, execution_id, "QUEUE_HISTORY_INCONCLUSIVE")
+                self.recovering(instance_id, execution_id, unknown_reason)
             return
-        if now >= execution.authorized_at + timedelta(seconds=runtime["timeout_seconds"]):
+        if total_due:
             self.recovering(instance_id, execution_id, "TOTAL_TIME_LIMIT")
-            self.stop_and_reconcile(instance_id, execution, contracts)
+            self.stop_and_reconcile(instance_id, execution, contracts, "TOTAL_TIME_LIMIT")
             return
         interrupt = False
         with self.sessions.begin() as db:
@@ -510,7 +558,9 @@ class Worker:
                     if owned:
                         self.finish_unsent(db, *owned, "STOPPED_BEFORE_AUTHORIZATION")
             else:
-                self.stop_and_reconcile(instance_id, execution, strategy["output_contract"])
+                self.stop_and_reconcile(
+                    instance_id, execution, strategy["output_contract"], "GENERATION_ALREADY_ENDED"
+                )
             return
         if phase == "QUARANTINED":
             return
@@ -537,7 +587,7 @@ class Worker:
             if phase == "PREPARED":
                 self.submit_prepared(instance_id, execution_id, adapter)
             else:
-                self.observe(instance_id, execution_id, adapter, sample)
+                self.observe(instance_id, execution, adapter, sample)
         finally:
             adapter.close()
 

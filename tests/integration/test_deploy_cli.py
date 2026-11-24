@@ -429,6 +429,53 @@ def compose_services(run_deploy, *options):
     return json.loads(result.stdout)["services"]
 
 
+@pytest.mark.parametrize(
+    ("role", "ports", "workbench_port"),
+    [
+        ("--single-host", {"api": 18000, "admin": 18001}, 18000),
+        ("--core-only", {"admin": 18001}, 8000),
+    ],
+)
+def test_deploy_prints_addresses_for_configured_ports(
+    checkout, run_deploy, example_config, role, ports, workbench_port
+):
+    """从示例复制配置并只改端口，核对部署输出、网关映射和 Core 的工作台来源。"""
+    example_config["ports"].update(ports)
+    (checkout / "deploy.config.yaml").write_text(json.dumps(example_config))
+    workbench = f"http://127.0.0.1:{workbench_port}"
+    admin = f"http://127.0.0.1:{ports['admin']}"
+
+    services = compose_services(run_deploy)
+    published = {p["target"]: int(p["published"]) for p in services["gateway"]["ports"]}
+    assert published == {8000: workbench_port, 8001: ports["admin"]}
+    assert services["core"]["environment"]["MYCOMFY_PUBLIC_ORIGIN"] == workbench
+
+    result, _ = run_deploy(role)
+    assert result.returncode == 0, result.stderr
+    assert f"工作台地址 {workbench}" in result.stdout.splitlines()
+    assert f"管理后台地址 {admin}" in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("role", ["--core-only", "--gpu-only"])
+def test_deploy_prints_explicit_proxy_origins(checkout, run_deploy, example_config, role):
+    """使用 HTTPS 代理时保留外部地址，GPU 机只显示远端工作台。"""
+    workbench = "https://video.example.com"
+    admin = "https://admin.example.com:8443"
+    example_config["public"].update(origin=workbench, admin_origin=admin)
+    (checkout / "deploy.config.yaml").write_text(json.dumps(example_config))
+    services = compose_services(run_deploy)
+    assert services["core"]["environment"]["MYCOMFY_PUBLIC_ORIGIN"] == workbench
+    assert services["core"]["environment"]["MYCOMFY_ADMIN_ORIGIN"] == admin
+
+    result, _ = run_deploy(role)
+    assert result.returncode == 0, result.stderr
+    assert f"工作台地址 {workbench}" in result.stdout.splitlines()
+    if role == "--core-only":
+        assert f"管理后台地址 {admin}" in result.stdout.splitlines()
+    else:
+        assert "管理后台地址" not in result.stdout
+
+
 @pytest.mark.parametrize("suffixes", [("yaml", "yml"), ("yml",)])
 def test_personal_yaml_precedes_template(checkout, run_deploy, suffixes):
     """仓库中的 YAML 优先于 YML，缺少两者时才读取内置示例。"""

@@ -78,30 +78,34 @@ def test_custom_accounts_and_paths(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("host", "expected"),
+    ("host", "bind_ip", "browser_host"),
     [
-        ("localhost.", "127.0.0.1"),
-        ("0.0.0.0", "0.0.0.0"),
-        ("[::]", "::"),
-        ("[2001:db8::8]", "2001:db8::8"),
-        ("video.lan", "192.0.2.20"),
+        ("localhost.", "127.0.0.1", "localhost."),
+        ("0.0.0.0", "0.0.0.0", "127.0.0.1"),
+        ("[::]", "::", "[::1]"),
+        ("[2001:0db8::8]", "2001:db8::8", "[2001:db8::8]"),
+        ("Video.LAN", "192.0.2.20", "video.lan"),
     ],
 )
-def test_public_host_is_rendered_as_docker_bind_ip(tmp_path, monkeypatch, host, expected):
-    """工作台宿主映射使用规范化的 IP，只有域名需要在业务机解析。"""
+def test_public_host_is_rendered_as_docker_bind_ip(
+    tmp_path, monkeypatch, host, bind_ip, browser_host
+):
+    """核对绑定 IP 与浏览器来源，使用标准 HTTP 端口来验证浏览器的序列化格式。"""
     path = tmp_path / "deploy.yaml"
     path.write_text(
-        f"public: {{host: '{host}'}}\nmysql: {{user: a, password: p}}\nredis: {{user: a, password: p}}"
+        f"public: {{host: '{host}'}}\nports: {{api: 80}}\n"
+        "mysql: {user: a, password: p}\nredis: {user: a, password: p}"
     )
 
     def resolve(name, port, *, type):
         """仅为本测试的业务主机名提供地址，字面 IP 和 localhost 必须跳过 DNS 查询。"""
-        assert name == "video.lan" and type == socket.SOCK_STREAM
+        assert name == "Video.LAN" and type == socket.SOCK_STREAM
         return [(socket.AF_INET, type, socket.IPPROTO_TCP, "", ("192.0.2.20", 0))]
 
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     settings, _, _ = read_config(path, tmp_path, core_only=True)
-    assert settings["MYCOMFY_API_HOST"] == expected
+    assert settings["MYCOMFY_API_HOST"] == bind_ip
+    assert settings["MYCOMFY_PUBLIC_ORIGIN"] == f"http://{browser_host}"
 
 
 def test_publishing_requires_a_resolvable_specific_address(tmp_path, monkeypatch):
@@ -118,6 +122,7 @@ def test_publishing_requires_a_resolvable_specific_address(tmp_path, monkeypatch
     monkeypatch.setattr(socket, "getaddrinfo", unavailable)
     settings, _, _ = read_config(path, tmp_path, core_only=True, gateway_required=False)
     assert settings["MYCOMFY_API_HOST"] == "127.0.0.1"
+    assert settings["MYCOMFY_PUBLIC_ORIGIN"] == "http://video.lan:8000"
     with pytest.raises(ValueError, match="无法解析 public.host"):
         read_config(path, tmp_path, core_only=True)
     # 某些 DNS 过滤器以 0.0.0.0 响应无效名称；不能据此把服务扩大到全部接口。

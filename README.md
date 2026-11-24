@@ -315,8 +315,8 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | --- | --- |
 | `single_host` | 顶层布尔值。设置为 `true` 后，直接运行 `python3 scripts/deploy.py` 即可在这台 GPU 主机的 Docker 中部署全部服务。省略或设为 `false` 时，无参部署连接已就绪的数据服务。 |
 | `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
-| `public.host`、`public.origin` | `public.host` 是 Docker 在业务机发布工作台的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
-| `public.admin_origin` | 可选的管理后台 HTTPS 来源，默认仅接受本机管理地址。通过自管反向代理使用管理域名时，填写独立于工作台的 HTTPS 来源，并让上游保留浏览器的 Host。两个管理入口提供相同权限。 |
+| `public.host`、`public.origin` | `public.host` 是 Docker 发布工作台的宿主地址。`public.origin` 为 `null` 或省略时按该地址和 `ports.api` 生成 HTTP 来源。经域名或 HTTPS 代理访问时，显式填写浏览器使用的来源，供登录和写请求校验。 |
+| `public.admin_origin` | 可选的管理后台 HTTPS 来源。本机地址为 `http://127.0.0.1:<ports.admin>`。通过自管反向代理使用管理域名时，填写独立于工作台的 HTTPS 来源，并让上游保留浏览器的 Host。两个管理入口提供相同权限。 |
 | `public.trusted_proxy_cidrs` | 可提供客户端地址的上游代理 IP 或 CIDR 数组，默认为空。Nginx 按此配置处理转发头，供 IP 限流使用。 |
 | `mysql.bind_host`、`redis.bind_host` | 可选。运行随附数据库容器时，端口发布到数据库服务器的哪个本机 IP，默认都是 `127.0.0.1`。分机示例见下文。 |
 | `mysql.user`、`mysql.password` | MySQL 应用账号和密码。随附容器在空数据卷上创建 `mycomfy` 库并初始化所填账号，初始化凭据请避开单引号和反斜杠。复用已有数据卷时填写已有凭据。 |
@@ -334,7 +334,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | --- | --- |
 | `mysql`、`redis`、`migrate` | 保存业务状态和限流规则、缓存会话及共享限流计数、在服务启动前迁移数据库。 |
 | `gateway` | Nginx 在独立的桥接网络中监听工作台与后台，经共享卷的 Unix 套接字转发给 Core，并按来源 IP 限流。Docker 将容器端口 8000 发布到业务机的 `public.host:ports.api`，将 8001 发布到 `127.0.0.1:ports.admin`。 |
-| `core` | 托管 API、工作台和本机管理后台，并在鉴权后执行用户限额。使用 HTTPS 反向代理时，在部署配置的 `public.origin` 填写工作台外部来源，并设置 `public.cookie_secure` 为 `true`。 |
+| `core` | 托管 API、工作台和本机管理后台，并在鉴权后执行用户限额。使用 HTTPS 反向代理时，在部署配置的 `public.origin` 填写工作台外部来源，默认随 HTTPS 来源启用 Secure Cookie。 |
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
 | `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。镜像自带健康检查，在 `docker ps` 的 STATUS 列显示协调循环的状态。队列为空时，能正常完成轮询的 Worker 同样显示 `healthy`。 |
 
@@ -371,14 +371,14 @@ redis:
   bind_host: "10.20.0.10"
 public:
   host: "10.20.0.20"
-  origin: "http://10.20.0.20:8000"
+  origin: null
 ports:
   mysql: 3306
   redis: 6379
   api: 8000
 ```
 
-Docker 在业务机的 `public.host` 上发布 `ports.api`，将工作台流量转发给 `gateway`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
+Docker 在业务机的 `public.host` 上发布 `ports.api`，将工作台流量转发给 `gateway`。示例自动生成工作台来源 `http://10.20.0.20:8000`，GPU 机部署完成时也会显示这个地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
 
 | 顺序 | 在哪里运行 | 配置和命令 |
 | --- | --- | --- |

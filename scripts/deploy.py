@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from deployment_config import read_config
+from deployment_config import http_origin, read_config
 
 
 def select_config(repo, requested, *, testing):
@@ -313,7 +313,13 @@ def main():
     run_compose("up", "-d", "--wait", "--no-build", *options, *start)
     if args.gpu_only:
         print("GPU 引擎和 Worker 已启动。", flush=True)
-    print("工作台地址", owner["environment"]["MYCOMFY_PUBLIC_ORIGIN"], flush=True)
+    print("工作台地址", process_env["MYCOMFY_PUBLIC_ORIGIN"], flush=True)
+    if not args.gpu_only:
+        # 管理入口可由 HTTPS 代理提供，直连时只发布在业务机回环地址。
+        admin = process_env["MYCOMFY_ADMIN_ORIGIN"] or http_origin(
+            "127.0.0.1", int(process_env["MYCOMFY_LOCAL_PORT"])
+        )
+        print("管理后台地址", admin, flush=True)
 
 
 if __name__ == "__main__":

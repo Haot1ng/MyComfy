@@ -88,7 +88,9 @@ python3 scripts/deploy.py --compose --help
 | `var/data/engines/instances/gpu0/g*/` | 每个启动代次的运行目录。模型加载或生成失败时看 `engine.log`；进程身份和退出记录分别在 `identity.json`、`ended.json`。 |
 | `var/stop/<项目名>.json` | 优雅停机期间记录待核验代次。退出凭据全部匹配后，部署脚本清除此记录。 |
 
-正式部署使用管理域名时，在 YAML 的 `public.admin_origin` 填浏览器访问后台的 HTTPS 来源。仅使用本机入口时，保留模板中的 `null`。
+本机直连时，`public.origin: null` 或省略此项会按 `public.host` 和 `ports.api` 生成工作台的 HTTP 来源。以默认主机地址为例，设置 `ports.api: 18000` 后，工作台来源为 `http://127.0.0.1:18000`。通配绑定 `0.0.0.0` 和 `::` 对应的本机来源分别使用 `127.0.0.1` 和 `[::1]`。本机后台地址始终由 `127.0.0.1` 和 `ports.admin` 决定。
+
+已有 YAML 若写了 `origin: "http://127.0.0.1:8000"`，此值仍优先使用。要让地址随发布端口自动调整，将这行改为 `origin: null` 或删除该字段，再用原配置重新部署业务端。使用 HTTPS 代理时，保留浏览器实际访问的 `public.origin`。同时对外提供后台时，将 `public.admin_origin` 设为后台的独立 HTTPS 来源。
 
 ### 仓库模板的实际值
 
@@ -128,6 +130,6 @@ Linux 业务机在共享局域网中部署时，建议使用 Docker Engine 28.0 
 2. **启动数据服务。** Compose 执行 `up -d --wait mysql redis`，等 MySQL、Redis 都健康后才继续。
 3. **构建应用镜像。** Compose 执行 `build migrate core gateway engine worker`，从当前 Git 检出目录读取 Dockerfile、源码和依赖锁，可复用已有构建缓存。
 4. **安装引擎。** 脚本用 `compose run --rm --no-deps -T` 启动临时 `engine` 容器。镜像入口 `python -m mycomfy.cli` 接收参数 `deploy - --base /deployment --root <数据目录>/engines`，其中 `-` 表示从标准输入读取引擎配方。宿主脚本从 YAML 提取 `engine` 分组，序列化为 JSON 后写入安装器的标准输入。安装器固定源码版本、生成依赖锁和清单、校验模型并验证 GPU。安装完成后临时容器退出，结果保存在宿主机挂载目录。
-5. **迁移并启动常驻服务。** Compose 执行 `up -d --wait --no-build core gateway engine worker`。依赖要求 `migrate` 成功退出，然后启动常驻进程。引擎容器启动后 Worker 即可开始核对任务，脚本等服务就绪后打印工作台地址。
+5. **迁移并启动常驻服务。** Compose 执行 `up -d --wait --no-build core gateway engine worker`。依赖要求 `migrate` 成功退出，然后启动常驻进程。引擎容器启动后 Worker 即可开始核对任务。部署业务端时，脚本等服务就绪后打印工作台和管理后台地址。`--gpu-only` 只打印业务机的工作台地址。
 
 优雅停机时，脚本先让 Worker 停止领新任务并排空在途执行，再在引擎容器中执行 `python -m mycomfy.cli runtime stop-snapshot` 记录需要核验的代次，停止引擎后逐份核对其 `ended.json`，随后关闭业务端与本项目的数据服务。若核验失败，脚本会中止，保留后续服务供检查；确认提示“所选服务已停止”后，即可在 Windows 终端执行 `wsl --shutdown`。[引擎部署与恢复](engine-deployment.md)

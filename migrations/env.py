@@ -2,7 +2,7 @@ import os
 
 from alembic import context
 
-from mycomfy.database import capacity_models  # noqa: F401  注册容量表，纳入 Alembic 结构对比。
+from mycomfy.database import capacity_models, prompt_models  # noqa: F401  注册独立模块的业务表。
 from mycomfy.database.models import Base
 from mycomfy.database.session import make_sessions
 

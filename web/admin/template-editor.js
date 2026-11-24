@@ -1,9 +1,83 @@
-import { buildTemplateDraft, readApiInputs } from "./template-draft.js";
+import { buildTemplateDraft, promptTextFields, readApiInputs, writePromptAssist } from "./template-draft.js";
 
 const presetPaths = new Map([
   ["h3-t2v", "./presets/h3-t2v.strategy.json"],
   ["h3-i2v", "./presets/h3-i2v.strategy.json"],
 ]);
+
+/** 在策略预览和发布之间编辑可选的 AI 编写要求，同一控件适用于所有模板来源。 */
+export function mountPromptAssist(panel, onEdit) {
+  const enabled = panel.querySelector("#assist-enabled");
+  const options = panel.querySelector("#assist-options");
+  const instructions = panel.querySelector("#assist-instructions");
+  const fields = panel.querySelector("#assist-fields");
+  const status = panel.querySelector("#assist-status");
+  const emptyHint = panel.querySelector("#assist-no-fields");
+  let originalFields = [];
+  let edited = false;
+
+  /** 优先保留已有字段顺序，新勾选的字段按表单顺序附加。 */
+  function config() {
+    if (!enabled.checked) return null;
+    const selected = new Set(Array.from(fields.querySelectorAll("input:checked"), input => input.value));
+    const ordered = originalFields.filter(name => selected.delete(name));
+    return {instructions: instructions.value, fields: [...ordered, ...selected]};
+  }
+
+  /** 在发布前解释缺失的配置，按 Unicode 字符数核对编写要求上限。 */
+  function validate() {
+    options.hidden = !enabled.checked;
+    const value = config();
+    let issue = "";
+    if (value && !value.instructions.trim()) issue = "请填写给 AI 的编写要求。";
+    else if (value && Array.from(value.instructions).length > 8000) issue = "编写要求最多 8000 个字符。";
+    else if (value && !value.fields.length) issue = "请至少选择一个可填写的文本字段。";
+    else if (value && !edited && value.fields.length !== originalFields.length) issue = "原配置含重复或不可用的字段，请重新确认选择。";
+    status.textContent = issue;
+  }
+
+  panel.addEventListener("input", () => {
+    edited = true;
+    validate();
+    onEdit();
+  });
+
+  return {
+    /** 为本次预览列出明确声明为字符串的自由文本参数，清空上一份草稿。 */
+    open(strategy, existing = strategy.prompt_assist) {
+      const candidates = promptTextFields(strategy);
+      enabled.checked = existing != null;
+      enabled.disabled = !enabled.checked && !candidates.length;
+      emptyHint.hidden = candidates.length > 0;
+      instructions.value = typeof existing?.instructions === "string" ? existing.instructions : "";
+      originalFields = Array.isArray(existing?.fields) ? existing.fields : [];
+      const selected = new Set(originalFields);
+      fields.replaceChildren();
+      for (const {name, title} of candidates) {
+        const label = document.createElement("label");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = name;
+        input.checked = selected.has(name);
+        label.append(input, title && title !== name ? title + "（" + name + "）" : name);
+        fields.append(label);
+      }
+      edited = false;
+      validate();
+      panel.hidden = false;
+    },
+    /** 读取校验状态供发布按钮和提交事件共同使用。 */
+    valid() {
+      return !status.textContent;
+    },
+    /** 返回当前设置供已发布系列直接保存；关闭时显式提交 null。 */
+    config,
+    /** 当配置有改动时替换顶层成员，原样提交未经编辑的导入正文。 */
+    publishBody(source) {
+      return edited ? writePromptAssist(source, config()) : source;
+    },
+  };
+}
 
 /** 将可选目标按节点分组，选项值用于找回原始节点及其字段名。 */
 function fillTargets(select, targets, accepts) {

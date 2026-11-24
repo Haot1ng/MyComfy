@@ -29,28 +29,65 @@ export function readApiInputs(workflowText) {
   });
 }
 
-/** 只替换内置策略最外层的两个字符串，使其他字段及大整数保留原始 JSON 表示。 */
+/** 修改已解析 JSON 的顶层成员。以原文保留其余成员，包括嵌套工作流的 64 位种子。 */
+function editRootFields(source, changes) {
+  const members = [];
+  const seen = new Set();
+  let start = source.indexOf("{") + 1;
+  let depth = 0;
+  // 整段字符串是单个词元，提示词中的引号、逗号和括号不会被当作对象边界。
+  for (const match of source.matchAll(/"(?:[^"\\]|\\.)*"|[[\]{},]/g)) {
+    const token = match[0];
+    if (depth === 1 && (token === "," || token === "}")) {
+      const member = source.slice(start, match.index);
+      const header = /^\s*("(?:[^"\\]|\\.)*")\s*:\s*/.exec(member);
+      if (header) {
+        const key = JSON.parse(header[1]);
+        if (!Object.hasOwn(changes, key)) {
+          members.push(member);
+        } else {
+          seen.add(key);
+          if (changes[key] !== undefined) {
+            members.push(header[0] + JSON.stringify(changes[key]) + member.match(/\s*$/)[0]);
+          }
+        }
+      }
+      start = match.index + 1;
+    }
+    if (token === "{" || token === "[") depth++;
+    if (token === "}" || token === "]") depth--;
+  }
+  // undefined 表示移除可选字段；新配置追加到同一顶层对象。
+  for (const [key, value] of Object.entries(changes)) {
+    if (value !== undefined && !seen.has(key)) members.push(JSON.stringify(key) + ":" + JSON.stringify(value));
+  }
+  return "{" + members.join(",") + "}";
+}
+
+/** 列出工作台允许辅助填写的文本字段，素材、枚举和固定值不接受自由文本。 */
+export function promptTextFields(strategy) {
+  const bindings = Array.isArray(strategy.bindings) ? strategy.bindings : [];
+  const assets = new Set(bindings.filter(binding => binding?.kind === "asset").map(binding => binding.input));
+  const values = new Set(bindings.filter(binding => binding?.kind === "value").map(binding => binding.input));
+  return Object.entries(strategy.input_schema?.properties ?? {}).filter(([name, rule]) =>
+    name.trim() && Array.from(name).length <= 128 && values.has(name) && !assets.has(name) &&
+    rule?.type === "string" && !Object.hasOwn(rule, "enum") && !Object.hasOwn(rule, "const")
+  ).map(([name, rule]) => ({name, title: typeof rule.title === "string" ? rule.title : name}));
+}
+
+/** 只更新策略的提示词辅助配置，关闭时移除可选字段。 */
+export function writePromptAssist(source, config) {
+  return editRootFields(source, {prompt_assist: config ?? undefined});
+}
+
+/** 复制内置策略到新的系列，保留未修改参数的原始 JSON 表示。 */
 function copyPreset(text, identity) {
   const {value, source} = readDocument(text);
   if (typeof value?.strategy_key !== "string" || typeof value?.name !== "string" || !value.workflow) {
     throw new Error("内置模板缺少策略定义。");
   }
   if (value.strategy_key === identity.strategy_key) throw new Error("请为新模板填写不同于原模板的标识。");
-  let depth = 0;
-  let field = null;
-  // 已解析成功的 JSON 可按结构符号遍历；将完整字符串作为一个词元可跳过其中的逗号和括号。
-  return source.replace(/"(?:[^"\\]|\\.)*"|[[\]{}:,]/g, token => {
-    if (token === "{" || token === "[") depth++;
-    else if (token === "}" || token === "]") depth--;
-    else if (depth === 1) {
-      if (token === ",") field = null;
-      else if (token !== ":") {
-        if (field === null) field = JSON.parse(token);
-        else if (Object.hasOwn(identity, field)) return JSON.stringify(identity[field]);
-      }
-    }
-    return token;
-  });
+  return editRootFields(source, identity);
 }
 
 /** 按节点及输入名称寻找可编辑的字面值；目标缺失或连线已占用时停止构建。 */

@@ -2,6 +2,8 @@ import {parseInputJson} from './session.js';
 
 // The pending request is kept per account and tab until its batch ID is known.
 const pendingRequests = new Map();
+// 当前页签切换工作台页面时保留未提交草稿，仅允许同一用户和会话代次恢复。
+let editorDraft;
 
 function node(tag, className = '', text) {
   const el = document.createElement(tag);
@@ -38,6 +40,11 @@ function errorText(error) {
     UNKNOWN_VERSION: '找不到此策略版本',
     DUPLICATE: '任务键重复',
     UNKNOWN_INPUT: '策略未声明此参数',
+    PROMPT_PROVIDER_UNAVAILABLE: '提示词服务暂不可用，可继续使用原文。',
+    PROMPT_PROVIDER_ERROR: '提示词服务未返回有效建议，可继续使用原文。',
+    PROMPT_PROVIDER_TIMEOUT: '扩写超时，可继续使用原文或重新扩写。',
+    PROMPT_PROVIDER_SECRET_UNAVAILABLE: '提示词服务暂不可用，可继续使用原文。',
+    PROMPT_ASSIST_FIELD_UNAVAILABLE: '此字段的扩写设置已更改，可继续使用原文。',
   };
   let message = messages[error.code] || error.message || error.code || '请求失败';
   if (error.code === 'VALIDATION_FAILED' && !error.details?.length && error.message) {
@@ -134,7 +141,7 @@ function makeTask(version, id, savedInputs) {
       values.set(f.name, displayValue(f.mode, f.schema.default));
     }
   }
-  return { id, version, values, errors: [] };
+  return { id, version, values, errors: [], assists: new Map() };
 }
 
 function taskInputs(task) {
@@ -205,8 +212,13 @@ export function mountComposer(host, ctx) {
   const storageKey = 'mycomfy.pendingBatch.' + ctx.session.user_id;
   const history = new Map();
   const historyErrors = new Map();
+  const assistViews = new Map();
+  const refreshedAssist = new Map();
   let pending = getPending(storageKey);
-  let batchKey = pending?.client_batch_key || key();
+  const scope = JSON.stringify([ctx.session.user_id, ctx.session.session_generation]);
+  const draft = !pending && editorDraft?.scope === scope ? editorDraft : null;
+  editorDraft = null;
+  let batchKey = pending?.client_batch_key || draft?.batchKey || key();
   let active = true;
   let loading = false;
   let busy = false;
@@ -215,8 +227,9 @@ export function mountComposer(host, ctx) {
   let uploading = null;
   let previous = null;
   let series = [];
-  let tasks = [];
-  let nextTaskNumber = 1;
+  let tasks = draft?.tasks || [];
+  let nextTaskNumber = draft?.nextTaskNumber || 1;
+  let submitted = false;
 
   const root = node('section', 'composer');
   host.replaceChildren(root);
@@ -258,14 +271,19 @@ export function mountComposer(host, ctx) {
     try {
       series = await allPages(ctx.api, '/strategies');
       if (!active) return;
-      if (previous) {
+      if (previous || tasks.length) {
         const byId = new Map(series.map(v => [v.strategy_version_id, v]));
-        const versions = new Set(previous.tasks.map(t => t.strategy_version_id));
+        const versions = new Set(previous ? previous.tasks.map(t => t.strategy_version_id) :
+          tasks.map(t => t.version.strategy_version_id));
         for (const id of versions) {
           if (!byId.has(id)) byId.set(id, await ctx.api('/strategy-versions/' + encodeURIComponent(id)));
         }
         if (!active) return;
-        tasks = previous.tasks.map(t => makeTask(byId.get(t.strategy_version_id), t.client_task_key, t.inputs));
+        if (previous) {
+          tasks = previous.tasks.map(t => makeTask(byId.get(t.strategy_version_id), t.client_task_key, t.inputs));
+        } else {
+          for (const task of tasks) task.version = byId.get(task.version.strategy_version_id);
+        }
         for (const { id } of tasks) {
           const match = /^任务 (\d+)$/.exec(id);
           if (match && Number.isSafeInteger(Number(match[1]) + 1)) {
@@ -311,6 +329,149 @@ export function mountComposer(host, ctx) {
     }
   }
 
+  /** 为可扩写字段生成独立预览区，结果按任务和字段保存。 */
+  function assistView(task, f, control, enabled) {
+    const panel = node('div', 'cmp-assist');
+    let state = task.assists.get(f.name);
+    if (!state) {
+      state = { pending: false, suggestion: null, original: null, error: '' };
+      task.assists.set(f.name, state);
+    }
+    let updateControls;
+
+    /** 仅在用户点击后发送当前文本，将有效响应存成候选。 */
+    async function expand() {
+      const text = control.value;
+      if (!enabled || state.stale || !ctx.can('jobs.submit') || !text.trim() || state.pending) return;
+      if (Array.from(text).length > 8000) {
+        state.error = '每次最多扩写 8000 个字符。';
+        draw();
+        return;
+      }
+      state.pending = true;
+      state.error = '';
+      draw();
+      try {
+        const path = '/strategy-versions/' + encodeURIComponent(task.version.strategy_version_id) + '/prompt-assist';
+        const result = await ctx.api(path, {
+          method: 'POST', body: {field: f.name, text}, signal: AbortSignal.timeout(60000),
+        });
+        if (!active || !tasks.includes(task)) return;
+        if (typeof result?.text !== 'string' || !result.text.trim()) throw new Error('未收到可用的扩写建议。');
+        // 结果先进入独立预览。用户在等待期间编辑或提交的原文始终保留。
+        state.suggestion = result.text;
+        state.source = text;
+      } catch (error) {
+        if (active && tasks.includes(task)) {
+          state.stale = error.code === 'PROMPT_ASSIST_FIELD_UNAVAILABLE';
+          state.error = error.name === 'TimeoutError' ? errorText({code: 'PROMPT_PROVIDER_TIMEOUT'}) : errorText(error);
+        }
+      } finally {
+        if (active) {
+          state.pending = false;
+          assistViews.get(state)?.();
+        }
+      }
+    }
+
+    /** 只读取当前版本的有效字段设置，在原表单上更新入口并保留草稿。 */
+    async function refreshSettings() {
+      if (state.pending) return;
+      state.pending = true;
+      draw();
+      try {
+        const id = task.version.strategy_version_id;
+        const current = await ctx.api('/strategy-versions/' + encodeURIComponent(id));
+        if (!active) return;
+        refreshedAssist.set(id, current.prompt_assist);
+        for (const row of tasks.filter(t => t.version.strategy_version_id === id)) {
+          for (const saved of row.assists.values()) {
+            if (saved.stale) { saved.stale = false; saved.error = ''; }
+          }
+        }
+        render();
+      } catch (error) {
+        if (active) state.error = '未能刷新扩写设置。' + errorText(error);
+      } finally {
+        if (active) {
+          state.pending = false;
+          assistViews.get(state)?.();
+        }
+      }
+    }
+
+    /** 只更新本字段的辅助控件，保留原文和其他字段的编辑焦点。 */
+    function draw() {
+      const expandButton = button(state.pending ? '正在扩写…' : '扩写提示词', expand);
+      expandButton.title = '将这个字段的文本发送给配置的语言模型';
+      const actions = node('div', 'cmp-assist-actions');
+      if (enabled && state.stale) {
+        const refresh = button('刷新扩写设置', refreshSettings);
+        refresh.disabled = state.pending;
+        actions.append(refresh);
+      } else if (enabled && state.suggestion === null) actions.append(expandButton);
+      if (state.original !== null) {
+        actions.append(button('恢复原文', () => {
+          control.value = state.original;
+          task.values.set(f.name, state.original);
+          state.original = null;
+          state.suggestion = null;
+          state.error = '';
+          draw();
+          control.focus();
+        }));
+      }
+      panel.replaceChildren();
+      if (actions.childElementCount) panel.append(actions);
+      if (state.error) panel.append(alertBox(state.error));
+      let changed;
+      if (state.suggestion !== null) {
+        const preview = node('div', 'cmp-assist-preview');
+        const title = node('label', '', '扩写建议');
+        const editor = node('textarea');
+        editor.rows = 4;
+        editor.value = state.suggestion;
+        title.append(editor);
+        changed = node('small', 'muted', '当前原文已修改，此建议基于扩写时的文本。');
+        const choices = node('div', 'cmp-assist-actions');
+        const apply = button('采用建议', () => {
+          state.original ??= control.value;
+          control.value = state.suggestion;
+          task.values.set(f.name, state.suggestion);
+          state.suggestion = null;
+          state.error = '';
+          draw();
+          control.focus();
+        });
+        editor.addEventListener('input', () => {
+          state.suggestion = editor.value;
+          apply.disabled = !editor.value.trim() || state.pending;
+        });
+        apply.disabled = !editor.value.trim() || state.pending;
+        const keep = button('保留原文', () => {
+          state.suggestion = null;
+          state.error = '';
+          draw();
+          control.focus();
+        });
+        choices.append(apply, keep);
+        preview.append(title, changed, choices);
+        panel.append(preview);
+      }
+      updateControls = () => {
+        expandButton.disabled = state.pending || !control.value.trim();
+        if (changed) changed.hidden = control.value === state.source;
+      };
+      updateControls();
+      panel.hidden = !panel.childElementCount;
+    }
+
+    assistViews.set(state, draw);
+    control.addEventListener('input', () => updateControls());
+    draw();
+    return panel;
+  }
+
   function fieldView(task, f) {
     const wrapper = node('div', 'cmp-field');
     const control = makeControl(f, task.values.get(f.name), raw => task.values.set(f.name, raw));
@@ -335,6 +496,16 @@ export function mountComposer(host, ctx) {
       if (uploading?.task === task && uploading.field === f.name) wrapper.append(node('small', 'muted', '正在上传素材…'));
     }
     wrapper.append(control);
+    if (f.mode === 'text') {
+      const id = task.version.strategy_version_id;
+      const settings = refreshedAssist.has(id) ? refreshedAssist.get(id) : task.version.prompt_assist;
+      const enabled = ctx.can('jobs.submit') && settings?.fields?.includes(f.name);
+      const prior = task.assists.get(f.name);
+      // 管理员停用字段只影响后续模型调用，用户已有的候选和原文仍可在本地选择。
+      if (enabled || prior?.suggestion != null || prior?.original != null) {
+        wrapper.append(assistView(task, f, control, enabled));
+      }
+    }
     const problems = task.errors.filter(issue => issue.field === f.name);
     if (problems.length) {
       control.setAttribute('aria-invalid', 'true');
@@ -442,7 +613,10 @@ export function mountComposer(host, ctx) {
       if (!result?.batch_id) throw new Error('未收到批次 ID');
       setPending(storageKey, null);
       pending = null;
-      if (ctx.can('jobs.view')) ctx.navigate('/batch/' + encodeURIComponent(result.batch_id));
+      if (ctx.can('jobs.view')) {
+        submitted = true;
+        ctx.navigate('/batch/' + encodeURIComponent(result.batch_id));
+      }
       else {
         batchKey = key();
         message = '批次已受理 · ' + result.batch_id;
@@ -472,6 +646,7 @@ export function mountComposer(host, ctx) {
 
   function render() {
     if (!active) return;
+    assistViews.clear();
     const heading = node('header', 'cmp-heading');
     heading.append(node('h1', '', '创建批次'));
     root.replaceChildren(heading);
@@ -528,5 +703,14 @@ export function mountComposer(host, ctx) {
 
   if (pending) render();
   else loadEditor();
-  return () => { active = false; };
+  return () => {
+    active = false;
+    for (const task of tasks) {
+      for (const state of task.assists.values()) {
+        state.pending = false;
+        if (state.stale) { state.stale = false; state.error = ''; }
+      }
+    }
+    if (!pending && !submitted && tasks.length) editorDraft = { scope, batchKey, tasks, nextTaskNumber };
+  };
 }

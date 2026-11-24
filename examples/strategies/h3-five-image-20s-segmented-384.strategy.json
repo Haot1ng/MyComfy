@@ -275,6 +275,16 @@
       }
     }
   },
+  "prompt_assist": {
+    "instructions": "为 MiniMax H3 的五图四段、共 20 秒视频完善当前字段，沿用用户的语言、主体和叙事意图。prompt 只描述跨镜一致的外观、光线和风格。shot_1_prompt 至 shot_4_prompt 各描述相邻两张参考图间一个约五秒的动作或运镜；尽量交代镜头起始的运动状态和结束时延续的方向。中间段保持动势，避免每段重复推进和停住，除非用户明确要求。图片不会随扩写请求发送，不臆测图片细节。只输出可直接填入当前字段的正文。",
+    "fields": [
+      "prompt",
+      "shot_1_prompt",
+      "shot_2_prompt",
+      "shot_3_prompt",
+      "shot_4_prompt"
+    ]
+  },
   "input_schema": {
     "type": "object",
     "properties": {

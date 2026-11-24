@@ -1,6 +1,6 @@
 import { renderWorkflowPreview } from "./workflow-graph.js";
 import { renderAdminNav } from "./navigation.js";
-import { mountTemplateEditor } from "./template-editor.js";
+import { mountPromptAssist, mountTemplateEditor } from "./template-editor.js";
 import { builtins, readTemplateCatalog } from "./template-catalog.js";
 
 /** 取得模板维护页中的固定控件。 */
@@ -13,6 +13,9 @@ const pasteEditor = byId("paste-editor");
 const jsonText = byId("json-text");
 const graph = byId("workflow-preview");
 const sourceLabel = byId("preview-source");
+const assistPanel = byId("prompt-assist");
+const saveAssistButton = byId("save-assist");
+const savedDrafts = new Map();
 const requiredFields = [
   "strategy_key", "name", "workflow", "input_schema", "bindings", "requirements",
   "progress_mapping", "output_contract", "scheduling", "retry", "artifacts",
@@ -21,6 +24,8 @@ let loadNumber = 0;
 let publishText = null;
 let previewedApi = null;
 let publishing = false;
+let savingAssist = false;
+let liveSettings = null;
 let creating = false;
 let catalog = builtins;
 let selectedUrl = null;
@@ -29,6 +34,13 @@ const editor = mountTemplateEditor(byId("new-template-editor"), {
   onDirty: resetPreview,
   onDraft: text => loadPreview("新增模板", () => text),
 });
+const assist = mountPromptAssist(assistPanel, assistEdited);
+
+/** 有尚未保存的系列设置时，让浏览器在离开页面前提醒。 */
+function protectDrafts(event) {
+  event.preventDefault();
+  event.returnValue = "";
+}
 
 /** 在状态区显示可朗读的纯文本，文件内容和服务端消息均不插入 HTML。 */
 function message(id, text, tone = "") {
@@ -39,15 +51,36 @@ function message(id, text, tone = "") {
 
 /** 同步发布条件，提交期间锁住来源，确保发送的就是屏幕上的模板。 */
 function updateControls() {
+  const busy = publishing || savingAssist;
+  const draft = liveSettings ? savedDrafts.get(liveSettings.url) : undefined;
+  const dirty = Boolean(draft);
+  const review = dirty && liveSettings.loaded && draft.etag !== liveSettings.etag;
+  if (savedDrafts.size) window.addEventListener("beforeunload", protectDrafts);
+  else window.removeEventListener("beforeunload", protectDrafts);
   for (const control of [filePicker, pasteToggle, jsonText, byId("preview-paste"), byId("new-template")]) {
-    control.disabled = publishing;
+    control.disabled = busy;
   }
   for (const button of choices.children) {
-    button.disabled = publishing;
+    button.disabled = busy;
     button.setAttribute("aria-pressed", String(button.dataset.url === selectedUrl));
   }
-  editor.setBusy(publishing);
-  publishButton.disabled = publishing || publishText === null;
+  editor.setBusy(busy);
+  assistPanel.disabled = busy || publishText === null || (liveSettings !== null && !liveSettings.loaded);
+  byId("assist-live-actions").hidden = liveSettings === null;
+  byId("discard-assist").hidden = !dirty;
+  byId("discard-assist").disabled = busy;
+  byId("reload-assist").hidden = !liveSettings?.readFailed;
+  byId("reload-assist").disabled = busy;
+  byId("assist-review").hidden = !review;
+  byId("keep-assist").disabled = busy;
+  if (review) {
+    const latest = liveSettings.current;
+    byId("assist-current").textContent = latest ? "字段：" + latest.fields.join("、") + "\n" + latest.instructions : "已关闭扩写";
+  }
+  saveAssistButton.disabled = busy || !liveSettings?.loaded || !dirty || review || !assist.valid() || publishText === null;
+  saveAssistButton.textContent = savingAssist ? "正在保存…" : "保存扩写设置";
+  // 发布始终针对图本身；先处理本地扩写草稿，以免误将“发布”当作“保存”。
+  publishButton.disabled = busy || publishText === null || (liveSettings ? dirty : !assist.valid());
   publishButton.textContent = publishing ? "正在发布…" : creating ? "创建并发布" : "发布新版本";
 }
 
@@ -57,6 +90,10 @@ function resetPreview() {
   publishText = null;
   previewedApi = null;
   selectedUrl = null;
+  liveSettings = null;
+  byId("assist-section").hidden = true;
+  assistPanel.hidden = true;
+  message("assist-save-status", "");
   graph.replaceChildren();
   sourceLabel.textContent = "";
   byId("publish-description").textContent = creating ? "请先预览新模板。" : "选择完整策略模板后可发布新版本。";
@@ -67,8 +104,8 @@ function resetPreview() {
 }
 
 /** 读取一个模板来源，渲染节点图，并确定该文件是否具备策略发布字段。 */
-async function loadPreview(label, read, sourceUrl = null) {
-  if (publishing) return;
+async function loadPreview(label, read, sourceUrl = null, publishedTemplate = null) {
+  if (publishing || savingAssist) return;
   const request = resetPreview();
   selectedUrl = sourceUrl;
   updateControls();
@@ -110,6 +147,18 @@ async function loadPreview(label, read, sourceUrl = null) {
     byId("publish-description").textContent = creating
       ? "将创建 " + identity + " 并发布首个版本 v1。"
       : "每次发布都会为 " + identity + " 创建一个新版本。";
+    byId("assist-section").hidden = false;
+    if (publishedTemplate) {
+      liveSettings = {
+        url: sourceUrl + "/prompt-assist-settings", template: publishedTemplate,
+        strategy: raw, loaded: false, readFailed: false,
+      };
+      byId("assist-scope").textContent = "保存后立即应用于" + identity + "系列。历史版本使用各自仍可填写的字段。";
+      await loadAssistSettings(liveSettings);
+    } else {
+      byId("assist-scope").textContent = "这些默认值随模板一起发布。已单独保存的系列扩写设置优先。";
+      assist.open(raw);
+    }
   } catch (error) {
     if (request !== loadNumber) return;
     graph.replaceChildren();
@@ -131,7 +180,109 @@ function selectTemplate(template) {
     });
     if (!response.ok) throw new Error("模板读取失败（HTTP " + response.status + "）。");
     return response.text();
-  }, template.url);
+  }, template.url, template.version ? template : null);
+}
+
+/** 从回执中读取完整配置，避免将响应不完整误当作关闭扩写。 */
+function responseConfig(data) {
+  if (!Object.hasOwn(data ?? {}, "prompt_assist")) throw new Error("服务未返回扩写设置。");
+  const config = data.prompt_assist;
+  if (config === null) return null;
+  if (typeof config?.instructions !== "string" || !Array.isArray(config.fields) ||
+      !config.fields.every(name => typeof name === "string")) throw new Error("扩写设置响应无效。");
+  return {instructions: config.instructions, fields: config.fields};
+}
+
+/** 读取版本当前生效的系列规则，切换模板后忽略旧响应，返回原模板时恢复未保存的草稿。 */
+async function loadAssistSettings(target) {
+  target.loaded = false;
+  target.readFailed = false;
+  message("assist-save-status", "正在读取扩写设置…");
+  updateControls();
+  try {
+    const response = await fetch(target.url, {
+      mode: "same-origin", credentials: "omit", redirect: "error", cache: "no-store",
+      headers: {"X-MyComfy-Admin": "templates"},
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const current = responseConfig(await response.json());
+    const etag = response.headers.get("ETag");
+    if (!etag) throw new Error("服务未返回扩写设置的版本标识。");
+    if (liveSettings !== target) return;
+    target.current = current;
+    target.etag = etag;
+    target.loaded = true;
+    if (JSON.stringify(savedDrafts.get(target.url)?.config) === JSON.stringify(current)) {
+      savedDrafts.delete(target.url);
+    }
+    const draft = savedDrafts.get(target.url);
+    assist.open(target.strategy, draft ? draft.config : current);
+    if (draft && draft.etag !== etag) {
+      message("assist-save-status", "设置已在其他页面更新。请核对最新设置，或撤销本页的修改。", "error");
+    } else {
+      message("assist-save-status", draft ? "已恢复本页中未保存的修改。" : "");
+    }
+  } catch (error) {
+    if (liveSettings !== target) return;
+    target.readFailed = true;
+    message("assist-save-status", "无法读取当前扩写设置。 " + error.message, "error");
+  } finally {
+    if (liveSettings === target) updateControls();
+  }
+}
+
+/** 按所选版本暂存编辑，保留空配置和未填完的规则，目录切换或刷新列表不会串用草稿。 */
+function assistEdited() {
+  if (liveSettings?.loaded) {
+    const current = assist.config();
+    const changed = JSON.stringify(current) !== JSON.stringify(liveSettings.current);
+    const etag = savedDrafts.get(liveSettings.url)?.etag ?? liveSettings.etag;
+    if (changed) savedDrafts.set(liveSettings.url, {config: current, etag, template: liveSettings.template});
+    else savedDrafts.delete(liveSettings.url);
+    message("assist-save-status", changed ? "有未保存的扩写设置。" : "");
+  }
+  updateControls();
+}
+
+/** 只向设置端点写入已核对的规则，保存失败时保留修改以便重试。 */
+async function saveAssistSettings() {
+  const target = liveSettings;
+  if (!target || saveAssistButton.disabled) return;
+  savingAssist = true;
+  const draft = savedDrafts.get(target.url);
+  updateControls();
+  message("assist-save-status", "正在保存扩写设置…");
+  try {
+    const response = await fetch(target.url, {
+      method: "PUT", mode: "same-origin", credentials: "omit", redirect: "error", cache: "no-store",
+      headers: {"Content-Type": "application/json", "X-MyComfy-Admin": "templates", "If-Match": draft.etag},
+      body: JSON.stringify({prompt_assist: draft.config}),
+    });
+    const data = await response.json().catch(() => null);
+    // 并发修改后先读最新值，与本地草稿并排供维护者核对，不能用新标识自动覆盖。
+    if (response.status === 412) {
+      if (liveSettings === target) await loadAssistSettings(target);
+      return;
+    }
+    if (data?.error?.code === "PROMPT_SETTINGS_VERSION_CONFLICT") {
+      throw new Error("请刷新模板列表，打开最新版本后再调整系列字段。");
+    }
+    if (!response.ok) throw new Error(data?.error?.message || "HTTP " + response.status);
+    const current = responseConfig(data);
+    const etag = response.headers.get("ETag");
+    if (!etag) throw new Error("请重新打开模板核对生效的设置。");
+    savedDrafts.delete(target.url);
+    if (liveSettings !== target) return;
+    target.current = current;
+    target.etag = etag;
+    assist.open(target.strategy, current);
+    message("assist-save-status", "扩写设置已保存并立即生效。", "success");
+  } catch (error) {
+    if (liveSettings === target) message("assist-save-status", "未能确认保存结果，修改已保留。 " + error.message, "error");
+  } finally {
+    savingAssist = false;
+    updateControls();
+  }
 }
 
 /** 展示接口状态和校验错误的 JSON 字段路径，便于定位失败输入。 */
@@ -159,7 +310,7 @@ function markUnconfirmed(status) {
 
 /** 从同源管理页发起一次明确的创建或发布，并显示数据库回执。 */
 async function publish() {
-  if (publishing || publishText === null) return;
+  if (publishButton.disabled) return;
   publishing = true;
   updateControls();
   message("publish-result", "正在发布模板…");
@@ -170,7 +321,7 @@ async function publish() {
       method: "POST", mode: "same-origin", credentials: "omit", referrerPolicy: "same-origin",
       cache: "no-store", redirect: "error",
       headers: {"Content-Type": "application/json", "X-MyComfy-Admin": "templates"},
-      body: publishText,
+      body: liveSettings ? publishText : assist.publishBody(publishText),
     });
     const data = await response.json().catch(() => null);
     if (response.status >= 400 && response.status < 500) {
@@ -213,7 +364,10 @@ function toggleEditor() {
 /** 在同一个选择区展示所有模板；异步刷新后仍按不可变版本标识当前预览。 */
 function renderChoices() {
   const cards = document.createDocumentFragment();
-  for (const template of catalog) {
+  const visible = new Map(catalog.map(template => [template.url, template]));
+  // 刷新目录时系列可能已发布更新版本，保留未保存草稿原本对应的版本入口。
+  for (const {template} of savedDrafts.values()) visible.set(template.url, template);
+  for (const template of visible.values()) {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.url = template.url;
@@ -276,6 +430,24 @@ byId("preview-paste").addEventListener("click", () => {
   void loadPreview("粘贴的 JSON", () => jsonText.value);
 });
 byId("new-template").addEventListener("click", toggleEditor);
+saveAssistButton.addEventListener("click", saveAssistSettings);
+byId("reload-assist").addEventListener("click", () => loadAssistSettings(liveSettings));
+byId("keep-assist").addEventListener("click", () => {
+  // 维护者已核对当前服务端内容，下次保存仍需与这个版本精确匹配。
+  savedDrafts.get(liveSettings.url).etag = liveSettings.etag;
+  message("assist-save-status", "已保留本页修改。点击「保存扩写设置」后生效。");
+  updateControls();
+});
+byId("discard-assist").addEventListener("click", () => {
+  savedDrafts.delete(liveSettings.url);
+  if (liveSettings.loaded) {
+    assist.open(liveSettings.strategy, liveSettings.current);
+    message("assist-save-status", "");
+  } else {
+    assistPanel.hidden = true;
+  }
+  updateControls();
+});
 publishButton.addEventListener("click", publish);
 byId("refresh-published").addEventListener("click", () => loadPublished());
 renderAdminNav(byId("nav"), "templates");

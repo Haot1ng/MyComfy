@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import test from "node:test";
-import {buildTemplateDraft, readApiInputs} from "../../web/admin/template-draft.js";
+import {buildTemplateDraft, promptTextFields, readApiInputs, writePromptAssist} from "../../web/admin/template-draft.js";
 
 const graph = '{"prompt":{"class_type":"Text","inputs":{"text":"","seed":18446744073709551613,"flag":true,"cfg":4.5}},' +
   '"save":{"class_type":"SaveVideo","inputs":{"video":["prompt",0],"path":"video","image":"first.png"}}}';
@@ -52,4 +52,35 @@ test("在选择输入前识别画布文件和失效的 API 连线", () => {
   assert.throws(() => readApiInputs('{"nodes":[],"links":[]}'), /API/);
   assert.throws(() => readApiInputs(graph.replace('["prompt",0]', '["missing",0]')), /连线/);
   assert.throws(() => readApiInputs('{'), /JSON/);
+});
+
+test("只列出可填写的已绑定字符串，排除素材、枚举、固定值和越界字段名", () => {
+  const properties = {
+    prompt: {type: "string", title: "镜头"}, asset: {type: "string"}, seed: {type: "integer"},
+    choice: {type: "string", enum: ["a", "b"]}, fixed: {type: "string", const: "a"},
+    unbound: {type: "string"}, " ": {type: "string"}, ["景".repeat(129)]: {type: "string"},
+    ["🎬".repeat(128)]: {type: "string"}, ref: {$ref: "#/$defs/text"},
+  };
+  const bindings = Object.keys(properties).filter(name => name !== "unbound").map(input => ({kind: "value", input}));
+  bindings.push({kind: "asset", input: "asset"});
+  const fields = promptTextFields({input_schema: {properties}, bindings});
+  assert.deepEqual(fields, [{name: "prompt", title: "镜头"}, {name: "🎬".repeat(128), title: "🎬".repeat(128)}]);
+});
+
+test("添加、更新与移除提示词配置都保留工作流和 Schema 的原始数值及同名嵌套字段", () => {
+  const nested = '"workflow":{"n":{"inputs":{"seed":18446744073709551613,"prompt_assist":[{"q":"} , [ \\""}]}}}';
+  const schema = '"input_schema":{"properties":{"cfg":{"default":1.000000000000001e+03}}}';
+  const before = "{" + nested + "," + schema + "}";
+  const config = {instructions: '保留 {"猫":"&<"} 的外观', fields: ["prompt"]};
+  const added = writePromptAssist(before, config);
+  assert.deepEqual(JSON.parse(added).prompt_assist, config);
+  assert.ok(added.includes(nested));
+  assert.ok(added.includes(schema));
+  // 顶层键使用 Unicode 转义时仍然只修改该成员，且可从对象首、中、末三个位置移除。
+  const old = '"prompt_\\u0061ssist":{"instructions":"旧指令","fields":["a"]}';
+  for (const members of [[old, nested, schema], [nested, old, schema], [nested, schema, old]]) {
+    const updated = writePromptAssist("{" + members.join(",") + "}", config);
+    assert.deepEqual(JSON.parse(updated).prompt_assist, config);
+    assert.equal(writePromptAssist(updated, null), before);
+  }
 });

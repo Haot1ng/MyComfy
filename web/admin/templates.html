@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="./template-editor.css">
   <link rel="stylesheet" href="./graph.css">
   <script type="module" src="./templates.js"></script>
+  <script type="module" src="./template-example.js"></script>
 </head>
 <body>
   <a class="skip" href="#content">跳至内容</a>
@@ -30,9 +31,23 @@
             <div class="template-actions">
               <button type="button" id="refresh-published">刷新列表</button>
               <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,application/json"></label>
+              <button id="open-template-example" type="button" aria-haspopup="dialog" aria-controls="template-example">查看 JSON 示例</button>
               <button id="paste-toggle" type="button" aria-expanded="false" aria-controls="paste-editor">粘贴 JSON</button>
             </div>
           </div>
+          <dialog id="template-example" aria-labelledby="example-title">
+            <div class="template-bar">
+              <h2 id="example-title">模板 JSON 示例</h2>
+              <form method="dialog"><button type="submit" autofocus>关闭</button></form>
+            </div>
+            <p>这份 H3 文生视频模板可以直接导入。<code>input_schema</code> 定义工作台的提示词输入框，<code>bindings</code> 把输入值写入 <code>workflow</code> 的生成节点，<code>output_contract</code> 指定要保存的视频。</p>
+            <textarea id="example-json" aria-label="示例 JSON 原文" rows="14" wrap="off" readonly spellcheck="false" hidden></textarea>
+            <p id="example-status" class="template-message" role="status"></p>
+            <div id="example-actions" class="template-actions" hidden>
+              <a id="example-download" class="action" download="example-h3-text-to-video.strategy.json">下载 JSON</a>
+              <button type="button" id="example-copy">复制 JSON</button>
+            </div>
+          </dialog>
           <p id="catalog-message" class="template-message" role="status"></p>
           <div id="template-choices" class="template-presets" role="group" aria-labelledby="source-title"></div>
           <div id="paste-editor" hidden>
@@ -45,6 +60,35 @@
           <div class="template-bar"><h2 id="preview-title">节点预览</h2><span id="preview-source" class="template-source"></span></div>
           <p id="preview-message" class="template-message" role="status"></p>
           <div id="workflow-preview"></div>
+        </section>
+        <section id="assist-section" class="panel template-panel" aria-labelledby="assist-title" hidden>
+          <h2 id="assist-title">提示词扩写设置</h2>
+          <p id="assist-scope" class="template-hint"></p>
+          <fieldset id="prompt-assist" class="template-assist" hidden>
+            <legend>扩写内容</legend>
+            <label><input id="assist-enabled" type="checkbox" aria-controls="assist-options"> 为此模板启用提示词辅助</label>
+            <p class="template-hint" id="assist-no-fields" hidden>请先为模板绑定可编辑的文本参数。</p>
+            <div id="assist-options" hidden>
+              <label for="assist-instructions">给 AI 的编写要求</label>
+              <textarea id="assist-instructions" rows="4" placeholder="例如：描述镜头运动，保留人物外观，每段限两句。"></textarea>
+              <fieldset>
+                <legend>允许 AI 填写的字段</legend>
+                <div id="assist-fields"></div>
+              </fieldset>
+            </div>
+            <p class="template-message" id="assist-status" role="status" data-tone="error"></p>
+          </fieldset>
+          <div id="assist-live-actions" class="template-actions" hidden>
+            <button id="save-assist" class="highlight" type="button" disabled>保存扩写设置</button>
+            <button id="discard-assist" type="button" hidden>撤销修改</button>
+            <button id="reload-assist" type="button" hidden>重新读取设置</button>
+          </div>
+          <div id="assist-review" hidden>
+            <h3>服务器上的最新设置</h3>
+            <p id="assist-current" class="template-message"></p>
+            <button type="button" id="keep-assist">已核对，保留我的修改</button>
+          </div>
+          <p id="assist-save-status" class="template-message" role="status"></p>
         </section>
         <section class="panel template-panel" aria-labelledby="publish-title">
           <h2 id="publish-title">发布到工作台</h2>

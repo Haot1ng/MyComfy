@@ -6,6 +6,11 @@
 .template-file {position:relative;cursor:pointer}
 .template-file input {position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}
 .template-file:focus-within {outline:2px solid var(--accent);outline-offset:3px}
+#template-example {width:min(720px,calc(100% - 32px));max-height:90dvh;overflow:auto;padding:20px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text)}
+#template-example::backdrop {background:#080d10bb}
+#template-example code {font:13px var(--mono);color:var(--accent)}
+#example-json {display:block;width:100%;max-height:47dvh;resize:vertical;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--base);color:var(--text);font:13px/1.55 var(--mono)}
+#example-actions {margin-top:12px}
 .template-presets {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:15px;max-height:42vh;overflow-y:auto}
 .template-presets button {display:grid;justify-content:start;text-align:left;gap:3px;padding:12px 15px;white-space:normal;overflow-wrap:anywhere;min-width:0}
 .template-presets button[aria-pressed="true"] {background:#203a31;border-color:#659883;color:var(--accent)}
@@ -19,6 +24,14 @@
 #paste-editor {margin-top:15px;display:grid;gap:8px;justify-items:start}
 #json-text {width:100%;resize:vertical;background:var(--base);border:1px solid var(--line);border-radius:7px;padding:10px;color:var(--text);font:13px/1.55 var(--mono)}
 #paste-editor label {font-weight:600}
+.template-assist {margin:16px 0;padding:12px 14px;min-width:0;border:1px solid var(--line);border-radius:7px}
+.template-assist legend {font-weight:600}
+.template-assist input {accent-color:var(--accent)}
+.template-assist label {display:flex;align-items:baseline;gap:6px;overflow-wrap:anywhere}
+#assist-options {display:grid;gap:8px;margin-top:12px}
+#assist-options fieldset {border:0;padding:0;margin:0;min-width:0}
+#assist-fields {display:grid;gap:5px;margin-top:6px}
+#assist-instructions {display:block;width:100%;resize:vertical;background:var(--base);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px;font:inherit}
 .template-panel button:disabled {cursor:default}
 @media(max-width:520px) {
   .template-presets {grid-template-columns:minmax(0,1fr)}

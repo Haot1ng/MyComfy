@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from mycomfy.database.models import EngineInstance, Incompatibility, StrategySeries, StrategyVersion
+from mycomfy.database.prompt_models import TemplatePromptSettings
 from mycomfy.database.session import db_now, new_id
 from mycomfy.errors import ApiError
 
@@ -69,12 +70,20 @@ class ArtifactRules(ContractModel):
     expose_after_cancel: bool = False
 
 
+class PromptAssist(ContractModel):
+    """保存本版本发给扩写模型的指令及允许用户扩写的文本字段。"""
+
+    instructions: str = Field(min_length=1, max_length=8000)
+    fields: list[str] = Field(min_length=1)
+
+
 class Strategy(ContractModel):
     strategy_key: Key
     name: str = Field(min_length=1, max_length=180)
     workflow: dict[str, dict[str, Any]] = Field(min_length=1)
     input_schema: dict[str, Any]
     bindings: list[Binding]
+    prompt_assist: PromptAssist | None = None
     requirements: Requirements
     progress_mapping: list[Progress]
     output_contract: list[Output] = Field(min_length=1)
@@ -104,6 +113,64 @@ def check_schema_references(schema):
                 resolver.lookup(value)
         # default 与 examples 是数据，不能按子 Schema 遍历其中同名的属性。
         pending.extend((sub, resolver.in_subresource(sub)) for sub in resource.subresources())
+
+
+def prompt_text_fields(content):
+    """从当前版本中取得可自由填写的已绑定文本字段，排除引用上传素材的字符串。"""
+    assets = {b["input"] for b in content["bindings"] if b["kind"] == "asset"}
+    return {
+        name
+        for name, rule in content["input_schema"].get("properties", {}).items()
+        if name.strip()
+        and len(name) <= 128
+        and name not in assets
+        and isinstance(rule, dict)
+        and rule.get("type") == "string"
+        and "enum" not in rule
+        and "const" not in rule
+    }
+
+
+def validate_prompt_settings(content, config):
+    """按目标版本校验文件携带的默认值和后台即时设置，返回适合存储的配置或空值。"""
+    if config is None:
+        return None
+    try:
+        assist = PromptAssist.model_validate(config)
+    except ValidationError as exc:
+        details = [
+            {"path": json_pointer(("prompt_assist", *e["loc"])), "code": e["type"]}
+            for e in exc.errors(include_input=False)
+        ]
+        raise ApiError(422, "INVALID_STRATEGY", "Invalid prompt settings", details) from exc
+    eligible = prompt_text_fields(content)
+    seen = set()
+    issues = []
+    if not assist.instructions.strip():
+        issues.append({"path": "/prompt_assist/instructions", "code": "blank"})
+    for index, name in enumerate(assist.fields):
+        if name not in eligible or name in seen:
+            issues.append({"path": f"/prompt_assist/fields/{index}", "code": "invalid_field"})
+        seen.add(name)
+    if issues:
+        raise ApiError(422, "INVALID_STRATEGY", "Check the prompt instructions and fields", issues)
+    return assist.model_dump()
+
+
+def effective_prompt_assist(db, version, settings_by_key=None):
+    """取模板当前生效的指令，并按任务所选版本的实际字段限制适用范围。"""
+    key = version.strategy_key
+    setting = (
+        db.get(TemplatePromptSettings, key) if settings_by_key is None else settings_by_key.get(key)
+    )
+    if setting is None:
+        return version.content.get("prompt_assist")
+    if setting.config is None:
+        return None
+    # 同系列的旧版本可能把同名字段改成了素材，或没有这个字段。
+    allowed = prompt_text_fields(version.content)
+    fields = [name for name in setting.config["fields"] if name in allowed]
+    return {**setting.config, "fields": fields} if fields else None
 
 
 def validate_strategy(raw):
@@ -195,7 +262,13 @@ def validate_strategy(raw):
         for o in version.output_contract
     ):
         invalid("/output_contract", "At least one required video output is necessary")
-    return version.model_dump(mode="json")
+    # 老版本没有这一节，继续产生相同的持久化内容和摘要。
+    content = version.model_dump(
+        mode="json", exclude={"prompt_assist"} if version.prompt_assist is None else set()
+    )
+    if version.prompt_assist is not None:
+        validate_prompt_settings(content, version.prompt_assist)
+    return content
 
 
 def sql_publish(db, raw, request_id, *, create_only=False):
@@ -337,9 +410,10 @@ def input_labels(schema, names):
     return labels
 
 
-def strategy_payload(db, version):
+def strategy_payload(db, version, settings_by_key=None):
     """构造策略版本摘要、表单及可受理性等用户可见字段。"""
     accepted = configured_for(db, version)
+    assist = effective_prompt_assist(db, version, settings_by_key)
     return {
         "strategy_version_id": version.id,
         "strategy_key": version.strategy_key,
@@ -348,6 +422,7 @@ def strategy_payload(db, version):
         "content_digest": version.content_digest,
         "input_schema": version.content["input_schema"],
         "asset_fields": sorted(asset_field_names(version)),
+        "prompt_assist": {"fields": assist["fields"]} if assist else None,
         "accepting": accepted,
         "reason": None if accepted else "NO_COMPATIBLE_DEPLOYMENT",
         "expose_after_cancel": version.content["artifacts"]["expose_after_cancel"],

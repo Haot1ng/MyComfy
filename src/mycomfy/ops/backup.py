@@ -306,6 +306,7 @@ def restore_row(table, record, mapping):
 def _clear_restore_seeds(conn, tables):
     """确认目标只含迁移种子数据，再清除种子让备份还原完整的授权设置。"""
     defaults = {
+        "prompt_provider_selection": {(1, None)},
         "user_groups": {(DEFAULT_GROUP_KEY, "标准用户")},
         "user_group_permissions": {(DEFAULT_GROUP_KEY, code) for code in Permission},
     }

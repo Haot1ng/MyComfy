@@ -38,6 +38,7 @@ from mycomfy.database.models import (
     User,
     UserSession,
 )
+from mycomfy.database.prompt_models import TemplatePromptSettings
 from mycomfy.database.session import db_now, make_sessions, new_id
 from mycomfy.errors import ApiError, InvalidSession, not_found
 from mycomfy.generation import jobs
@@ -49,7 +50,13 @@ from .events import build_event_router, event_dispatcher
 from .group_admin import build_group_admin_router
 from .pagination import invalid_cursor, page, read_position
 from .permissions import Permission, access_profile, has_permission, require_permission
+from .prompt_assist import build_prompt_assist_router
+from .prompt_providers import build_prompt_provider_router, is_prompt_provider_operation
 from .session_cache import SessionPrecheckCache
+from .template_prompt_settings import (
+    build_template_prompt_settings_router,
+    is_template_prompt_settings_operation,
+)
 from .web import install_web_routes
 
 logger = logging.getLogger(__name__)
@@ -153,13 +160,17 @@ def _local_request(request, test_origin):
 def _maintenance(request, settings, media_type, test_origin):
     """按页面和操作核验浏览器同源交互，或用本机维护凭据授权程序调用。"""
     page = request.headers.getlist("x-mycomfy-admin")
-    templates = (
-        page == ["templates"]
-        and request.method == "POST"
-        and request.scope["path"] == "/local/v1/strategy-versions"
-    )
-    users = page == ["users"] and _user_admin_operation(request)
-    if (templates or users) and "authorization" not in request.headers:
+    area = None
+    if page == ["templates"] and (
+        (request.method == "POST" and request.scope["path"] == "/local/v1/strategy-versions")
+        or is_template_prompt_settings_operation(request)
+    ):
+        area = "template"
+    elif page == ["users"] and _user_admin_operation(request):
+        area = "user"
+    elif page == ["prompt-providers"] and is_prompt_provider_operation(request):
+        area = "prompt-provider"
+    if area and "authorization" not in request.headers:
         origin = test_origin or f"{request.url.scheme}://{request.headers['host']}"
         origins = request.headers.getlist("origin")
         sites = request.headers.getlist("sec-fetch-site")
@@ -174,7 +185,6 @@ def _maintenance(request, settings, media_type, test_origin):
         ):
             raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json")
         location = "test" if test_origin else "local"
-        area = "template" if templates else "user"
         request.state.actor = f"{location}-{area}-admin"
         return
 
@@ -369,6 +379,8 @@ def create_app(settings, *, local=False, sessions=None, stop_streams=None):
                     request.method not in {"GET", "HEAD", "OPTIONS"}
                     or path.rstrip("/") in {"/local/v1/groups", "/local/v1/users"}
                     or path.startswith(("/local/v1/groups/", "/local/v1/users/"))
+                    or is_prompt_provider_operation(request)
+                    or is_template_prompt_settings_operation(request)
                 ):
                     await run_in_threadpool(
                         _maintenance, request, settings, media_type, test_origin
@@ -379,6 +391,10 @@ def create_app(settings, *, local=False, sessions=None, stop_streams=None):
                 if request.method == "POST" and (
                     path in {"/api/v1/me/password", "/api/v1/batches"}
                     or (path.startswith("/api/v1/jobs/") and path.endswith(("/cancel", "/retry")))
+                    or (
+                        path.startswith("/api/v1/strategy-versions/")
+                        and path.endswith("/prompt-assist")
+                    )
                 ):
                     await run_in_threadpool(check_page_write, request)
             if request.method in {"POST", "PUT"} and path.startswith(("/api/v1/", "/local/v1/")):
@@ -424,12 +440,34 @@ def create_app(settings, *, local=False, sessions=None, stop_streams=None):
 
         app.include_router(_local_routes(settings, sessions, cache))
         app.include_router(build_group_admin_router(sessions, _audit))
+        app.include_router(build_prompt_provider_router(settings, sessions, _audit))
+        app.include_router(build_template_prompt_settings_router(sessions, _audit))
         app.include_router(build_monitor_router(settings, sessions))
     else:
         store = LocalStore(settings.data_root)
         app.include_router(_public_routes(settings, sessions, store, capacity, cache))
+        app.include_router(build_prompt_assist_router(settings, sessions, _session))
         app.include_router(build_event_router(settings, sessions, stop_streams=stop_streams))
     return app
+
+
+def _public_strategy_page(db, query, limit, scope, position):
+    """为一页策略批量读取当前扩写设置，版本列表与详情采用同一套字段筛选规则。"""
+    result = page(db, query, limit, scope, position, lambda version: version)
+    versions = result["items"]
+    keys = {version.strategy_key for version in versions}
+    settings = (
+        {
+            row.strategy_key: row
+            for row in db.scalars(
+                select(TemplatePromptSettings).where(TemplatePromptSettings.strategy_key.in_(keys))
+            )
+        }
+        if keys
+        else {}
+    )
+    result["items"] = [strategy_payload(db, version, settings) for version in versions]
+    return result
 
 
 def _latest_strategies():
@@ -613,13 +651,12 @@ def _public_routes(settings, sessions, store, capacity, cache):
             query = _latest_strategies()
             if pos:
                 query = query.where(StrategyVersion.strategy_key > pos[0])
-            return page(
+            return _public_strategy_page(
                 db,
                 query.order_by(StrategyVersion.strategy_key),
                 limit,
                 scope,
                 lambda v: [v.strategy_key],
-                lambda v: strategy_payload(db, v),
             )
 
     @router.get("/strategies/{key}/versions")
@@ -632,13 +669,12 @@ def _public_routes(settings, sessions, store, capacity, cache):
             query = select(StrategyVersion).where(StrategyVersion.strategy_key == key)
             if pos:
                 query = query.where(StrategyVersion.version < pos[0])
-            return page(
+            return _public_strategy_page(
                 db,
                 query.order_by(StrategyVersion.version.desc()),
                 limit,
                 scope,
                 lambda v: [v.version],
-                lambda v: strategy_payload(db, v),
             )
 
     @router.get("/strategy-versions/{version_id}")

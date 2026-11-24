@@ -1,11 +1,13 @@
 """用真实 HTTP 入口和独立 MySQL 检验用户、维护与批次契约。"""
 
+import json
 import re
 import struct
 import zlib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Barrier, Thread
 from unittest.mock import Mock, patch
 
 import pytest
@@ -931,3 +933,114 @@ def test_interrupted_multipart_releases_spool_and_capacity(
     with mysql_sessions() as db:
         assert db.scalar(select(func.count()).select_from(DiskReservation)) == 0
         assert db.scalar(select(func.count()).select_from(Asset)) == 0
+
+
+def test_optional_prompt_assist_uses_active_provider_and_selected_version(clients, mysql_sessions):
+    """用真实回环 HTTP 服务核对动态模型切换、不可变版本与普通任务提交的边界。"""
+    user, admin = clients
+    headers = login(user, "director")
+    page = {"Origin": LOCAL, "X-MyComfy-Admin": "prompt-providers"}
+    providers = "/local/v1/prompt-providers"
+    fields = ["text"]
+    initial_instruction = "只描述主体动作。"
+    version = {
+        **strategy(),
+        "prompt_assist": {"fields": fields, "instructions": initial_instruction},
+    }
+    publish_url = "/local/v1/strategy-versions"
+    first = admin.post(publish_url, json=version, headers=TEMPLATE_PAGE).raise_for_status().json()
+    version["prompt_assist"]["instructions"] = "只描述镜头运动。"
+    second = admin.post(publish_url, json=version, headers=TEMPLATE_PAGE).raise_for_status().json()
+    endpoint = f"{publish_url}/{second['strategy_version_id']}/prompt-assist-settings"
+    url = "/api/v1/strategy-versions/" + first["strategy_version_id"]
+    draft = {"field": "text", "text": "电车穿过雨夜"}
+    info = user.get(url, headers=headers).raise_for_status().json()
+    assert info["prompt_assist"] == {"fields": fields}
+    assert initial_instruction not in json.dumps(info, ensure_ascii=False)
+    assert user.post(url + "/prompt-assist", json=draft, headers=headers).status_code == 503
+
+    calls = []
+
+    class ChatServer(BaseHTTPRequestHandler):
+        """以不同模型名回复不同候选词，同时记录实际收到的路径、凭据及消息。"""
+
+        def do_POST(self):
+            """读取请求并返回一个 Chat Completions 服务会给出的 JSON。"""
+            data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, self.headers.get("Authorization"), data))
+            reply = {"choices": [{"message": {"content": data["model"] + " 建议"}}]}
+            response = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, *args):
+            """测试校验实际报文，不输出本地服务的访问日志。"""
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), ChatServer) as upstream:
+        thread = Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # 两次启用走同一管理入口；第二次使用另一模型和不同凭据，无需重启业务端。
+            for index, model in enumerate(("model-a", "model-b")):
+                config = {
+                    "name": model,
+                    "base_url": f"http://127.0.0.1:{upstream.server_port}/v1",
+                    "model": model,
+                    "api_key": f"test-key-{index}",
+                }
+                provider = (
+                    admin.post(providers, json=config, headers=page).raise_for_status().json()
+                )
+                assert "api_key" not in provider and provider["has_api_key"]
+                admin.post(
+                    f"{providers}/{provider['id']}/activate", json={}, headers=page
+                ).raise_for_status()
+                # 起初按已选版本的文件默认值扩写；从最新版单独保存系列指令后，旧版也实时读取。
+                instruction = initial_instruction
+                if index == 1:
+                    instruction = "维持镜头的移动方向。"
+                    admin.put(
+                        endpoint,
+                        headers=TEMPLATE_PAGE,
+                        json={"prompt_assist": {"fields": fields, "instructions": instruction}},
+                    ).raise_for_status()
+                suggestion = user.post(url + "/prompt-assist", json=draft, headers=headers)
+                assert suggestion.raise_for_status().json() == {"text": model + " 建议"}
+                path, key, payload = calls[index]
+                assert (path, key, payload["model"]) == (
+                    "/v1/chat/completions",
+                    f"Bearer test-key-{index}",
+                    model,
+                )
+                system, message = payload["messages"]
+                assert system == {"role": "system", "content": instruction}
+                assert json.loads(message["content"]) == draft
+            with mysql_sessions() as db:
+                assert db.scalar(select(func.count()).select_from(Job)) == 0
+
+            # 关闭系列扩写后，前台目录与版本列表都应立即收起各自的扩写入口。
+            admin.put(
+                endpoint, headers=TEMPLATE_PAGE, json={"prompt_assist": None}
+            ).raise_for_status()
+            for listing in ("/api/v1/strategies", "/api/v1/strategies/clip/versions"):
+                rows = user.get(listing, headers=headers).raise_for_status().json()["items"]
+                assert rows and all(row["prompt_assist"] is None for row in rows)
+            # 用户可以保留原文创建任务；提交接口不得因此产生第二次付费调用。
+            task = {
+                "client_task_key": "shot",
+                "strategy_version_id": second["strategy_version_id"],
+                "inputs": {"text": draft["text"]},
+            }
+            response = user.post(
+                "/api/v1/batches",
+                json={"client_batch_key": "keep-original", "tasks": [task]},
+                headers=headers,
+            )
+            assert response.status_code == 202, response.text
+            assert len(calls) == 2
+        finally:
+            upstream.shutdown()
+            thread.join()

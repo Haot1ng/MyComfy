@@ -12,6 +12,11 @@
 .composer .cmp-field { display: grid; align-content: start; gap: .45rem; min-width: 0; font-weight: 550; font-size: .87rem; }
 .composer .cmp-field :is(select,textarea,input) { width: 100%; max-width: 100%; min-width: 0; border-radius: .55rem; background: #fff; border: 1px solid #dcdbe3; padding: .65rem .75rem; font: inherit; font-weight: 400; color: #25232f; box-sizing: border-box; }
 .composer .cmp-field textarea { resize: vertical; min-height: 3rem; }
+.composer .cmp-assist, .composer .cmp-assist-preview { display: grid; gap: .5rem; }
+.composer .cmp-assist-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.composer .cmp-assist-actions .btn { padding: .35rem .7rem; font-size: .8rem; }
+.composer .cmp-assist-preview { padding: .75rem; background: #f8f6fc; border: 1px solid #e2dbee; border-radius: .55rem; }
+.composer .cmp-assist-preview label { display: grid; gap: .45rem; }
 .composer .cmp-field input[type=file] { border-style: dashed; background: #f9f8fc; font-size: .8rem; }
 .composer .cmp-field input::file-selector-button { color: #5f3eb0; border: 0; border-radius: .3rem; padding: .35rem .6rem; margin-right: .5rem; font: inherit; background: #eae3fe; cursor: pointer; }
 .composer .cmp-field [aria-invalid=true] { border-color: #b64634; }

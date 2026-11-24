@@ -162,6 +162,12 @@
       }
     }
   },
+  "prompt_assist": {
+    "instructions": "为 MiniMax H3 文生视频完善提示词，使用用户的语言，保留主体、场景和创作意图。把抽象描述转成可见的动作和时间顺序，按需要补充构图、光线及一种连贯的运镜。只输出可直接用于视频生成的正文。",
+    "fields": [
+      "prompt"
+    ]
+  },
   "input_schema": {
     "type": "object",
     "properties": {

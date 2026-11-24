@@ -10,9 +10,10 @@
 | 后台监控 | `/local/v1/monitor` | 免账号登录，只读查询。 |
 | 后台模板页 | `/local/v1/strategies`、`/local/v1/strategy-versions` | 查看已发布模板，或用同源 JSON 请求发布模板。 |
 | 后台用户管理页 | `/local/v1/users`、`/local/v1/groups`、`/local/v1/users/{user_id}/groups` | 查看全部账号、分组和权限，保存所选用户的新分组。 |
+| 后台提示词服务商页 | `/local/v1/prompt-providers` | 同源浏览器可管理模型配置、启用或停用服务。 |
 | 维护程序 | `/local/v1` | 通过管理入口使用 `Authorization: Bearer <token>` 可调用分组定义、密码重置等维护操作。 |
 
-API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。默认在业务机本地打开管理页。启用外网测试后，同一个后台也通过配置的 HTTPS 地址提供，菜单、数据和授权规则一致。任何拿到该链接的人都可以修改用户分组。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [外网测试](https-tunnel-test.md) · [部署与运维](operations.md)
+API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。默认在业务机本地打开管理页。启用外网测试后，同一个后台也通过配置的 HTTPS 地址提供，菜单、数据和授权规则一致。任何拿到该链接的人都可以修改用户分组和后续扩写请求使用的服务商。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [外网测试](https-tunnel-test.md) · [部署与运维](operations.md)
 
 ## 通用约定
 
@@ -80,12 +81,28 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | `GET /strategies` | 分页 | `200`，每个系列最高已发布版本。 |
 | `GET /strategies/{key}/versions` | 系列键、分页 | `200`，同系列历史版本，按版本号倒序。 |
 | `GET /strategy-versions/{version_id}` | 版本 ID | `200`，单个策略版本对象。 |
+| `POST /strategy-versions/{version_id}/prompt-assist` | `{"field":"prompt","text":"雨中行驶的电车"}`，需 `jobs.submit` 和当前页面写入凭据。 | `200 {"text":"…"}`，返回可编辑的候选文本。 |
 | `POST /assets` | `multipart/form-data`，唯一文件字段 `file` | `201`，已登记的素材对象，角色为 `input`。 |
 | `GET /assets/{asset_id}` | 文件 ID | `200`，授权后的素材或产物元数据。 |
 
-策略版本对象含 `strategy_version_id`、`strategy_key`、`version`、`name`、`content_digest`、`input_schema`、`asset_fields`、`accepting`、`reason`、`expose_after_cancel`。按各任务选定版本的 JSON Schema 生成表单，使用该版本的参数类型、必填项和默认值。已有兼容部署但实例忙、维护或暂时离线时仍可受理。缺少兼容部署时返回 `accepting: false` 和 `NO_COMPATIBLE_DEPLOYMENT`。
+策略版本对象含 `strategy_version_id`、`strategy_key`、`version`、`name`、`content_digest`、`input_schema`、`asset_fields`、`prompt_assist`、`accepting`、`reason`、`expose_after_cancel`。按各任务选定版本的 JSON Schema 生成表单，使用该版本的参数类型、必填项和默认值。已有兼容部署但实例忙、维护或暂时离线时仍可受理。缺少兼容部署时返回 `accepting: false` 和 `NO_COMPATIBLE_DEPLOYMENT`。
 
 版本的 `asset_fields` 是去重后的素材输入字段名数组。按该数组和对应字段的 Schema 区分上传控件、普通参数、单值及数组。每次上传一个文件，浏览器负责生成 multipart boundary。服务端校验实际类型、媒体内容、大小和配额，持久化成功后才返回 `asset_id`。任务的素材参数提交此 ID，数组字段提交 ID 数组。单文件上限由 `MYCOMFY_MAX_UPLOAD_BYTES` 配置，默认 100 MiB。上传素材与批次分别登记，批次校验失败后仍可用已登记的素材 ID 重新提交。[策略对象](../src/mycomfy/generation/strategy.py#L274) · [上传路由](../src/mycomfy/api/app.py#L588) · [部署默认值](../src/mycomfy/config.py)
+
+**模板文件**可以省略扩写配置，也可以包含下列顶层属性，为这个版本提供初始规则。指令最多 8000 个字符，字段必须是 `input_schema.properties` 中明确声明的自由文本，允许选多个。素材、枚举及常量字段不能选。前台策略详情只返回 `{"fields":["prompt"]}`，未启用或没有适用字段时返回 `null`。
+
+```json
+{
+  "prompt_assist": {
+    "instructions": "沿用用户语言，保留主体与地点，用可见动作完善这一段运镜。只输出可直接采用的正文。",
+    "fields": ["prompt"]
+  }
+}
+```
+
+在管理后台单独保存扩写设置后，同一 `strategy_key` 下各版本优先使用该设置，只在相应版本仍可自由填写的文本字段上启用。编辑规则或关闭辅助均不产生新的工作流版本。已经发出的扩写按发出时的规则和服务商完成。
+
+用户点击扩写时，业务端向当前服务商的 `/chat/completions` 发送模板指令、字段名和该字段的草稿。草稿和返回的候选文本各限 8000 个字符。图片、其他分镜和任务不会随请求发送。工作台允许先编辑建议再采用，也可保留原文。直接提交任务照常使用表单当前内容。未启用服务商时扩写返回 `503`，上游失败或超时分别返回 `502`、`504`。
 
 ### 批次、任务与重试
 
@@ -197,7 +214,7 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 
 ## 本机维护
 
-模板页 `/templates.html` 发布时发送 `X-MyComfy-Admin: templates`。用户管理页 `/users.html` 读取账号、分组和保存更改时发送 `X-MyComfy-Admin: users`。后台要求请求由回环对端送达，原始 Host 对应本机入口或配置的 HTTPS 管理来源。浏览器提交写请求时，`Origin` 必须精确匹配所在的管理入口，内容类型为 `application/json`。请求带有 `Sec-Fetch-Site` 时须为 `same-origin`。维护程序可在同一地址使用 Bearer 凭据。[管理后台操作](../web/admin/README.md)
+服务商页 `/providers.html` 发送 `X-MyComfy-Admin: prompt-providers`。模板页 `/templates.html` 发布时发送 `X-MyComfy-Admin: templates`。用户管理页 `/users.html` 读取账号、分组和保存更改时发送 `X-MyComfy-Admin: users`。后台要求请求由回环对端送达，原始 Host 对应本机入口或配置的 HTTPS 管理来源。浏览器提交写请求时，`Origin` 必须精确匹配所在的管理入口，内容类型为 `application/json`。请求带有 `Sec-Fetch-Site` 时须为 `same-origin`。维护程序可在同一地址使用 Bearer 凭据。[管理后台操作](../web/admin/README.md)
 
 | 方法与路径 | 输入 | 成功响应 |
 | --- | --- | --- |
@@ -205,11 +222,21 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | `GET /local/v1/strategy-versions/{version_id}` | 列表返回的不可变版本 ID。 | `200`，返回该版本的完整策略对象，包含工作流、参数绑定及输出契约；未知版本返回 `404`。 |
 | `POST /local/v1/strategy-versions?create_only=true` | 完整策略对象，使用新的 `strategy_key`。 | 新建时返回 `201` 和版本 `1`。标识已存在时返回 `409 STRATEGY_ALREADY_EXISTS`。 |
 | `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。首次发布为 `1`，后续按同一标识递增，已发布的内容不可变。 |
+| `GET /local/v1/strategy-versions/{version_id}/prompt-assist-settings` | 选中的已发布版本。 | `200 {prompt_assist}`，返回当前有效的完整设置或 `null`。 |
+| `PUT /local/v1/strategy-versions/{version_id}/prompt-assist-settings` | `{"prompt_assist":{"instructions":"…","fields":["prompt"]}}`，或用 `{"prompt_assist":null}` 关闭。 | `200 {prompt_assist}`。保存系列设置后，下次扩写直接生效，工作流版本及摘要保持原值。 |
+| `GET /local/v1/prompt-providers` | 无。 | `200 {items}`，含 `id, name, base_url, model, active, has_api_key`。 |
+| `POST /local/v1/prompt-providers` | `{name, base_url, model, api_key?}`。基址包含服务商要求的版本路径。 | `201`，新配置处于停用状态。 |
+| `PUT /local/v1/prompt-providers/{id}` | 完整名称、基址、模型。省略密钥表示保留，`clear_api_key: true` 可清除。已保存密钥时，变更基址必须重新提供或清除密钥。 | `200`，返回更新后的服务商。 |
+| `POST /local/v1/prompt-providers/{id}/activate`、`/disable` | `{}`。 | `200`，返回该配置的当前状态。同一时间最多启用一个配置。 |
 | `GET /local/v1/users` | 游标分页，`limit` 默认 50，最大 200。 | `200 {items, next_cursor}`。各项含 `user_id, username, groups, permissions`。 |
 | `GET /local/v1/groups` | 无。 | `200 {items, available_permissions}`。列出可选组和每组权限点。 |
 | `GET /local/v1/users/{user_id}/groups` | 用户 ID。 | `200 {groups, permissions}`。 |
 | `PUT /local/v1/users/{user_id}/groups` | `{"group_keys":["standard"]}` 或空列表 `{"group_keys":[]}`。 | `200 {groups, permissions}`。事务内替换完整组集合，返回新权限并集。 |
 | `POST /local/v1/users/{user_id}/password-reset` | `{new_password}` | `204`。同事务更新密码、撤销当前会话和记录审计。 |
+
+模板设置的 GET 和 PUT 返回 `ETag`。后台保存时通过 `If-Match` 提交读取时的标签；若期间有人改了设置或发布了新版，返回 `412`，页面可重新读取后再保存。
+
+服务商的 API 密钥在数据库中加密，接口仅返回 `has_api_key`。首次保存密钥会在业务端数据目录生成权限为 `0600` 的 `prompt-providers.key`。备份和恢复时须同时保留数据库和这份文件。
 
 停止接单、恢复接单和解除隔离由运维命令处理。运行管理按实例 ID 和代次核对目标，解除隔离时记录处置依据。[维护路由](../src/mycomfy/api/app.py#L327) · [策略校验](../src/mycomfy/generation/strategy.py#L108) · [运维命令](operations.md)
 

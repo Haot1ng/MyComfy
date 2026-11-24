@@ -1,0 +1,29 @@
+.provider-intro,.feedback {color:var(--muted);margin:0 0 16px;overflow-wrap:anywhere}
+.feedback:empty {margin:0}
+.feedback[data-tone="error"] {color:var(--red)}
+.feedback[data-tone="success"] {color:var(--accent)}
+#providers .toolbar {flex-wrap:nowrap}
+#providers td:last-child {width:1%}
+#providers .key-state {white-space:nowrap}
+
+#editor {
+  width:min(460px,calc(100% - 32px));max-height:90dvh;overflow:auto;padding:24px;
+  border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text)
+}
+#editor::backdrop {background:#080d10bb}
+#editor h2 {margin:0 0 16px;font-size:21px}
+#editor fieldset {display:grid;gap:5px;margin:0;padding:0;border:0;min-width:0}
+#editor label {font-weight:600}
+#editor label:not(:first-child) {margin-top:8px}
+#editor small {color:var(--muted)}
+#editor input:not([type="checkbox"]) {
+  width:100%;padding:8px 10px;min-width:0;border:1px solid #465455;border-radius:6px;
+  background:#101718;color:var(--text)
+}
+#editor label#clear-option {display:flex;gap:6px;align-items:center;font-weight:400}
+#form-status:not(:empty) {margin:14px 0 0}
+.form-actions {justify-content:flex-end;margin-top:20px}
+@media(max-width:460px) {
+  .pagehead {flex-wrap:wrap}
+  #editor {padding:18px}
+}

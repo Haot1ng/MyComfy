@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="same-origin">
+  <title>提示词服务商 · MyComfy</title>
+  <link rel="stylesheet" href="./admin.css">
+  <link rel="stylesheet" href="./providers.css">
+  <script type="module" src="./providers.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳至内容</a>
+  <div class="shell">
+    <aside>
+      <a class="brand" href="./#/overview" aria-label="MyComfy 监控总览"><span class="brandmark" aria-hidden="true"><i></i><i></i><i></i></span>MyComfy</a>
+      <nav id="nav" aria-label="管理后台导航"></nav>
+    </aside>
+    <main id="content" tabindex="-1">
+      <header class="topbar"><span class="crumb"><a href="./#/overview">管理后台</a><span aria-hidden="true">/</span><strong>提示词服务商</strong></span></header>
+      <div class="workspace">
+        <div class="pagehead">
+          <h1>提示词服务商</h1>
+          <div class="toolbar">
+            <button id="refresh" type="button">刷新</button>
+            <button id="add" class="highlight" type="button">添加服务商</button>
+          </div>
+        </div>
+        <p class="provider-intro">工作台使用当前启用的服务商扩写提示词。启用另一家时会自动切换。</p>
+        <p id="list-status" class="feedback" role="status"></p>
+        <section class="panel" aria-label="提示词服务商列表">
+          <div class="tablebox" role="region" tabindex="0" aria-label="服务商列表，可横向滚动">
+            <table>
+              <thead><tr><th scope="col">服务商</th><th scope="col">模型</th><th scope="col">API 基址</th><th scope="col">密钥</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+              <tbody id="providers"></tbody>
+            </table>
+          </div>
+          <p id="empty" class="empty" hidden>尚未添加服务商。</p>
+        </section>
+        <noscript>启用 JavaScript 后可配置提示词服务商。</noscript>
+      </div>
+    </main>
+  </div>
+  <dialog id="editor" aria-labelledby="editor-title">
+    <form id="provider-form" autocomplete="off">
+      <h2 id="editor-title">添加服务商</h2>
+      <fieldset id="fields">
+        <label for="name">服务商名称</label>
+        <input id="name" required maxlength="100" autofocus>
+        <label for="base-url">API 基址</label>
+        <input id="base-url" type="url" required maxlength="2048" autocapitalize="none" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="url-help">
+        <small id="url-help">填写兼容 OpenAI 的 API 基址，系统会追加 <code>/chat/completions</code>。</small>
+        <label for="model">模型标识</label>
+        <input id="model" required maxlength="200" autocapitalize="none" spellcheck="false">
+        <label for="api-key">API 密钥</label>
+        <input id="api-key" type="password" maxlength="2048" autocomplete="new-password" autocapitalize="none" spellcheck="false" pattern="[!-~]+" title="请使用不含空格的可见 ASCII 字符。" aria-describedby="key-help">
+        <small id="key-help"></small>
+        <label id="clear-option" hidden><input id="clear-key" type="checkbox">清除已保存的密钥</label>
+      </fieldset>
+      <p id="form-status" class="feedback" role="status"></p>
+      <div class="toolbar form-actions">
+        <button id="cancel" type="button">取消</button>
+        <button id="save" type="submit" class="highlight">保存</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -64,7 +64,11 @@ python3 scripts/deploy.py --single-host
 
 这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
-要把这两个页面临时分享给外网测试人员，在一个 WSL 窗口启动 MyComfy，再在一个 Windows PowerShell 窗口运行 `scripts/share-test.ps1`。脚本使用 Tailscale Funnel 同时打开两个 HTTPS 链接，按 Ctrl+C 可一起关闭。工作台使用原有账号，后台链接允许任何访客查看全局监控、发布模板、浏览所有账号并修改任意用户的分组。[两个窗口的启动命令](docs/https-tunnel-test.md)
+**启用 AI 提示词扩写**时，在管理后台的“提示词服务商”添加兼容 OpenAI Chat Completions 的 API 基址、模型标识及可选 API 密钥，再点击“启用”。基址由业务端容器访问，例如填 `https://api.example.com/v1`，服务端会追加 `/chat/completions`。可以保存多套配置，切换后从下一次扩写开始生效。
+
+在“工作流模板”的“打开 JSON 文件”旁可查看、下载完整模板示例。上传文件时可以省略 `prompt_assist`，先发布并正常生成视频。选中已发布模板后，在“AI 提示词辅助”里填写指令、勾选文本字段并单独保存。新设置从下一次扩写生效，无需重新上传文件、发布版本或重启服务。内置 H3 文生视频、图生视频预设和仓库的五图分段示例均附有各自的指令。工作台用户可以直接提交原文，也可以点击“扩写提示词”，预览并编辑建议后再采用。一次扩写仅将模板指令、当前字段及其草稿发给生效的服务。[API 与字段说明](docs/web-api.md#策略与素材)
+
+要把这两个页面临时分享给外网测试人员，在一个 WSL 窗口启动 MyComfy，再在一个 Windows PowerShell 窗口运行 `scripts/share-test.ps1`。脚本使用 Tailscale Funnel 同时打开两个 HTTPS 链接，按 Ctrl+C 可一起关闭。工作台使用原有账号，后台链接允许任何访客查看全局监控、发布模板、浏览所有账号、修改任意用户的分组，并可切换后续扩写请求使用的服务商。[两个窗口的启动命令](docs/https-tunnel-test.md)
 
 **需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
 

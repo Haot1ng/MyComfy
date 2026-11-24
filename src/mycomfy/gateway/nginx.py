@@ -72,7 +72,12 @@ def render(snapshot, shared, work):
     local_port = int(os.environ.get("MYCOMFY_LOCAL_PORT", "8001"))
     if not (0 < local_port < 65536 and 0 < public_port < 65536 and local_port != public_port):
         raise ValueError("Invalid listener ports")
-    host = os.environ.get("MYCOMFY_API_HOST", "127.0.0.1")
+    # Docker 把宿主端口转发到容器网卡；独立运行时管理入口仍只监听本机回环。
+    if os.environ.get("MYCOMFY_GATEWAY_BRIDGE") == "1":
+        public_host = admin_host = "0.0.0.0"
+    else:
+        public_host = os.environ.get("MYCOMFY_API_HOST", "127.0.0.1")
+        admin_host = "127.0.0.1"
     socket_dir = Path(os.environ.get("MYCOMFY_CORE_SOCKET_DIR", "/run/mycomfy-api"))
     trusted = [
         ipaddress.ip_network(cidr.strip(), strict=False)
@@ -116,8 +121,8 @@ def render(snapshot, shared, work):
         delays.append(f"{group} {(60 + rpm - 1) // rpm};")
     servers = []
     for listener, port, address in (
-        ("public", public_port, host),
-        ("local", local_port, "127.0.0.1"),
+        ("public", public_port, public_host),
+        ("local", local_port, admin_host),
     ):
         peer = socket_dir / ("public.sock" if listener == "public" else "admin.sock")
         trust = ""

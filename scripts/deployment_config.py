@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import runpy
+import socket
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -86,6 +87,31 @@ def _port(value, field):
     return value
 
 
+def _gateway_bind_ip(value, required):
+    """把工作台宿主绑定地址转换为 Docker 发布端口所需的单个 IP。"""
+    try:
+        # 显式 IP 保留原绑定范围，包括通配地址；Docker 的 IPv6 host_ip 不带方括号。
+        address, _ = _host(value, "public.host", bind=True)
+        return address
+    except ValueError:
+        name, is_local = _host(value, "public.host")
+    if is_local or not required:
+        # 数据机和 GPU 机不启网关，无需在这些机器上解析业务机的专用 DNS 名称。
+        return "127.0.0.1"
+    try:
+        results = socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("无法解析 public.host，请填写业务机可解析的主机名或绑定 IP") from exc
+    for family, _, _, _, endpoint in results:
+        if family in (socket.AF_INET, socket.AF_INET6):
+            address = ip_address(endpoint[0])
+            # 只有显式填写 0.0.0.0 或 :: 才允许公开全部接口。
+            if address.is_unspecified or (family == socket.AF_INET6 and endpoint[3]):
+                raise ValueError("public.host 解析到通配或带接口标识的地址，请直接填写绑定 IP")
+            return str(address)
+    raise ValueError("public.host 未解析到 IPv4 或 IPv6 地址")
+
+
 def _endpoint(host, port):
     """为连接串格式化主机和端口，IPv6 主机必须用方括号包围。"""
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
@@ -108,6 +134,7 @@ def read_config(
     database_init: bool = False,
     redis_optional: bool = False,
     single_host: bool = False,
+    gateway_required: bool = True,
 ) -> tuple[dict[str, str], dict | None, bool]:
     """读取部署 YAML，返回 Compose 变量、引擎配置和生效的单机标记。"""
     config = _object(
@@ -200,7 +227,7 @@ def read_config(
         proxy_cidrs = ",".join(str(ip_network(value)) for value in proxies)
     except ValueError:
         raise ValueError("public.trusted_proxy_cidrs 含有无效的 IP 或 CIDR") from None
-    host = _text(public.get("host", "127.0.0.1"), "public.host")
+    host = _gateway_bind_ip(public.get("host", "127.0.0.1"), gateway_required)
     origin = _text(public.get("origin", f"http://127.0.0.1:{ports['api']}"), "public.origin")
     origin, admin_origin = normalize_origins(origin, public.get("admin_origin"))
     try:

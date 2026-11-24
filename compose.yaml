@@ -140,14 +140,20 @@ services:
       context: .
       target: gateway
     image: mycomfy-gateway:local
-    network_mode: host
+    networks: [gateway]
+    # 宿主发布地址决定网页可从哪里访问。后台默认只在本机提供给浏览器和 HTTPS 代理。
+    ports:
+      - target: 8000
+        published: "${MYCOMFY_API_PORT:-8000}"
+        host_ip: "${MYCOMFY_API_HOST:-127.0.0.1}"
+      - target: 8001
+        published: "${MYCOMFY_LOCAL_PORT:-8001}"
+        host_ip: "127.0.0.1"
     restart: unless-stopped
     init: true
     user: "${MYCOMFY_UID:-10001}:${MYCOMFY_GID:-10001}"
     environment:
-      MYCOMFY_API_HOST: "${MYCOMFY_API_HOST:-127.0.0.1}"
-      MYCOMFY_API_PORT: "${MYCOMFY_API_PORT:-8000}"
-      MYCOMFY_LOCAL_PORT: "${MYCOMFY_LOCAL_PORT:-8001}"
+      MYCOMFY_GATEWAY_BRIDGE: "1"
       MYCOMFY_GATEWAY_DIR: /var/lib/mycomfy-gateway
       MYCOMFY_TRUSTED_PROXY_CIDRS: "${MYCOMFY_TRUSTED_PROXY_CIDRS:-}"
     volumes:
@@ -208,6 +214,13 @@ services:
       engine:
         condition: service_started
         restart: true
+
+networks:
+  gateway:
+    # 网关只通过共享 Unix 套接字连接 Core，数据库、引擎和 Worker 使用各自的网络。
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
 
 volumes:
   mysql-data:

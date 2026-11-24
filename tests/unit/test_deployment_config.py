@@ -3,6 +3,7 @@
 import json
 import os
 import runpy
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -74,6 +75,57 @@ def test_custom_accounts_and_paths(tmp_path):
     assert values["MYCOMFY_COOKIE_SECURE"] == "true"
     assert values["MYCOMFY_MYSQL_BIND_HOST"] == values["MYCOMFY_REDIS_BIND_HOST"] == "127.0.0.1"
     assert (values["MYCOMFY_UID"], values["MYCOMFY_GID"]) == (str(os.getuid()), str(os.getgid()))
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("localhost.", "127.0.0.1"),
+        ("0.0.0.0", "0.0.0.0"),
+        ("[::]", "::"),
+        ("[2001:db8::8]", "2001:db8::8"),
+        ("video.lan", "192.0.2.20"),
+    ],
+)
+def test_public_host_is_rendered_as_docker_bind_ip(tmp_path, monkeypatch, host, expected):
+    """工作台宿主映射使用规范化的 IP，只有域名需要在业务机解析。"""
+    path = tmp_path / "deploy.yaml"
+    path.write_text(
+        f"public: {{host: '{host}'}}\nmysql: {{user: a, password: p}}\nredis: {{user: a, password: p}}"
+    )
+
+    def resolve(name, port, *, type):
+        """仅为本测试的业务主机名提供地址，字面 IP 和 localhost 必须跳过 DNS 查询。"""
+        assert name == "video.lan" and type == socket.SOCK_STREAM
+        return [(socket.AF_INET, type, socket.IPPROTO_TCP, "", ("192.0.2.20", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    settings, _, _ = read_config(path, tmp_path, core_only=True)
+    assert settings["MYCOMFY_API_HOST"] == expected
+
+
+def test_publishing_requires_a_resolvable_specific_address(tmp_path, monkeypatch):
+    """业务机拒绝无效解析，单独部署数据或 GPU 服务无需访问业务 DNS。"""
+    path = tmp_path / "deploy.yaml"
+    path.write_text(
+        "public: {host: video.lan}\nmysql: {user: a, password: p}\nredis: {user: a, password: p}"
+    )
+
+    def unavailable(*args, **kwargs):
+        """模拟业务机专用解析器不可用。"""
+        raise socket.gaierror("unavailable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unavailable)
+    settings, _, _ = read_config(path, tmp_path, core_only=True, gateway_required=False)
+    assert settings["MYCOMFY_API_HOST"] == "127.0.0.1"
+    with pytest.raises(ValueError, match="无法解析 public.host"):
+        read_config(path, tmp_path, core_only=True)
+    # 某些 DNS 过滤器以 0.0.0.0 响应无效名称；不能据此把服务扩大到全部接口。
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, 1, 6, "", ("0.0.0.0", 0))]
+    )
+    with pytest.raises(ValueError, match="通配"):
+        read_config(path, tmp_path, core_only=True)
 
 
 @pytest.mark.parametrize("extension", [".yaml", ".yml"])

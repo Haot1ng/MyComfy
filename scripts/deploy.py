@@ -48,9 +48,8 @@ def bind_source(service, target):
 def prepare_gateway(services, repo, config_path, deploy_local_stack):
     """核对本机监听端口和所选挂载范围，给网关准备独立的持久状态目录。"""
     gateway = services["gateway"]
-    edge_ports = [
-        int(gateway["environment"][name]) for name in ("MYCOMFY_API_PORT", "MYCOMFY_LOCAL_PORT")
-    ]
+    # 端口冲突发生在宿主机，容器内固定的 Nginx 端口可与其他服务重复。
+    edge_ports = [int(binding["published"]) for binding in gateway["ports"]]
     if len(set(edge_ports)) != len(edge_ports):
         raise ValueError("ports.api 和 ports.admin 必须不同")
     if deploy_local_stack:
@@ -231,6 +230,7 @@ def main():
             core_only=args.db_only or args.core_only or args.test or args.compose is not None,
             database_init=args.db_only,
             redis_optional=args.gpu_only or args.compose is not None,
+            gateway_required=not (args.db_only or args.gpu_only),
             single_host=single_host,
         )
         process_env.update(settings)

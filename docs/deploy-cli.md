@@ -112,11 +112,13 @@ python3 scripts/deploy.py --compose --help
 | --- | --- | --- |
 | `mysql` | `mysql:8.4` | 官方镜像首次在空数据卷初始化业务库与账号，以后复用命名卷 `mysql-data`，挂载在 `/var/lib/mysql`。健康检查用业务账号执行 `SELECT 1`。 |
 | `redis` | `redis:7-alpine` | 启动时配置 ACL 用户，供业务端缓存会话预检、跨进程统计用户请求和模型服务商并发。健康检查执行 `PING`。当前关闭了 RDB 快照和 AOF，重启后重新累计限流计数，按业务访问重建缓存。 |
-| `migrate` | `mycomfy-migrate`（Compose 按项目命名） | 与 Worker 使用相同的 Dockerfile 构建目标，执行 `python -m mycomfy.cli migrate`。成功后显示 `Exited (0)`。 |
+| `migrate` | `mycomfy-migrate`（Compose 按项目命名） | 与 Worker 使用相同的 Dockerfile 构建目标，通过宿主网络连接数据库，执行 `python -m mycomfy.cli migrate`。成功后显示 `Exited (0)`。 |
 | `core` | `mycomfy-core:local` | 一个 Python 进程提供工作台、后台和 API，只读挂载 `web/client`、`web/admin`。通过宿主网络连接数据库，为网关提供私有套接字 `public.sock` 和 `admin.sock`。健康检查请求管理套接字。 |
-| `gateway` | `mycomfy-gateway:local` | 在宿主网络运行 Nginx，占用原工作台和管理端口，经共享卷中的两个套接字分别转发。控制进程校验并热加载规则、汇总访问统计，健康检查读取实际运行修订。 |
+| `gateway` | `mycomfy-gateway:local` | 镜像内的 Nginx 使用独立桥接网络，经共享卷中的 Unix 套接字把请求交给 Core。Docker 将宿主 `public.host:ports.api` 映射到容器端口 8000，将宿主 `127.0.0.1:ports.admin` 映射到容器端口 8001。健康检查通过私有套接字核对生效规则，宿主端口可用性可从 Windows 或 Linux 发起 HTTP 请求验证。 |
 | `engine` | `mycomfy-engine:local` | 申请 `gpus: all`，以 `runtime serve --stop-engines-on-exit` 启动管理器，再启动和监护 ComfyUI 子进程。健康检查执行 `runtime ready`；可在对应代次的 `engine.log` 查看采样和导出日志。 |
 | `worker` | `mycomfy-worker:local` | 从 MySQL 领任务并更新状态，与 `engine` 共用网络空间，经 `127.0.0.1:8188` 调用默认实例。镜像根据调度循环的心跳报告健康状态，队列为空也可以是 `healthy`。 |
+
+Linux 业务机在共享局域网中部署时，建议使用 Docker Engine 28.0 或更新版本。Docker 记录了早期版本的一个限制：同一二层网络中的其他主机在特定条件下也能访问发布到回环地址的端口。[Docker 端口发布说明](https://docs.docker.com/engine/network/port-publishing/#publishing-ports)
 
 应用代码和管理进程的 Python 环境 `/opt/venv` 随本地镜像构建。运行模型的 Python 在 `var/data/engines/releases/<摘要>/venv`，权重保存在宿主机数据目录；重建引擎容器时可复用这些文件。
 

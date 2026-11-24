@@ -18,6 +18,27 @@ python3 scripts/deploy.py --test
 
 如果以前从 Windows PowerShell 用 `--bg` 开过两条测试转发，先运行 `tailscale funnel status`。确认显示的端口和目标正是自己上次创建的测试规则后，可在 PowerShell 运行 `tailscale funnel --https=443 off` 和 `tailscale funnel --https=8443 off` 释放对应端口，再回到 WSL 执行 `--test`。端口按自己的旧规则填写。
 
+## Windows 连不上网关端口时
+
+如果网关容器内的两个页面都返回 200，而 Windows 访问相同端口时提示连接失败，先查看 `docker ps` 的 `PORTS` 列。默认配置应显示 `127.0.0.1:8000->8000/tcp` 和 `127.0.0.1:8001->8001/tcp`。左侧是 Windows 和 Tailscale 使用的端口，右侧是网关容器内的端口。
+
+如果现有 `gateway` 使用宿主网络且没有端口映射，可以单独更新网关。有正在运行的 `--test` 时，先在原终端按 Ctrl+C 并等待恢复原业务入口。在 WSL 仓库目录执行以下命令。若原部署指定了配置路径，每条 `deploy.py` 命令都沿用该 `--config`，放在 `--compose` 或 `--test` 前面。
+
+```bash
+git pull --ff-only origin main
+python3 scripts/deploy.py --compose up -d --no-deps --build --wait gateway
+python3 scripts/deploy.py --compose ps gateway
+```
+
+在 Windows PowerShell 验证本机入口。下面使用默认地址，若部署时改过配置，将工作台的地址和端口替换为 `public.host` 上实际可访问的本机地址与 `ports.api`，将后台端口替换为 `ports.admin`。
+
+```powershell
+curl.exe --noproxy "*" --max-time 5 -sS -o NUL -w "workbench HTTP %{http_code}\n" http://127.0.0.1:8000/
+curl.exe --noproxy "*" --max-time 5 -sS -o NUL -w "admin HTTP %{http_code}\n" http://127.0.0.1:8001/
+```
+
+两行都返回 `HTTP 200` 后，在 WSL 运行 `python3 scripts/deploy.py --test`，使用终端最终打印的两个 HTTPS 链接。
+
 ## 测试配置
 
 仓库提供带注释的 [deploy.test.example.yaml](../deploy.test.example.yaml)。默认设置使用当前 Tailscale 设备名、工作台 HTTPS 端口 `443` 和后台 HTTPS 端口 `8443`。首次省略 `--test-config` 且仓库还没有 `deploy.test.yaml` 时，脚本使用示例配置。两条转发都注册成功后，它会把检测到的完整设备名及两个端口写入本机的 `deploy.test.yaml`，供下次测试复用。Git 默认忽略这个文件。

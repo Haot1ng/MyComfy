@@ -280,7 +280,7 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 
 ### 全栈 Docker Compose（Linux / Windows WSL 2）
 
-**在同一台 GPU 机器上部署**，需要 Python 3、Docker Compose 2.30.0 或更新版本，以及可在容器中使用的 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用支持 WSL 的 NVIDIA 驱动和 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
+**在同一台 GPU 机器上部署**，需要 Python 3、Docker Compose 2.30.0 或更新版本，以及可在容器中使用的 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用支持 WSL 的 NVIDIA 驱动和 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**，供 Core 和数据库迁移进程连接数据服务。网页入口通过 Docker 端口映射发布到 Windows。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
 
 **首次部署**可在新检出的仓库根目录直接运行以下命令。脚本读取仓库自带的中文注释模板 `deploy.config.example.yaml`，MySQL 和 Redis 的默认密码都是字符串 `123456`，数据库和网页端口仅绑定本机 `127.0.0.1`。模板预置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。
 
@@ -315,7 +315,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | --- | --- |
 | `single_host` | 顶层布尔值。设置为 `true` 后，直接运行 `python3 scripts/deploy.py` 即可在这台 GPU 主机的 Docker 中部署全部服务。省略或设为 `false` 时，无参部署连接已就绪的数据服务。 |
 | `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
-| `public.host`、`public.origin` | `public.host` 是业务机监听 API 的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
+| `public.host`、`public.origin` | `public.host` 是 Docker 在业务机发布工作台的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
 | `public.admin_origin` | 可选的管理后台 HTTPS 来源，默认仅接受本机管理地址。通过自管反向代理使用管理域名时，填写独立于工作台的 HTTPS 来源，并让上游保留浏览器的 Host。两个管理入口提供相同权限。 |
 | `public.trusted_proxy_cidrs` | 可提供客户端地址的上游代理 IP 或 CIDR 数组，默认为空。Nginx 按此配置处理转发头，供 IP 限流使用。 |
 | `mysql.bind_host`、`redis.bind_host` | 可选。运行随附数据库容器时，端口发布到数据库服务器的哪个本机 IP，默认都是 `127.0.0.1`。分机示例见下文。 |
@@ -333,7 +333,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | 服务 | 容器职责 |
 | --- | --- |
 | `mysql`、`redis`、`migrate` | 保存业务状态和限流规则、缓存会话及共享限流计数、在服务启动前迁移数据库。 |
-| `gateway` | Nginx 接收工作台和管理后台的 HTTP 流量，通过专用 Unix 套接字转发给 Core，按来源 IP 执行各 API 的入口限额。管理端口绑定回环地址。 |
+| `gateway` | Nginx 在独立的桥接网络中监听工作台与后台，经共享卷的 Unix 套接字转发给 Core，并按来源 IP 限流。Docker 将容器端口 8000 发布到业务机的 `public.host:ports.api`，将 8001 发布到 `127.0.0.1:ports.admin`。 |
 | `core` | 托管 API、工作台和本机管理后台，并在鉴权后执行用户限额。使用 HTTPS 反向代理时，在部署配置的 `public.origin` 填写工作台外部来源，并设置 `public.cookie_secure` 为 `true`。 |
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
 | `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。镜像自带健康检查，在 `docker ps` 的 STATUS 列显示协调循环的状态。队列为空时，能正常完成轮询的 Worker 同样显示 `healthy`。 |
@@ -378,7 +378,7 @@ ports:
   api: 8000
 ```
 
-业务机的 `gateway` 负责绑定 `public.host` 和 `ports.api`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
+Docker 在业务机的 `public.host` 上发布 `ports.api`，将工作台流量转发给 `gateway`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
 
 | 顺序 | 在哪里运行 | 配置和命令 |
 | --- | --- | --- |

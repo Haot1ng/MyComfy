@@ -53,8 +53,8 @@ def _handle_shutdown():
             signal.signal(item, handler)
 
 
-def _live_services(run_compose):
-    """读取本项目正在运行的 Core、网关的环境和配置摘要，以核实切换前的现场。"""
+def _live_hashes(run_compose):
+    """读取本项目正在运行的 Core、网关的 Compose 配置摘要。"""
     ids = []
     for name in ("core", "gateway"):
         output = run_compose(
@@ -64,22 +64,18 @@ def _live_services(run_compose):
             raise ValueError(f"需要一个运行中的 {name} 容器，请在已启动本项目的业务机执行 --test。")
         ids.extend(output)
 
-    # 只读取容器配置，凭据留在进程内，不能作为命令参数或诊断信息输出。
+    # 只取 Compose 标签即可核对已部署的设置和端口发布规则。
     records = subprocess.run(
-        ["docker", "inspect", "--type", "container", "--format", "{{json .Config}}", *ids],
+        ["docker", "inspect", "--type", "container", "--format", "{{json .Config.Labels}}", *ids],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
     live = {}
     for line in records:
-        config = json.loads(line)
-        labels = config["Labels"]
+        labels = json.loads(line)
         name = labels["com.docker.compose.service"]
-        live[name] = {
-            "hash": labels.get("com.docker.compose.config-hash"),
-            "env": dict(entry.split("=", 1) for entry in config["Env"] if "=" in entry),
-        }
+        live[name] = labels.get("com.docker.compose.config-hash")
     if set(live) != {"core", "gateway"}:
         raise ValueError("未能确认两个运行中的业务容器，请检查 docker compose ps。")
     return live
@@ -91,9 +87,8 @@ def _compose_hashes(run_compose):
     return dict(line.split() for line in result.stdout.splitlines() if line.strip())
 
 
-def _match_baseline(repo, config_path, run_compose, process_env, live):
+def _match_baseline(repo, config_path, run_compose, process_env, expected):
     """按 YAML 和启动角色核对当前容器，确保测试结束后能恢复到同一套业务配置。"""
-    expected = {name: row["hash"] for name, row in live.items()}
     if _compose_hashes(run_compose) == expected:
         return
 
@@ -129,10 +124,12 @@ def _share(repo, config_path, requested, run_compose, process_env, protect_clean
         raise ValueError(
             f"Tailscale 端口 {sorted(occupied)} 已有转发，请在测试配置里选择空闲端口。"
         )
-    live = _live_services(run_compose)
-    _match_baseline(repo, config_path, run_compose, process_env, live)
-    gateway = live["gateway"]["env"]
-    mapping = {public: int(gateway["MYCOMFY_API_PORT"]), admin: int(gateway["MYCOMFY_LOCAL_PORT"])}
+    _match_baseline(repo, config_path, run_compose, process_env, _live_hashes(run_compose))
+    # Funnel 运行在宿主机，转发到已核对的 YAML 发布端口。
+    mapping = {
+        public: int(process_env["MYCOMFY_API_PORT"]),
+        admin: int(process_env["MYCOMFY_LOCAL_PORT"]),
+    }
     origins = [_origin(machine, port) for port in (public, admin)]
     baseline = process_env.copy()
     process_env.update(

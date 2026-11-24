@@ -152,9 +152,13 @@ public:
             "--hash=core,gateway", capture_output=True, text=True
         ).stdout.splitlines()
         hashes = dict(row.split() for row in rows)
+        gateway_ports = {
+            entry["target"]: (entry["host_ip"], int(entry["published"]))
+            for entry in config["services"]["gateway"]["ports"]
+        }
         return {
-            name: {"env": config["services"][name]["environment"], "hash": hashes[name]}
-            for name in ("core", "gateway")
+            "core": {"env": config["services"]["core"]["environment"], "hash": hashes["core"]},
+            "gateway": {"ports": gateway_ports, "hash": hashes["gateway"]},
         }
 
     initial = current()
@@ -219,7 +223,9 @@ public:
             if state.during:
                 state.during()
 
-    monkeypatch.setattr(deploy, "_live_services", lambda _: deepcopy(state.live))
+    monkeypatch.setattr(
+        deploy, "_live_hashes", lambda _: {name: row["hash"] for name, row in state.live.items()}
+    )
     monkeypatch.setattr(deploy, "FunnelClient", SimpleNamespace(discover=Client))
     state.run = lambda requested=private: deploy.run_test_session(
         checkout, base, requested, run_compose, env
@@ -239,12 +245,19 @@ def test_temporary_links_restore_live_services(session, capsys, interrupt):
         assert core["MYCOMFY_PUBLIC_ORIGIN"] == "https://studio.device.ts.net:10000"
         assert core["MYCOMFY_ADMIN_ORIGIN"] == "https://studio.device.ts.net"
         assert core["MYCOMFY_COOKIE_SECURE"] == "true"
-        assert session.live["gateway"]["env"]["MYCOMFY_API_HOST"] == "127.0.0.1"
+        assert session.live["gateway"]["ports"] == {
+            8000: ("127.0.0.1", 18232),
+            8001: ("127.0.0.1", 18233),
+        }
         assert session.forwards == [{10000: 18232, 443: 18233}]
         observed.append(True)
         if interrupt:
             raise KeyboardInterrupt
 
+    assert session.initial["gateway"]["ports"] == {
+        8000: ("0.0.0.0", 18232),
+        8001: ("127.0.0.1", 18233),
+    }
     session.during = verify_live
     try:
         session.run()

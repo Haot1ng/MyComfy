@@ -31,25 +31,34 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
         "--compose",
     ]
 
-    def services(*profile):
-        """读取指定 profile 下的服务定义，仅解析 Compose 配置。"""
+    def compose_config(*profile):
+        """读取指定 profile 下的完整网络与服务定义。"""
         output = subprocess.check_output([*command, *profile, "config", "--format", "json"])
-        return json.loads(output)["services"]
+        return json.loads(output)
 
-    application = services()
+    project = compose_config()
+    application = project["services"]
     assert set(application) == {"gateway", "core", "migrate", "engine", "worker"}
     gateway = application["gateway"]
     assert gateway["depends_on"]["core"]["condition"] == "service_healthy"
-    assert gateway["network_mode"] == application["core"]["network_mode"] == "host"
+    assert application["core"]["network_mode"] == application["migrate"]["network_mode"] == "host"
+    assert set(gateway["networks"]) == {"gateway"}
+    assert (
+        project["networks"]["gateway"]["driver_opts"]["com.docker.network.bridge.enable_icc"]
+        == "false"
+    )
+    # 工作台和后台都默认发布到宿主回环，容器内分别使用固定 TCP 端口。
+    assert {(p["host_ip"], p["published"], p["target"]) for p in gateway["ports"]} == {
+        ("127.0.0.1", "8000", 8000),
+        ("127.0.0.1", "8001", 8001),
+    }
     assert application["core"]["command"] == ["api", "--socket-dir", "/run/mycomfy-api"]
     assert gateway["user"] == application["core"]["user"]
     mounts = {mount["target"]: mount for mount in gateway["volumes"]}
     assert set(mounts) == {"/run/mycomfy-api", "/var/lib/mycomfy-gateway"}
     assert mounts["/run/mycomfy-api"]["read_only"]
     assert set(gateway["environment"]) == {
-        "MYCOMFY_API_HOST",
-        "MYCOMFY_API_PORT",
-        "MYCOMFY_LOCAL_PORT",
+        "MYCOMFY_GATEWAY_BRIDGE",
         "MYCOMFY_GATEWAY_DIR",
         "MYCOMFY_TRUSTED_PROXY_CIDRS",
     }
@@ -61,13 +70,15 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
         assert "@db.internal:3306/" in variables["MYCOMFY_DATABASE_URL"]
 
     # 显式启用数据库 profile 不会改变业务依赖；数据库可直接作为独立启动目标。
-    combined = services("--profile", "database")
+    combined = compose_config("--profile", "database")["services"]
     assert set(combined) - set(application) == {"mysql", "redis"}
     # 只有处理管理请求的 core 获得该来源，其他进程照常使用原有配置。
     assert combined["core"]["environment"]["MYCOMFY_ADMIN_ORIGIN"] == "https://admin.example"
     for name, service in combined.items():
         if name != "core":
             assert "MYCOMFY_ADMIN_ORIGIN" not in service["environment"]
+        if name != "gateway":
+            assert "gateway" not in service.get("networks", {})
     for name in ("mysql", "redis"):
         assert not combined[name].get("depends_on")
         assert combined[name]["ports"][0]["host_ip"] == "127.0.0.1"

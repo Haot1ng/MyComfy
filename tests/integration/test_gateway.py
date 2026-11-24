@@ -18,12 +18,29 @@ from http.server import BaseHTTPRequestHandler
 import pytest
 
 from mycomfy.gateway.metrics import ingest, open_metrics
+from mycomfy.gateway.nginx import render
 
 
 def snapshot(routes):
     """按 Core 的格式构造签名快照。"""
     raw = json.dumps(routes, sort_keys=True, separators=(",", ":")).encode()
     return {"revision": hashlib.sha256(raw).hexdigest(), "routes": routes}
+
+
+def test_admin_listener_is_loopback_outside_the_gateway_bridge(tmp_path, monkeypatch):
+    """检查容器能接收 Docker 转发，独立启动时后台仍只在回环接口监听。"""
+    monkeypatch.delenv("MYCOMFY_GATEWAY_BRIDGE", raising=False)
+    monkeypatch.setenv("MYCOMFY_API_HOST", "192.0.2.10")
+    monkeypatch.setenv("MYCOMFY_API_PORT", "8000")
+    monkeypatch.setenv("MYCOMFY_LOCAL_PORT", "8001")
+    native = render(snapshot([]), tmp_path, tmp_path)
+    assert 'listen "192.0.2.10:8000";' in native
+    assert 'listen "127.0.0.1:8001";' in native
+
+    monkeypatch.setenv("MYCOMFY_GATEWAY_BRIDGE", "1")
+    bridged = render(snapshot([]), tmp_path, tmp_path)
+    assert 'listen "0.0.0.0:8000";' in bridged
+    assert 'listen "0.0.0.0:8001";' in bridged
 
 
 def test_replay_commits_counts_and_offsets_together(tmp_path):

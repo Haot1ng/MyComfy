@@ -35,13 +35,13 @@ paths:
 ports:
   mysql: 3306   # 业务端连接 MySQL 的端口，也是使用内置 MySQL 时发布到宿主机的端口。
   redis: 6379   # 业务端连接 Redis 的端口，也是使用内置 Redis 时发布到宿主机的端口。
-  api: 8000     # 网关在 public.host 上监听的工作台和业务 API 端口。
-  admin: 8001   # 网关在业务机回环地址上监听的管理后台端口。
+  api: 8000     # 工作台和业务 API 的宿主发布端口。Docker 将 public.host 上的此端口映射到网关容器的 8000。
+  admin: 8001   # 管理后台的宿主发布端口。Docker 将 127.0.0.1 上的此端口映射到网关容器的 8001。
 
 # 例如工作台经 HTTPS 代理访问时可填 origin: "https://video.example.com"，后台可填 admin_origin: "https://admin.example.com"。
-# 两个 origin 用于请求来源校验；监听地址由 host 和 ports 指定。如果直接更改工作台端口，请同步更新 origin 中的端口。
+# 两个 origin 用于请求来源校验。Docker 通过 host 和 ports 选择宿主机的发布地址。如果直接更改工作台端口，请同步更新 origin 中的端口。
 public:
-  host: "127.0.0.1"                 # 工作台网关监听的本机地址。回环仅供本机访问；局域网直连可填业务机的局域网地址。
+  host: "127.0.0.1"                 # Docker 发布工作台的宿主地址。回环仅供本机访问，局域网直连可填业务机的局域网 IP。
   origin: "http://127.0.0.1:8000"   # 用户浏览器实际访问工作台的来源，供写请求校验。填协议、主机和可选端口，省略页面路径。
   admin_origin: null                # null 使用本机管理入口。如通过 HTTPS 代理访问后台，填后台的 HTTPS 来源；此时工作台也须为 HTTPS，且两者来源不同。
   trusted_proxy_cidrs: []           # 可信上游代理的 IP 或 CIDR 字符串列表，如 ["10.20.0.5/32"]。空列表按直连对端 IP 限流；仅信任列表中代理转发的客户端地址。

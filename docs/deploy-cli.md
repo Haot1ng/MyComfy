@@ -120,7 +120,8 @@ python3 scripts/deploy.py --compose --help
    ```
 
    构建器从锁定的 Hugging Face 版本下载约 **20.97 GB** 并校验 SHA-256，镜像标签为 `mycomfy-engine-ref2va:local`。首次安装时，引擎会把镜像中的文件复制到持久模型缓存并校验。镜像与数据目录各需约 21 GB，还应为 Docker 构建缓存和新的引擎虚拟环境留出空间。后续部署会复用已校验的模型缓存。[固定权重来源](../examples/deployment/h3-ref2va.models.yaml)
-3. 在业务机的管理后台打开「工作流模板 → 打开 JSON 文件」，选择 [角色参考模板](../examples/strategies/h3-character-reference.strategy.jsonc)，点击「发布新版本」。工作台选取新模板后，上传一张图，填写主体要做的动作即可。模板自动引用 `<Picture 1>`，默认输出 640×384、24 fps、约 5.17 秒的 MP4。[ComfyUI 原生参考视频工作流](https://docs.comfy.org/tutorials/video/minimax/minimax-h3-native)
+3. 更新 Core 和 Worker 后，在管理后台打开「工作流模板 → 打开 JSON 文件」，选择角色参考模板，点击「发布新版本」。工作台选择这个版本后，上传主图，在「场景与动作」中填写希望角色做什么。图 2 和图 3 均可留空，也可以只补其中一张。转头动作可补同一角色的侧面照，全身动作可补能看清服装和体态的照片。模板生成一个连续镜头，默认输出 640×384、24 fps、约 5.17 秒的 MP4。[角色参考模板](../examples/strategies/h3-character-reference.strategy.jsonc) · [ComfyUI 原生参考视频工作流](https://docs.comfy.org/tutorials/video/minimax/minimax-h3-native)
+4. 如需 AI 辅助，在后台选定生效的提示词服务商。工作台点击「扩写提示词」后，可预览并采用结果，也可直接提交原文。仅「场景与动作」字段参与扩写，参考图直接用于视频生成。完整编写要求位于模板的 `prompt_assist.instructions`。若这个模板系列已单独保存过扩写设置，后台设置优先。要更新指令，在「提示词扩写设置」勾选「为此模板启用提示词辅助」，将新指令粘贴到「给 AI 的编写要求」，选中「场景与动作」并保存。
 
 要确认 GPU 已能接单，可在业务机上运行以下只读查询。默认实例为 `gpu0`；如果改过实例名，替换 URL 的最后一段。预期 `accepting` 为 `True`，模型摘要为 `9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779`。
 

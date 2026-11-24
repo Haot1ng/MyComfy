@@ -1,3 +1,4 @@
+from collections import Counter
 from itertools import batched
 from typing import Annotated, Any, Literal
 
@@ -28,6 +29,8 @@ class Binding(ContractModel):
     node_id: str
     node_input: str
     kind: Literal["value", "asset"]
+    # 默认沿用工作流中的原值。只序列化显式启用的裁剪，维持旧模板的内容摘要。
+    omit_node_if_missing: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class Output(ContractModel):
@@ -230,12 +233,32 @@ def validate_strategy(raw):
             invalid(path, "Target workflow node input does not exist")
 
     claimed_targets = set()
+    bindings_per_node = Counter(binding.node_id for binding in version.bindings)
+    output_nodes = {output.node_id for output in version.output_contract}
+    required_fields = set(schema.get("required", []))
     for i, binding in enumerate(version.bindings):
         # 普通用户只提交表单字段，节点及目标输入完全由已发布版本决定。
         if binding.input not in properties:
             invalid(f"/bindings/{i}/input", "Binding does not refer to a declared input")
         target = (binding.node_id, binding.node_input)
         check_target(*target, f"/bindings/{i}")
+        if binding.omit_node_if_missing:
+            rule = properties[binding.input]
+            if (
+                binding.kind != "asset"
+                or binding.input in required_fields
+                or not isinstance(rule, dict)
+                or rule.get("type") != "string"
+                or version.workflow[binding.node_id]["class_type"] != "LoadImage"
+                or binding.node_input != "image"
+            ):
+                invalid(
+                    f"/bindings/{i}/omit_node_if_missing",
+                    "Only an optional string asset bound to LoadImage.image can omit its node",
+                )
+            # 裁剪整节点时，其他绑定和输出契约必须仍有自己的目标。
+            if bindings_per_node[binding.node_id] > 1 or binding.node_id in output_nodes:
+                invalid(f"/bindings/{i}", "An omittable image loader must have a dedicated node")
         if target in claimed_targets:
             invalid(f"/bindings/{i}", "Binding target is already assigned")
         claimed_targets.add(target)

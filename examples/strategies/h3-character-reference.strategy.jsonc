@@ -1,5 +1,5 @@
 // MyComfy 管理后台 → 工作流模板 → 打开 JSON 文件。选中后可预览节点并发布。
-// 一张图片提供角色外观，文字决定角色在新场景中的动作。输出一段带音轨的 MP4。
+// 主图确定角色，最多两张补图提供同一角色的其他视角或细节。文字决定动作与场景。
 {
   "strategy_key": "minimax-h3-character-reference", // 模板系列标识；再次发布同名系列会创建新版本。
   "name": "MiniMax H3 · 角色参考与动作",
@@ -19,10 +19,12 @@
       "class_type": "LoadImage",
       "inputs": {"image": "reference.png"} // Worker 在执行时填入本次上传图片的文件名。
     },
+    "115": {"class_type": "LoadImage", "inputs": {"image": ""}}, // 未上传补充图 2 时，Worker 移除此节点。
+    "116": {"class_type": "LoadImage", "inputs": {"image": ""}}, // 补充图 3 可单独搭配主图。
     "36": {
       "class_type": "StringConcatenate",
       "inputs": {
-        "string_a": "以 <Picture 1> 中动作描述所指的主体为主角，保持其辨识特征与外观连续。以动作描述指定的场景、初始姿态和镜头开始拍摄。",
+        "string_a": "以 <Picture 1> 中动作描述所指的主体为主角，保持其辨识特征与外观连续。如有补充参考图，结合其中同一主体的其他视角或细节。以动作描述指定的场景、初始姿态和镜头开始拍摄。",
         "string_b": "", // 用户输入的动作与场景，或用户手动采用的扩写结果。
         "delimiter": "\n" // 换行后接动作描述。固定参考标记在整个过程中保留。
       }
@@ -35,6 +37,8 @@
         "audio_vae": ["24", 0],
         "prompt": ["36", 0],
         "ref_images.ref_image_0": ["114", 0], // 第一张参考图对应提示词中的 <Picture 1>。
+        "ref_images.ref_image_1": ["115", 0], // 没传图 2 时，Worker 移除此连线和对应的读取节点。
+        "ref_images.ref_image_2": ["116", 0], // 没传图 3 时同理。模型按实际收到的图片顺序编号。
         "ref_image_size": "match", // 按生成画布的像素规模处理参考图。
         "width": 640, "height": 384,
         "length": 124 // 17 × 7 + 5 帧，按 24 fps 播放约 5.17 秒。
@@ -67,8 +71,18 @@
     "properties": {
       "reference_image": {
         "type": "string", "minLength": 1,
-        "title": "角色参考图",
+        "title": "角色主参考图（必传）",
         "description": "上传一张能看清主角的图片。多人合影可先裁出主角，也可以在下方写明角色的位置和特征。"
+      },
+      "reference_image_2": {
+        "type": "string", "minLength": 1,
+        "title": "补充参考图 2（选传）",
+        "description": "可上传同一角色的侧面或四分之三视角，例如补充转头时能看到的特征。"
+      },
+      "reference_image_3": {
+        "type": "string", "minLength": 1,
+        "title": "补充参考图 3（选传）",
+        "description": "可上传同一角色的全身或局部细节。只传主图和这张图也可以。"
       },
       "prompt": {
         "type": "string", "minLength": 1, "maxLength": 8000,
@@ -82,11 +96,13 @@
   },
   "bindings": [
     {"input": "reference_image", "node_id": "114", "node_input": "image", "kind": "asset"}, // 生成上传控件。
+    {"input": "reference_image_2", "node_id": "115", "node_input": "image", "kind": "asset", "omit_node_if_missing": true},
+    {"input": "reference_image_3", "node_id": "116", "node_input": "image", "kind": "asset", "omit_node_if_missing": true},
     {"input": "prompt", "node_id": "36", "node_input": "string_b", "kind": "value"} // 用户只需输入动作文字。
   ],
   "prompt_assist": {
     "fields": ["prompt"], // 仅发送用户主动选择扩写的文字，图片留在视频生成流程。
-    "instructions": "用用户的语言把动作与场景整理成约五秒可完成的单镜头。保留用户点名的主体和特征，把动作写成有先后顺序的可见行为，遵循用户指定的镜头。角色参考标记由工作流添加。只输出可直接用于生成的动作描述，保留用户给出的外观信息，不猜测参考图内容。"
+    "instructions": "你为 MiniMax H3 角色参考视频扩写「场景与动作」。用用户的语言，把原文写成约 5 秒内可完成的一个连续镜头。只输出一段可直接用于生成视频的正文。\n保留用户指定的主体、辨识线索、场景、动作顺序和镜头要求。写清角色起初在做什么、接着怎样动、动作如何收尾。原文很短时，可补充自然的动作节奏或环境反应。用户指定固定镜头时保持机位固定。\n你只能看到文字。沿用用户给出的外观描述，不猜测参考图的数量或内容，不添加新角色。工作流会自动关联参考图，正文中不要写 <Picture N> 标记、标题或解释。"
   },
   "requirements": {
     "comfyui": "2f35f4a08176d993cded35dac3332be4f7287f41", // MyComfy 默认部署的 v0.33.0 提交。
@@ -98,7 +114,7 @@
     }
   },
   "progress_mapping": [
-    {"node_ids": ["114", "36", "104"], "stage": "读取角色参考与动作"},
+    {"node_ids": ["114", "115", "116", "36", "104"], "stage": "读取角色参考与动作"},
     {"node_ids": ["14"], "stage": "生成角色动作"},
     {"node_ids": ["10", "23", "91", "92"], "stage": "解码与导出"}
   ],

@@ -9,6 +9,24 @@ const output = {node_id: "save", path_input: "path", media_type: "video/mp4"};
 const binding = {input: "first_frame", title: "首帧", kind: "asset", node_id: "save", node_input: "image"};
 const base = {name: " 新模板 ", key: "custom-h3", workflowText: graph, output};
 
+test("角色参考模板导入后绑定三路参考图，仅动作文本可扩写", () => {
+  const file = new URL("../../examples/strategies/h3-character-reference.strategy.jsonc", import.meta.url);
+  const template = JSON.parse(stripJsonComments(readFileSync(file, "utf8")));
+  const inputs = template.input_schema;
+  const imageBindings = template.bindings.filter(binding => binding.kind === "asset");
+  assert.deepEqual(imageBindings.map(binding => binding.input), ["reference_image", "reference_image_2", "reference_image_3"]);
+  assert.deepEqual(inputs.required, ["reference_image", "prompt"]);
+  const referenceNode = Object.values(template.workflow).find(node => node.class_type === "MiniMaxH3ReferenceToVideo");
+  for (const [i, binding] of imageBindings.entries()) {
+    assert.equal(template.workflow[binding.node_id].class_type, "LoadImage");
+    assert.deepEqual(referenceNode.inputs["ref_images.ref_image_" + i], [binding.node_id, 0]);
+    assert.equal(Boolean(binding.omit_node_if_missing), i > 0);
+  }
+  assert.deepEqual(promptTextFields(template).map(field => field.name), ["prompt"]);
+  assert.deepEqual(template.prompt_assist.fields, ["prompt"]);
+  assert.ok(template.prompt_assist.instructions.trim());
+});
+
 test("JSONC 仅替换注释和 BOM，保留行列、转义字符串以及数值写法", () => {
   const key = "字段/*注释？*/";
   const prompt = 'https://example.test/路径?x=// "引号" \\ /*提示文字*/ \\\\';

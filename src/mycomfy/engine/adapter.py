@@ -150,6 +150,28 @@ def prepare_workflow(execution, content, inputs, assets, store):
         os.replace(stage, target)
         return f"{execution.id}/{target.name}"
 
+    omitted_nodes = {
+        binding["node_id"]
+        for binding in content["bindings"]
+        if binding.get("omit_node_if_missing") and binding["input"] not in inputs
+    }
+    if omitted_nodes:
+        # 只清理固定工作流的直接节点连线。之后才写入用户值，避免把表单中的数组误认成边。
+        for node_id in omitted_nodes:
+            del workflow[node_id]
+        for node in workflow.values():
+            node_inputs = node["inputs"]
+            for name, value in list(node_inputs.items()):
+                if (
+                    isinstance(value, list)
+                    and len(value) == 2
+                    and isinstance(value[0], str)
+                    and type(value[1]) is int
+                    and value[1] >= 0
+                    and value[0] in omitted_nodes
+                ):
+                    del node_inputs[name]
+
     for binding in content["bindings"]:
         if binding["input"] not in inputs:
             continue

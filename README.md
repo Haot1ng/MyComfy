@@ -26,7 +26,7 @@ MyComfy/
 ```
 
 <details>
-<summary>展开完整文件树（186 个文件，含用途注释）</summary>
+<summary>展开完整文件树（189 个文件，含用途注释）</summary>
 
 ```text
 MyComfy/
@@ -177,7 +177,7 @@ MyComfy/
 │   ├── deployment/
 │   │   └── h3-ref2va.models.yaml                              # 角色参考主模型的锁定来源和校验值
 │   └── strategies/                                            # 视频生成策略
-│       ├── h3-character-reference.strategy.jsonc              # 单张参考图指定角色，文字驱动动作
+│       ├── h3-character-reference.strategy.jsonc              # 一张主图、两张可选补图，支持扩写动作提示词
 │       ├── h3-five-image-20s-segmented-384.strategy.json      # 五图分段视频模板，20 秒、384×384
 │       └── h3-five-image-20s-segmented-640.strategy.json      # 五图分段视频模板，20 秒、640×640
 ├── tests/                                                     # 自动化测试
@@ -220,6 +220,7 @@ MyComfy/
 │   │   ├── test_contracts.py                                  # 核对批次摘要、策略约束与函数注释
 │   │   ├── test_deployment_config.py                          # 验证部署 YAML 解析与参数传递
 │   │   ├── test_funnel_client.py                              # 验证双端口 Funnel 转发与清理
+│   │   ├── test_optional_image_bindings.py                    # 验证可选图片缺省时的节点与连线裁剪
 │   │   ├── test_segment_video.py                              # 验证 FFmpeg 分段编码、拼接与清理
 │   │   ├── test_segmented_templates.py                        # 核对 H3 分段模板与已部署节点
 │   │   ├── test_strategy_prompt_assist.py                     # 验证策略发布时的扩写字段约束

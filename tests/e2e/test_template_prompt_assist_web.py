@@ -209,8 +209,18 @@ def test_template_assist_import_live_save_and_create(admin_origin):
             }
 
 
+def read_example_download(page, link, directory, expected_name):
+    """保存浏览器实际下载的文件，核对用户在文件选择器中能看到的名称。"""
+    with page.expect_download() as delivery:
+        link.click()
+    assert delivery.value.suggested_filename == expected_name
+    file = directory / expected_name
+    delivery.value.save_as(file)
+    return file
+
+
 def test_download_example_matches_display_and_imports(admin_origin, tmp_path):
-    """通过打开 JSON 旁的示例复制和下载同一原文，再用下载的文件完成首次发布。"""
+    """核对带注释的默认示例与标准 JSON，实际从 JSONC 文件和粘贴框各发布一次。"""
     playwright = pytest.importorskip("playwright.sync_api")
     with playwright.sync_playwright() as engine:
         executable = which("chromium") or which("google-chrome") or engine.chromium.executable_path
@@ -223,30 +233,77 @@ def test_download_example_matches_display_and_imports(admin_origin, tmp_path):
             page.goto(admin_origin + "/templates.html")
             page.get_by_role("button", name="查看 JSON 示例").click()
             dialog = page.get_by_role("dialog", name="模板 JSON 示例")
-            download = dialog.get_by_role("link", name="下载 JSON")
+            download = dialog.locator("#example-download")
             playwright.expect(download).to_be_visible()
-            displayed = dialog.get_by_role("textbox", name="示例 JSON 原文").input_value()
-            dialog.get_by_role("button", name="复制 JSON").click()
-            playwright.expect(dialog.get_by_role("status")).to_have_text("示例 JSON 已复制。")
+            displayed = dialog.locator("#example-json").input_value()
+            with pytest.raises(json.JSONDecodeError):
+                json.loads(displayed)
+            dialog.locator("#example-copy").click()
+            playwright.expect(dialog.get_by_role("status")).to_contain_text("已复制")
             assert page.evaluate("navigator.clipboard.readText()") == displayed
-            with page.expect_download() as delivery:
-                download.click()
-            filename = delivery.value.suggested_filename
-            assert filename == "example-h3-text-to-video.strategy.json"
-            file = tmp_path / filename
-            delivery.value.save_as(file)
+
+            # 显示的注释能直接复制或下载；另一份标准 JSON 可供严格解析器使用。
+            file = read_example_download(
+                page, download, tmp_path, "example-h3-text-to-video.strategy.jsonc"
+            )
             assert file.read_bytes() == displayed.encode("utf-8")
-            body = json.loads(displayed)
-            assert body["strategy_key"] == "example-h3-text-to-video"
-            assert "prompt_assist" not in body
+            plain = read_example_download(
+                page,
+                dialog.locator("#example-download-json"),
+                tmp_path,
+                "example-h3-text-to-video.strategy.json",
+            )
+            body = json.loads(plain.read_bytes())
+            preset = page.request.get(admin_origin + "/presets/h3-t2v.strategy.json").json()
+            preset.pop("prompt_assist", None)
+            assert body == {
+                **preset,
+                "strategy_key": "example-h3-text-to-video",
+                "name": "示例 · H3 文生视频",
+            }
             assert dialog.evaluate("el => el.getBoundingClientRect().width <= window.innerWidth")
             dialog.get_by_role("button", name="关闭").click()
 
-            # 实际导入下载文件，通过服务端完整策略校验，不依赖选配的 AI 规则。
-            page.get_by_label("打开 JSON 文件").set_input_files(file)
-            playwright.expect(page.locator("#preview-source")).to_have_text(filename)
+            # 文件选择器须允许浏览到 JSONC；后端收到可按标准 JSON 解析的完整策略。
+            picker = page.locator("#template-file")
+            assert ".jsonc" in picker.get_attribute("accept").split(",")
+            picker.set_input_files(file)
+            playwright.expect(page.locator("#preview-source")).to_have_text(file.name)
             playwright.expect(page.locator("#publish-template")).to_be_enabled()
             version, stored = publish_template(page, admin_origin)
-            assert version == 1 and stored["strategy_key"] == body["strategy_key"]
+            assert version == 1 and stored["strategy_key"] == "example-h3-text-to-video"
             assert stored["workflow"] == body["workflow"]
             assert "prompt_assist" not in stored
+
+            # 按示例说明启用被注释的四行配置，保留行尾的字段说明和其余工作流注释。
+            lines = displayed.splitlines()
+            start = next(
+                i for i, line in enumerate(lines) if line.lstrip().startswith('// "prompt_assist":')
+            )
+            field_help = next(line for line in lines[start : start + 4] if '"fields":' in line)
+            assert "input_schema.properties" in field_help and "允许扩写" in field_help
+            for i in range(start, start + 4):
+                assert lines[i].lstrip().startswith("// ")
+                lines[i] = lines[i].replace("// ", "", 1)
+            enabled_example = "\n".join(lines)
+
+            # 通过粘贴框发布：真实用户可启用示例给出的文本字段，且种子保持 64 位精度。
+            noise = next(
+                node for node, spec in body["workflow"].items() if "noise_seed" in spec["inputs"]
+            )
+            original = str(body["workflow"][noise]["inputs"]["noise_seed"])
+            seed = 18446744073709551613
+            assert enabled_example.count(original) == 1
+            page.locator("#paste-toggle").click()
+            page.locator("#json-text").fill(enabled_example.replace(original, str(seed)))
+            page.locator("#preview-paste").click()
+            playwright.expect(page.locator("#assist-enabled")).to_be_checked()
+            field_options = page.get_by_role("group", name="允许扩写的字段")
+            playwright.expect(field_options).to_contain_text("扩写提示词")
+            playwright.expect(field_options).to_contain_text("字段名 prompt")
+            playwright.expect(page.locator('#assist-fields input[value="prompt"]')).to_be_checked()
+            playwright.expect(page.locator("#publish-template")).to_be_enabled()
+            version, stored = publish_template(page, admin_origin)
+            assert version == 2 and stored["workflow"][noise]["inputs"]["noise_seed"] == seed
+            assert stored["prompt_assist"]["instructions"].strip()
+            assert stored["prompt_assist"]["fields"] == ["prompt"]

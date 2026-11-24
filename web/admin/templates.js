@@ -1,5 +1,6 @@
 import { renderWorkflowPreview } from "./workflow-graph.js";
 import { renderAdminNav } from "./navigation.js";
+import { stripJsonComments } from "./template-draft.js";
 import { mountPromptAssist, mountTemplateEditor } from "./template-editor.js";
 import { builtins, readTemplateCatalog } from "./template-catalog.js";
 
@@ -112,9 +113,10 @@ async function loadPreview(label, read, sourceUrl = null, publishedTemplate = nu
   message("preview-message", "正在读取模板…");
   sourceLabel.textContent = label;
   try {
-    // 图形只消费解析后的对象，发布保留原文以保全 ComfyUI 的大整数种子。
-    const text = (await read()).replace(/^\uFEFF/, "");
+    const original = await read();
     if (request !== loadNumber) return;
+    // 图形消费解析后的对象，发布直接发送剥除注释的原文，以保全 ComfyUI 的大整数种子。
+    const text = stripJsonComments(original);
     let raw;
     try {
       // 新浏览器提供数值原文。旧浏览器只能显示舍入值时，在节点详情标明近似值。
@@ -130,7 +132,8 @@ async function loadPreview(label, read, sourceUrl = null, publishedTemplate = nu
     const kind = renderWorkflowPreview(graph, raw);
     message("preview-message", "");
     if (kind !== "strategy") {
-      if (kind === "api") previewedApi = text;
+      // 从当前预览继续创建模板时，维护者仍可在编辑区看到原来的注释。
+      if (kind === "api") previewedApi = original;
       byId("publish-description").textContent = kind === "canvas"
         ? "ComfyUI 画布可在本页预览。请从 ComfyUI 导出 API 格式，再通过「新增模板」绑定输入和视频输出。"
         : "点击「新增模板」，可以从这份 API 工作流创建自己的策略。";

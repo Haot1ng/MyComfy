@@ -142,8 +142,8 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
       </select></label>
       <fieldset class="editor-custom" hidden disabled>
         <legend>自定义工作流</legend>
-        <label>选择 API JSON 文件<input id="new-workflow-file" type="file" accept=".json,application/json"></label>
-        <label>工作流 JSON<textarea id="new-template-workflow" rows="5" spellcheck="false" placeholder="粘贴从 ComfyUI 导出的 API 格式 JSON"></textarea></label>
+        <label>选择 API 工作流文件<input id="new-workflow-file" type="file" accept=".json,.jsonc,application/json"></label>
+        <label>工作流 JSON<textarea id="new-template-workflow" rows="5" spellcheck="false" placeholder="粘贴 ComfyUI API 格式的 JSON 或带注释的 JSONC"></textarea></label>
         <button type="button" data-read>读取节点</button>
         <div data-config hidden>
           <div class="editor-binding-head"><h3>工作台输入</h3><button type="button" data-add>添加输入</button></div>

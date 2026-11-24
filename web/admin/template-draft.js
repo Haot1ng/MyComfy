@@ -1,8 +1,43 @@
 import {parseWorkflow} from "./workflow-graph.js";
 
-/** 读取 JSON 文件，兼容 UTF-8 BOM，并以页面可展示的文字报告错误。 */
+/** 将 JSONC 注释和文件头 BOM 换成空白，保留数值原文、字符串、换行和错误位置。 */
+export function stripJsonComments(text) {
+  const source = text.replace(/^\uFEFF/, " ");
+  const parts = [];
+  let start = 0;
+  let quoted = false;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    // 转义字符与其后一个字符同属字符串，提示词里的 URL、引号和注释标记均照原样保留。
+    if (quoted) {
+      if (char === "\\") i++;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === "/" && (source[i + 1] === "/" || source[i + 1] === "*")) {
+      let end = i + 2;
+      if (source[i + 1] === "/") {
+        while (end < source.length && source[end] !== "\r" && source[end] !== "\n") end++;
+      } else {
+        const close = source.indexOf("*/", end);
+        if (close === -1) {
+          const line = source.slice(0, i).split(/\r\n|[\r\n]/).length;
+          throw new Error("第 " + line + " 行的块注释缺少结束标记 */。");
+        }
+        end = close + 2;
+      }
+      // 注释相邻的两个值仍需由 JSON 语法分隔；用空格占位也保留 UTF-16 列偏移。
+      parts.push(source.slice(start, i), source.slice(i, end).replace(/[^\r\n]/g, " "));
+      start = end;
+      i = end - 1;
+    }
+  }
+  return parts.length ? parts.join("") + source.slice(start) : source;
+}
+
+/** 读取标准或带注释的 JSON 文档，返回严格 JSON 正文及供预览使用的解析值。 */
 function readDocument(text) {
-  const source = text.trim();
+  const source = stripJsonComments(text);
   try {
     return {source, value: JSON.parse(source)};
   } catch {
@@ -10,9 +45,8 @@ function readDocument(text) {
   }
 }
 
-/** 从可执行工作流中列出可绑定的标量输入，节点间连线由预览解析器统一校验。 */
-export function readApiInputs(workflowText) {
-  const {value} = readDocument(workflowText);
+/** 从已解析的工作流中列出可绑定的标量输入，节点间连线由预览解析器统一校验。 */
+function apiInputs(value) {
   if (Array.isArray(value?.nodes)) throw new Error("请在 ComfyUI 中导出 API 格式的工作流。");
   const {kind, graph} = parseWorkflow(value);
   if (kind !== "api") throw new Error("自定义工作流需要 ComfyUI API 节点 JSON。");
@@ -27,6 +61,11 @@ export function readApiInputs(workflowText) {
     }
     return {id: node.id, type: node.type, fields};
   });
+}
+
+/** 在新增模板表单中读取 API 工作流的可绑定节点。 */
+export function readApiInputs(workflowText) {
+  return apiInputs(readDocument(workflowText).value);
 }
 
 /** 修改已解析 JSON 的顶层成员。以原文保留其余成员，包括嵌套工作流的 64 位种子。 */
@@ -106,7 +145,8 @@ export function buildTemplateDraft({name, key, presetText, workflowText, binding
   }
   if (presetText != null) return copyPreset(presetText, identity);
 
-  const nodes = readApiInputs(workflowText);
+  const {source, value} = readDocument(workflowText);
+  const nodes = apiInputs(value);
   const pathField = targetField(nodes, output?.node_id, output?.path_input);
   if (pathField.type !== "string" || !/^video\/[a-z0-9][a-z0-9.+-]*$/.test(output.media_type)) {
     throw new Error("请指定保存节点的字符串路径输入和视频媒体类型。");
@@ -140,6 +180,6 @@ export function buildTemplateDraft({name, key, presetText, workflowText, binding
     output_contract: [{role: "video", node_id: output.node_id, path_input: output.path_input, media_types: [output.media_type]}],
     requirements: {}, progress_mapping: [], scheduling: {}, retry: {}, artifacts: {},
   };
-  // 配置字段由 JSON.stringify 负责转义，工作流原文经校验后嵌入以保留 64 位种子。
-  return '{"workflow":' + workflowText.trim() + ',' + JSON.stringify(metadata).slice(1);
+  // 配置字段由 JSON.stringify 负责转义，工作流嵌入已剥除注释的正文并保留 64 位种子。
+  return '{"workflow":' + source.trim() + ',' + JSON.stringify(metadata).slice(1);
 }

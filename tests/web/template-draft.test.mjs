@@ -1,13 +1,49 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import test from "node:test";
-import {buildTemplateDraft, promptTextFields, readApiInputs, writePromptAssist} from "../../web/admin/template-draft.js";
+import {buildTemplateDraft, promptTextFields, readApiInputs, stripJsonComments, writePromptAssist} from "../../web/admin/template-draft.js";
 
 const graph = '{"prompt":{"class_type":"Text","inputs":{"text":"","seed":18446744073709551613,"flag":true,"cfg":4.5}},' +
   '"save":{"class_type":"SaveVideo","inputs":{"video":["prompt",0],"path":"video","image":"first.png"}}}';
 const output = {node_id: "save", path_input: "path", media_type: "video/mp4"};
 const binding = {input: "first_frame", title: "首帧", kind: "asset", node_id: "save", node_input: "image"};
 const base = {name: " 新模板 ", key: "custom-h3", workflowText: graph, output};
+
+test("JSONC 仅替换注释和 BOM，保留行列、转义字符串以及数值写法", () => {
+  const key = "字段/*注释？*/";
+  const prompt = 'https://example.test/路径?x=// "引号" \\ /*提示文字*/ \\\\';
+  const literal = JSON.stringify({[key]: prompt}).slice(1, -1);
+  const source = '\uFEFF// 首行 \r\n{/* 🐈\r跨行\n说明 */' + literal +
+    ',"seed":18446744073709551613, // 留在原列\r"cfg":1.000e+03,"zero":-0}//末行';
+  const strict = stripJsonComments(source);
+  assert.equal(strict.length, source.length);
+  assert.deepEqual(strict.match(/[\r\n]/g), source.match(/[\r\n]/g));
+  for (const token of [literal, "18446744073709551613", "1.000e+03", "-0"]) {
+    assert.equal(strict.indexOf(token), source.indexOf(token));
+  }
+  assert.equal(JSON.parse(strict)[key], prompt);
+  assert.equal(stripJsonComments(strict), strict);
+});
+
+test("未闭合的块注释报告原始行号，注释不能拼接数值或开通其他 JSON 扩展", () => {
+  assert.throws(() => stripJsonComments('// line\r\n{\r"n":1 /*未闭合'), /第 3 行.+结束标记/);
+  for (const invalid of ['[1/*说明*/2]', '{"n":1,/*说明*/}', '{"s":"未闭合 /*', '{"n":1}/']) {
+    assert.throws(() => JSON.parse(stripJsonComments(invalid)), SyntaxError);
+  }
+  assert.equal(stripJsonComments('{"s":"/* 未闭合的文字"}'), '{"s":"/* 未闭合的文字"}');
+});
+
+test("带注释的 API 工作流与完整模板均能生成严格 JSON 并精确保留种子", () => {
+  const workflowText = "\uFEFF// 工作流\r\n" + graph.replace('"seed":', '/* 仅作说明 */ "seed":') + "\n// EOF";
+  assert.deepEqual(readApiInputs(workflowText), readApiInputs(graph));
+  const built = buildTemplateDraft({...base, workflowText, bindings: [binding]});
+  const copied = buildTemplateDraft({presetText: "// 模板\n" + built, name: "复制", key: "forked"});
+  for (const result of [built, copied]) {
+    assert.equal(JSON.parse(result).workflow.save.class_type, "SaveVideo");
+    assert.ok(result.includes('"seed":18446744073709551613'));
+    assert.doesNotMatch(result, /仅作说明|\/\/ 模板|\/\/ EOF/);
+  }
+});
 
 test("裸 API 工作流生成可发布策略，标量、连线和原始随机种子处理正确", () => {
   const nodes = readApiInputs(graph);

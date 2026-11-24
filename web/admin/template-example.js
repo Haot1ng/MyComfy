@@ -1,4 +1,4 @@
-import {buildTemplateDraft, writePromptAssist} from "./template-draft.js";
+import {stripJsonComments} from "./template-draft.js";
 
 const dialog = document.getElementById("template-example");
 const source = document.getElementById("example-json");
@@ -13,18 +13,20 @@ async function openExample() {
   status.textContent = "正在读取示例…";
   status.dataset.tone = "";
   try {
-    const response = await fetch("./presets/h3-t2v.strategy.json", {
+    const response = await fetch("./presets/example-h3-text-to-video.strategy.jsonc", {
       mode: "same-origin", credentials: "omit", redirect: "error",
     });
     if (!response.ok) throw new Error();
-    // 仅替换示例系列的名称和标识，移除可选的 AI 规则。节点、模型和数值沿用同版本预设。
-    const draft = buildTemplateDraft({
-      key: "example-h3-text-to-video", name: "示例 · H3 文生视频", presetText: await response.text(),
-    });
-    source.value = writePromptAssist(draft, null) + "\n";
-    // 同一份只读原文用于预览、下载和复制；本页仅创建一个下载 URL。
-    const file = new Blob([source.value], {type: "application/json;charset=utf-8"});
-    document.getElementById("example-download").href = URL.createObjectURL(file);
+    const annotated = await response.text();
+    // 去掉注释占用的空行和行尾空白。直接保留 JSON 数字原文，避免 64 位种子被舍入。
+    const strict = stripJsonComments(annotated).split(/\r?\n/).map(line => line.trimEnd())
+      .filter(Boolean).join("\n") + "\n";
+    JSON.parse(strict);
+    const jsonFile = new Blob([strict], {type: "application/json;charset=utf-8"});
+    const annotatedFile = new Blob([annotated], {type: "text/plain;charset=utf-8"});
+    document.getElementById("example-download-json").href = URL.createObjectURL(jsonFile);
+    document.getElementById("example-download").href = URL.createObjectURL(annotatedFile);
+    source.value = annotated;
     source.hidden = false;
     document.getElementById("example-actions").hidden = false;
     status.textContent = "";
@@ -36,11 +38,11 @@ async function openExample() {
   }
 }
 
-/** 复制完整 JSON，浏览器未授权剪贴板时选中原文供用户手动复制。 */
+/** 复制含注释的示例原文，浏览器未授权剪贴板时选中原文供用户手动复制。 */
 async function copyExample() {
   try {
     await navigator.clipboard.writeText(source.value);
-    status.textContent = "示例 JSON 已复制。";
+    status.textContent = "带注释的示例已复制。";
   } catch {
     source.focus();
     source.select();

@@ -1,0 +1,190 @@
+// MyComfy 完整策略示例。用户填写一句提示词后，MiniMax H3 生成带音轨的短视频。
+// 从表单到成品的顺序为 input_schema.properties.prompt → bindings → 节点 131
+// → 节点 125 采样 → 节点 122、121 解码画面和声音 → 节点 130 合成 → 节点 92 保存。
+// 这份 JSONC 用双斜线写注释。调用只接受标准 JSON 的接口时，须先去除注释。
+{
+  // 模板系列的唯一标识。首次发布创建 v1。之后用相同标识发布会生成下一版本。
+  "strategy_key": "example-h3-text-to-video",
+  // 工作台和管理后台显示的名称。
+  "name": "示例 · H3 文生视频",
+
+  // ComfyUI 的 API 格式工作流。每个键都是本图内的节点 ID（字符串），如 "127"。
+  // 连线用 [上游节点 ID, 输出槽序号] 表示，槽序号从 0 开始。ComfyUI 按依赖执行。
+  "workflow": {
+    // 节点 127 提供 H3 生成模型，输出槽 0 供引导器和调度器使用。
+    "127": {
+      "class_type": "UNETLoader", // ComfyUI 用这个注册名称找到扩散模型加载节点。
+      "inputs": { // 加载模型时使用的文件和精度选项。
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", // diffusion_models 目录中的权重文件。
+        "weight_dtype": "default" // 沿用 ComfyUI 对该权重的数据类型处理方式。
+      }
+    },
+    // 节点 128 提供文本编码器，把用户的提示词转换为 H3 能使用的条件。
+    "128": {
+      "class_type": "CLIPLoader", // 加载文本编码器的节点类型。
+      "inputs": { // 指定权重、编码器类型及运行设备。
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", // text_encoders 目录中的权重文件。
+        "type": "minimax", // 让加载器使用 MiniMax 的编码方式。
+        "device": "default" // 由 ComfyUI 管理编码器的运行设备。
+      }
+    },
+    // 节点 119 的输出槽 0 提供视频 VAE，节点 122 用它把视频潜变量还原为画面。
+    "119": {
+      "class_type": "VAELoader", // 加载变分自编码器（VAE）。
+      "inputs": { // 选择视频所用的 VAE。
+        "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors" // vae 目录中的视频权重文件。
+      }
+    },
+    // 节点 120 的输出槽 0 提供音频 VAE，供节点 121 解码声音。
+    "120": {
+      "class_type": "VAELoader", // 同一种加载器也可以读取音频 VAE。
+      "inputs": { // 此处选用音频权重。
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors" // vae 目录中的音频权重文件。
+      }
+    },
+    // 节点 131 生成提示词条件和初始音视频潜变量。本例省略可选的首图、尾图输入，走文生视频流程。
+    "131": {
+      "class_type": "MiniMaxH3ImageToVideo", // H3 节点同时支持仅输入文字的用法。
+      "inputs": { // 指定提示词来源、生成尺寸和长度。
+        "clip": ["128", 0], // 从节点 128 的第一个输出取得文本编码器。
+        "vae": ["119", 0], // 传入节点 119 的视频 VAE。带关键帧时，H3 也用它编码图像。
+        "prompt": "", // 工作流占位值。任务提交后，Worker 用表单的 prompt 替换这里的空字符串。
+        "width": 864, // 视频画布宽度，单位为像素。
+        "height": 480, // 视频画布高度，单位为像素。
+        "length": 124 // 生成帧数。124 符合 H3 的 17k+5 帧网格，按 24 fps 播放约 5.17 秒。
+      }
+    },
+    // 节点 129 按种子产生采样所需的噪声。
+    "129": {
+      "class_type": "RandomNoise", // 构造随机噪声源。
+      "inputs": { // 本模板把种子保存在工作流里，表单只开放提示词。
+        "noise_seed": 757358688076805 // 固定初始噪声的随机种子。比较两种提示词时可保持此值相同。
+      }
+    },
+    // 节点 126 组合模型和提示词条件，让采样朝用户描述的内容演化。
+    "126": {
+      "class_type": "BasicGuider", // 构建基础采样引导器。
+      "inputs": { // 引导器需要模型和条件两条连线。
+        "model": ["127", 0], // 节点 127 的生成模型。
+        "conditioning": ["131", 0] // 节点 131 的第一个输出是已编码的正向条件。
+      }
+    },
+    // 节点 123 选采样算法。节点 124 单独确定每一步使用的噪声水平。
+    "123": {
+      "class_type": "KSamplerSelect", // 按名称取得采样器对象。
+      "inputs": { // 这里使用原 H3 预设选择的算法。
+        "sampler_name": "res_multistep" // ComfyUI 注册的多步采样算法名。
+      }
+    },
+    "124": { // 节点 124 输出本段采样所用的噪声水平序列（sigmas）。
+      "class_type": "BasicScheduler", // 根据模型、步数和降噪强度计算调度序列。
+      "inputs": { // 这些设置直接影响采样过程。
+        "model": ["127", 0], // 读取节点 127 模型使用的采样配置。
+        "scheduler": "simple", // 使用 ComfyUI 内置的 simple 调度方式。
+        "steps": 20, // 本次采样使用 20 步。
+        "denoise": 1.0 // 采用完整的降噪范围。
+      }
+    },
+    "125": { // 节点 125 执行采样。视频和音频解码节点都读取它的输出槽 0。
+      "class_type": "SamplerCustomAdvanced", // 按外部传入的噪声、引导器和调度序列执行采样。
+      "inputs": { // 各输入分别连接生成采样所需数据的节点。
+        "noise": ["129", 0], // 节点 129 按固定种子产生的噪声源。
+        "guider": ["126", 0], // 节点 126 的带条件引导器。
+        "sampler": ["123", 0], // 节点 123 选择的采样算法。
+        "sigmas": ["124", 0], // 节点 124 算出的噪声水平序列。
+        "latent_image": ["131", 1] // 节点 131 的第二个输出（序号 1）是初始音视频潜变量。
+      }
+    },
+    "122": { // 节点 122 恢复视频画面。
+      "class_type": "VAEDecode", // 从 H3 的采样结果中解码视频分支。
+      "inputs": { // 需要已经采样的潜变量和配套视频 VAE。
+        "samples": ["125", 0], // 节点 125 的采样结果。
+        "vae": ["119", 0] // 使用节点 119 的视频 VAE 得到逐帧图像。
+      }
+    },
+    "121": { // 节点 121 恢复音轨。
+      "class_type": "VAEDecodeAudio", // 从 H3 的采样结果中解码音频分支。
+      "inputs": { // 与视频共用一次采样，使用独立的音频解码器。
+        "samples": ["125", 0], // 同一份音视频联合潜变量。
+        "vae": ["120", 0] // 使用节点 120 的音频 VAE 得到音频波形。
+      }
+    },
+    "130": { // 节点 130 把画面和声音组合为视频对象。
+      "class_type": "CreateVideo", // 创建可由 SaveVideo 保存的视频。
+      "inputs": { // 组合媒体轨道并设置视频播放参数。
+        "images": ["122", 0], // 来自节点 122 的图像帧序列。
+        "audio": ["121", 0], // 来自节点 121 的音频。
+        "fps": 24, // 每秒播放 24 帧。
+        "bit_depth": 8 // 视频编码使用 8 位颜色深度。
+      }
+    },
+    "92": { // 节点 92 将最终文件写入输出目录。下方的 output_contract 用此 ID 找到产物。
+      "class_type": "SaveVideo", // ComfyUI 的视频保存节点。
+      "inputs": { // 指定要保存的视频及其容器格式。
+        "video": ["130", 0], // 接收节点 130 组合的音视频。
+        "filename_prefix": "video/MiniMax_H3", // ComfyUI 的文件名前缀。MyComfy 执行时会改写为此任务执行专属的路径。
+        "format": "mp4", // 输出 MP4 容器。
+        "codec": "auto" // 由 ComfyUI 为该容器选择编码器。
+      }
+    }
+  },
+
+  // 工作台依据此 JSON Schema 呈现任务输入。本例只开放一个文本框。
+  "input_schema": {
+    "type": "object", // 每条任务以一个包含具名字段的对象传入参数。
+    "properties": { // 列出用户可以填写的字段及其规则。
+      "prompt": { // 表单字段名。用户可以填写“一列电车驶过雨夜街口，镜头缓缓向左跟拍”。
+        "type": "string", // 接受文本。
+        "title": "提示词", // 工作台向用户显示的字段名称。
+        "minLength": 1 // 至少输入一个字符。
+      }
+    },
+    "required": ["prompt"], // 提交任务时必须包含 prompt。
+    "additionalProperties": false // 拒绝此表单未声明的其他字段。
+  },
+
+  // 可选扩写默认关闭。若要随模板启用，请去掉下方从 prompt_assist 到右花括号这四行开头的 //，保留末尾逗号。
+  // 后台还须启用提示词服务商。用户点击扩写后才请求可编辑的候选文本。
+  // "prompt_assist": { // 此块配置本模板的 AI 写作辅助。
+  //   "instructions": "为 MiniMax H3 文生视频完善提示词，使用用户的语言，保留主体、场景和创作意图。把抽象描述转成可见的动作和时间顺序，按需要补充构图、光线及一种连贯的运镜。只输出可直接用于视频生成的正文。", // 发给服务商的写作指令。
+  //   "fields": ["prompt"] // 每项填写 input_schema.properties 下允许扩写的文本字段名。本例选中 prompt。节点 ID（如 131）用于下方的绑定。
+  // },
+
+  "bindings": [ // Worker 在提交给 ComfyUI 前按此列表把本次任务的输入写进工作流。
+    {
+      "input": "prompt", // 读取表单中名为 prompt 的值。
+      "node_id": "131", // 指向 workflow 中键为 "131" 的 H3 节点。
+      "node_input": "prompt", // 将用户最终采用的文字写入 workflow["131"].inputs.prompt。
+      "kind": "value" // 普通参数直接赋值。工作流需要用户上传素材时使用 asset 绑定以处理素材文件。
+    }
+  ],
+  "requirements": { // 任务要求的运行环境，平台据此将任务匹配到兼容的引擎实例。
+    "comfyui": "2f35f4a08176d993cded35dac3332be4f7287f41", // 本模板使用的 ComfyUI v0.33.0 对应的 Git 提交。
+    "models": { // 键是引擎部署配置中的模型标识。值是该权重文件的 SHA-256 摘要。
+      "h3-fl2va": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a", // 节点 127 加载的 H3 生成模型。
+      "h3-text": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6", // 节点 128 加载的文本编码器。
+      "h3-video-vae": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e", // 节点 119 加载的视频 VAE。
+      "h3-audio-vae": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48" // 节点 120 加载的音频 VAE。
+    }
+  },
+  "progress_mapping": [ // 将 ComfyUI 执行中的节点 ID 映射成工作台可读的阶段名称。
+    {
+      "node_ids": ["125"], // 匹配采样节点的执行进度。
+      "stage": "采样" // 此阶段在工作台显示的文字。
+    },
+    {
+      "node_ids": ["92"], // 匹配写入成品文件的节点。
+      "stage": "保存视频" // 此阶段在工作台显示的文字。
+    }
+  ],
+  "output_contract": [ // 声明 Worker 应从哪些节点收集什么产物。本例按默认数量要求收集一个可解码视频。
+    {
+      "role": "video", // 平台用此角色标识交付给用户的视频产物。
+      "node_id": "92", // 从保存节点 92 的输出记录找到成品。
+      "media_types": ["video/mp4"] // 允许的文件媒体类型，与节点 92 的 MP4 格式一致。
+    }
+  ],
+  "scheduling": {}, // 使用默认调度设置，任务基础优先级 base_priority 为 0。
+  "retry": {}, // 使用默认自动重试策略，max_retries 为 0。用户可用的手动重试次数由平台配置。
+  "artifacts": {} // 使用默认产物策略，expose_after_cancel 为 false，已取消任务的产物对用户隐藏。
+}

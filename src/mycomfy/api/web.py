@@ -38,6 +38,7 @@ ADMIN_FILES = (
     "template-editor.css",
     "workflow-graph.js",
     "graph.css",
+    "presets/example-h3-text-to-video.strategy.jsonc",
     "presets/h3-t2v.strategy.json",
     "presets/h3-i2v.strategy.json",
 )

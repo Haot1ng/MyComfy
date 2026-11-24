@@ -30,7 +30,7 @@
             <h2 id="source-title">选择模板</h2>
             <div class="template-actions">
               <button type="button" id="refresh-published">刷新列表</button>
-              <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,application/json"></label>
+              <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,.jsonc,application/json"></label>
               <button id="open-template-example" type="button" aria-haspopup="dialog" aria-controls="template-example">查看 JSON 示例</button>
               <button id="paste-toggle" type="button" aria-expanded="false" aria-controls="paste-editor">粘贴 JSON</button>
             </div>
@@ -40,12 +40,13 @@
               <h2 id="example-title">模板 JSON 示例</h2>
               <form method="dialog"><button type="submit" autofocus>关闭</button></form>
             </div>
-            <p>这份 H3 文生视频模板可以直接导入。<code>input_schema</code> 定义工作台的提示词输入框，<code>bindings</code> 把输入值写入 <code>workflow</code> 的生成节点，<code>output_contract</code> 指定要保存的视频。</p>
+            <p>这份 H3 文生视频模板带有逐字段注释，可以直接导入。文件中注释掉的 <code>prompt_assist</code> 段演示了如何给“提示词”输入框启用扩写，也可以在发布后到后台勾选。</p>
             <textarea id="example-json" aria-label="示例 JSON 原文" rows="14" wrap="off" readonly spellcheck="false" hidden></textarea>
             <p id="example-status" class="template-message" role="status"></p>
             <div id="example-actions" class="template-actions" hidden>
-              <a id="example-download" class="action" download="example-h3-text-to-video.strategy.json">下载 JSON</a>
-              <button type="button" id="example-copy">复制 JSON</button>
+              <a id="example-download" class="action" download="example-h3-text-to-video.strategy.jsonc">下载带注释的 JSONC</a>
+              <a id="example-download-json" class="action" download="example-h3-text-to-video.strategy.json">下载标准 JSON</a>
+              <button type="button" id="example-copy">复制带注释的示例</button>
             </div>
           </dialog>
           <p id="catalog-message" class="template-message" role="status"></p>
@@ -72,7 +73,8 @@
               <label for="assist-instructions">给 AI 的编写要求</label>
               <textarea id="assist-instructions" rows="4" placeholder="例如：描述镜头运动，保留人物外观，每段限两句。"></textarea>
               <fieldset>
-                <legend>允许 AI 填写的字段</legend>
+                <legend>允许扩写的字段</legend>
+                <p class="template-hint">勾选哪个文本字段，工作台就在哪个输入框旁显示“扩写提示词”。例如，H3 文生视频模板勾选“提示词”后，用户点击扩写时，模型只收到模板指令、字段名 prompt 和其中的文字。图片、种子和尺寸不参与扩写。</p>
                 <div id="assist-fields"></div>
               </fieldset>
             </div>

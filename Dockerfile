@@ -42,7 +42,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git build-essential pkg-config \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dependencies /usr/local/bin/uv /usr/local/bin/uv
-COPY --chmod=0755 scripts/deploy-engine.sh /usr/local/bin/mycomfy-deploy-engine
 USER mycomfy
 CMD ["runtime", "serve", "--stop-engines-on-exit"]
 

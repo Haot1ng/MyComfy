@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from mycomfy.config import Settings
-from mycomfy.database.models import Audit, EngineInstance
+from mycomfy.database.models import Audit, EngineInstance, Execution
 from mycomfy.database.schema import require_current_schema
 from mycomfy.database.session import db_now, make_sessions, new_id
 
@@ -77,6 +77,25 @@ def ended(runtime, generation):
         return False
     evidence = read_json(Path(runtime["run_dir"]) / "ended.json")
     return bool(evidence and evidence["generation"] == generation)
+
+
+def stop_snapshot(sessions, instances):
+    """Worker 排空后列出本机需要核验退出凭据的代次，阻止中断仍待核实的已提交执行。"""
+    targets = []
+    with sessions() as db:
+        for row in db.scalars(select(EngineInstance).where(EngineInstance.id.in_(instances))):
+            if not row.runtime.get("run_dir"):
+                continue
+            # 代次已有退出凭据时可继续停机，否则须确认活动执行尚未获准提交。
+            if row.active_execution_id and not ended(row.runtime, row.generation):
+                execution = db.get(Execution, row.active_execution_id)
+                if execution is None or execution.authorized_at is not None:
+                    raise SystemExit(
+                        f"实例 {row.id} 仍有未核实的执行 {row.active_execution_id}，"
+                        "请启动 Worker 并等待对账后重试停机。"
+                    )
+            targets.append({"generation": row.generation, "run_dir": row.runtime["run_dir"]})
+    return targets
 
 
 def stop_generation(sessions, instance_id, generation, timeout=12):
@@ -477,7 +496,9 @@ def administrative_action(sessions, name, instance_id, generation, reason):
 def main(argv=None):
     """从命令行运行监护循环，或对实例执行具备代次校验的管理操作。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["serve", "ready", "apply", "drain", "resume", "resolve"])
+    parser.add_argument(
+        "action", choices=["serve", "ready", "apply", "drain", "resume", "resolve", "stop-snapshot"]
+    )
     parser.add_argument("--instance")
     parser.add_argument("--generation", type=int)
     parser.add_argument("--reason")
@@ -497,6 +518,10 @@ def main(argv=None):
         return
     if settings.engine_config is None:
         parser.error("需要 MYCOMFY_ENGINE_CONFIG")
+    if args.action == "stop-snapshot":
+        # 停机脚本读取 JSON 后再停止服务。读取现场时运行管理仍持有 runtime.lock。
+        print(json.dumps(stop_snapshot(sessions, load_config(settings.engine_config))))
+        return
     if args.action == "ready":
         # 探测单独运行，不会和正在管理引擎的进程竞争 runtime.lock。
         if not runtime_ready(sessions, load_config(settings.engine_config)):
@@ -537,7 +562,3 @@ def main(argv=None):
             finally:
                 for sig, handler in handlers.items():
                     signal.signal(sig, handler)
-
-
-if __name__ == "__main__":
-    main()

@@ -1,6 +1,7 @@
 """在本机临时仓库及临时虚拟环境中验证可重复部署。"""
 
 import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from mycomfy.cli import main
 from mycomfy.engine import bundled, deploy
 from mycomfy.engine.runtime import load_config
 
@@ -205,7 +207,12 @@ def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, mon
         target.write_text("# test lock\n")
 
     monkeypatch.setattr(recipe, "generate_lock", write_test_lock)
-    first = recipe.materialize(settings, root, tmp_path)
+    # 与一次性容器使用同一入口，通过 stdin 传入 YAML 中筛选出的引擎分组。
+    payload = settings.model_dump_json().encode()
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8"))
+    main(["deploy", "-", "--base", str(tmp_path), "--root", str(root), "--check"])
+    (first,) = (root / "generated" / "manifests").glob("*/deployment.json")
+    assert not (root / "engines.json").exists()
     original = deploy.Deployment.model_validate_json(first.read_bytes())
     assert original.comfyui.commit == initial["commit"]
     assert original.bundled_nodes == {bundled.H3_NODE: bundled.node_digest(bundled.SOURCE)}

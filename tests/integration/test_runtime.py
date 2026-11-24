@@ -95,7 +95,7 @@ def test_container_shutdown_records_exit_and_allows_restart(tmp_path):
     try:
         for generation in (1, 2):
             manager = subprocess.Popen(
-                [sys.executable, "-m", "mycomfy.engine.runtime", "serve", "--stop-engines-on-exit"],
+                [sys.executable, "-m", "mycomfy.cli", "runtime", "serve", "--stop-engines-on-exit"],
                 env=env,
             )
             try:
@@ -104,6 +104,10 @@ def test_container_shutdown_records_exit_and_allows_restart(tmp_path):
                 while not list((tmp_path / "instance").glob(f"g{generation}-*/child.json")):
                     assert manager.poll() is None and time.monotonic() < deadline
                     time.sleep(0.05)
+                # 从部署器使用的镜像命令读取现场，确保 serve 持锁时也可取到本代快照。
+                snapshot = subprocess.check_output(
+                    [sys.executable, "-m", "mycomfy.cli", "runtime", "stop-snapshot"], env=env
+                )
             finally:
                 manager.terminate()
                 assert manager.wait(timeout=18) == 0
@@ -112,6 +116,7 @@ def test_container_shutdown_records_exit_and_allows_restart(tmp_path):
                 assert row.generation == generation and not row.accepting
                 assert not row.quarantine_reason
                 directory = Path(row.runtime["run_dir"])
+            assert json.loads(snapshot) == [{"generation": generation, "run_dir": str(directory)}]
             proof = json.loads((directory / "ended.json").read_text())
             child = json.loads((directory / "child.json").read_text())
             assert proof["generation"] == generation and proof["reason"] == "requested stop"
@@ -267,11 +272,17 @@ def test_stop_unknown_tree_requires_evidence(tmp_path):
                 runtime={"run_dir": str(tmp_path)},
             )
         )
+    with pytest.raises(SystemExit, match="仍有未核实的执行 active"):
+        runtime.stop_snapshot(sessions, ["lost"])
+    assert runtime.stop_snapshot(sessions, ["other-machine"]) == []
     assert not stop_generation(sessions, "lost", 9, timeout=0)
     with sessions.begin() as db:
         row = db.get(EngineInstance, "lost")
         assert row.quarantine_reason and not row.accepting and row.active_execution_id == "active"
     administrative_action(sessions, "resolve", "lost", 9, "核实进程树和产物，旧发送已结束")
+    assert runtime.stop_snapshot(sessions, ["lost"]) == [
+        {"generation": 9, "run_dir": str(tmp_path)}
+    ]
     assert stop_generation(sessions, "lost", 9, timeout=0)
 
 

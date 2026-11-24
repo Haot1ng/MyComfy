@@ -1,6 +1,5 @@
 """按目标机清单部署 ComfyUI、节点、Python 环境和模型。"""
 
-import argparse
 import fcntl
 import hashlib
 import json
@@ -305,25 +304,3 @@ def provision(manifest_path, root):
             )
         write_json(root / "engines.json", {"instances": instances})
     return root / "engines.json"
-
-
-def main(argv=None):
-    """从命令行校验部署清单或安装到指定根目录。"""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("--root", type=Path, default=Path("var/comfy"))
-    parser.add_argument("--check", action="store_true", help="校验清单及依赖锁摘要")
-    args = parser.parse_args(argv)
-    if args.check:
-        spec = Deployment.model_validate_json(args.manifest.read_bytes())
-        lock = args.manifest.parent / spec.requirements_lock
-        if file_digest(lock) != spec.requirements_sha256:
-            raise ValueError("依赖锁文件摘要不符")
-        bundled.select_nodes(spec.comfyui.commit, spec.nodes, spec.bundled_nodes)
-        print(f"已校验 {len(spec.instances)} 个实例配置")
-    else:
-        print(provision(args.manifest, args.root))
-
-
-if __name__ == "__main__":
-    main()

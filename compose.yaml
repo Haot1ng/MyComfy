@@ -1,7 +1,8 @@
 # Linux 或 Docker Desktop WSL 2。gateway 承接宿主端口，core 使用私有 Unix 套接字；
 # engine 和 worker 使用同一个私有容器网络命名空间，ComfyUI 仅绑定该空间内的回环地址。
 x-app-environment: &app-environment
-  MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:-}@${MYCOMFY_MYSQL_HOST:-127.0.0.1}:${MYCOMFY_MYSQL_PORT:-3306}/mycomfy}"
+  # deploy.py 根据所选角色生成完整连接串。停机只操作已有容器，解析此文件时允许为空。
+  MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-}"
   MYCOMFY_DATA_ROOT: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}"
   # 各机保存相同的工作台地址。仅业务端绑定监听端口，Worker 通过 MySQL 领任务。
   MYCOMFY_PUBLIC_ORIGIN: "${MYCOMFY_PUBLIC_ORIGIN:-http://127.0.0.1:${MYCOMFY_API_PORT:-8000}}"
@@ -113,7 +114,7 @@ services:
       MYCOMFY_MANUAL_RETRY_LIMIT: "${MYCOMFY_MANUAL_RETRY_LIMIT:-3}"
       MYCOMFY_COOKIE_SECURE: "${MYCOMFY_COOKIE_SECURE:-false}"
       MYCOMFY_ADMIN_ORIGIN: "${MYCOMFY_ADMIN_ORIGIN:-}"
-      MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://${REDIS_USER:-default}:${REDIS_PASSWORD:-}@${MYCOMFY_REDIS_HOST:-127.0.0.1}:${MYCOMFY_REDIS_PORT:-6379}/0}"
+      MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-}"
       MYCOMFY_MAINTENANCE_TOKEN_FILE: /run/mycomfy/maintenance-token
       MYCOMFY_GATEWAY_DIR: /var/lib/mycomfy-gateway
     volumes:
@@ -168,7 +169,7 @@ services:
     user: "${MYCOMFY_UID:-10001}:${MYCOMFY_GID:-10001}"
     environment:
       <<: *app-environment
-      MYCOMFY_DATABASE_URL: &engine-db "${MYCOMFY_ENGINE_DATABASE_URL:-${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:-}@${MYCOMFY_ENGINE_MYSQL_HOST:-${MYCOMFY_MYSQL_HOST:-mysql}}:${MYCOMFY_ENGINE_MYSQL_PORT:-3306}/mycomfy}}"
+      MYCOMFY_DATABASE_URL: &engine-db "${MYCOMFY_ENGINE_DATABASE_URL:-}"
       # deploy 将检出、venv、模型与每个代次的工作目录写在同一个持久根目录。
       MYCOMFY_ENGINE_CONFIG: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}/engines/engines.json"
       HOME: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}/engines"

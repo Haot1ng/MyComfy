@@ -18,7 +18,7 @@ def checkout(tmp_path):
     source = Path(__file__).resolve().parents[2]
     repo = tmp_path / "repo"
     repo.mkdir()
-    for name in ("compose.yaml", "deploy.config.example.yaml", ".env.example"):
+    for name in ("compose.yaml", "deploy.config.example.yaml"):
         shutil.copy(source / name, repo / name)
     shutil.copytree(
         source / "scripts", repo / "scripts", ignore=shutil.ignore_patterns("__pycache__")
@@ -58,7 +58,7 @@ def run_deploy(checkout, tmp_path, monkeypatch):
         "    log.write(json.dumps(args) + '\\n')\n"
         "if 'config' in args:\n"
         "    os.execv(os.environ['TEST_DOCKER'], [os.environ['TEST_DOCKER'], *args])\n"
-        "if '--recipe' in args:\n"
+        "if 'run' in args and 'deploy' in args:\n"
         "    with open(os.environ['TEST_RECIPE'], 'wb') as output:\n"
         "        output.write(sys.stdin.buffer.read())\n"
         "if 'up' in args and 'mysql' in args and os.environ.get('TEST_DB_FAILURE'):\n"
@@ -108,17 +108,17 @@ def run_deploy(checkout, tmp_path, monkeypatch):
 
 @pytest.fixture
 def launch(checkout, run_deploy, example_config):
-    """根据真实模板构造旧版 JSON 个人配置，同时验证原有部署命令继续可用。"""
+    """根据真实模板生成个人 YAML，用同一份业务配置测试各种部署角色。"""
 
     def invoke(*options, single_host=None, db_failure=False):
-        """显式传给部署命令，或省略 single_host 模拟旧版个人配置。"""
+        """以显式配置启动，既可提供 single_host 值，也可验证其默认行为。"""
         config = deepcopy(example_config)
         config["mysql"]["password"] = "test-mysql"
         config["redis"]["password"] = "test-redis"
         config.pop("single_host", None)
         if single_host is not None:
             config["single_host"] = single_host
-        path = checkout / "deploy.config.json"
+        path = checkout / "deploy.config.yaml"
         path.write_text(json.dumps(config))
         return run_deploy("--config", str(path), *options, db_failure=db_failure)
 
@@ -130,7 +130,7 @@ def launch(checkout, run_deploy, example_config):
     [(("--single-host",), None), ((), True), ((), None), ((), False)],
 )
 def test_full_deployment_order(launch, options, setting):
-    """显式或配置启用的单机部署等待数据库健康，旧配置和显式关闭沿用外部数据服务。"""
+    """显式或配置启用的单机部署等待数据库健康，省略或关闭该选项时使用外部数据服务。"""
     result, calls = launch(*options, single_host=setting)
     assert result.returncode == 0, result.stderr
     # install 即引擎容器的安装命令，应用 up 时 Compose 根据依赖先执行迁移。
@@ -179,7 +179,7 @@ def test_gateway_deployment_rejects_port_and_mount_conflicts(
     config = example_config
     for key, value in change.items():
         config[key].update(value)
-    (checkout / "deploy.config.json").write_text(json.dumps(config))
+    (checkout / "deploy.config.yaml").write_text(json.dumps(config))
     result, calls = run_deploy("--single-host")
     assert result.returncode != 0
     assert all("config" in call for call in calls)
@@ -285,13 +285,12 @@ def test_stop_verifies_container_exit_and_generation_receipt(
 def test_stop_retry_rechecks_exited_engine_until_receipt_is_restored(
     checkout, run_deploy, monkeypatch
 ):
-    """旧引擎已经退出时，重复停机仍需核对首次记录的同一代次，再关闭余下服务。"""
-    run_dir = checkout / "var/data/engines/instances/gpu0/g7-legacy"
+    """引擎已经退出时，重复停机仍需核对首次记录的同一代次，再关闭余下服务。"""
+    run_dir = checkout / "var/data/engines/instances/gpu0/g7-fixture"
     run_dir.mkdir(parents=True)
     monkeypatch.setenv("TEST_STOP_PROBE", str(run_dir))
     monkeypatch.setenv("TEST_RECEIPT", "missing")
-    # 沿用同一旧部署和 Compose 项目，下一次调用不能从已经退出的 engine 重新取快照。
-    (checkout / ".env").write_text("MYSQL_PASSWORD=existing\nREDIS_PASSWORD=existing\n")
+    # 同一项目下一次调用不能从已经退出的 engine 重新取快照。
     first, first_calls = run_deploy("--stop")
     assert first.returncode != 0
     assert any("exec" in call and "engine" in call for call in first_calls)
@@ -334,18 +333,18 @@ def test_unresolved_engine_snapshot_preserves_running_engine_and_database(
     assert result.returncode == 43
     stops = [call for call in calls if "stop" in call]
     assert len(stops) == 1 and stops[0][-1] == "worker"
-    assert any(call[-5:] == ["exec", "-T", "engine", "python", "-"] for call in calls)
+    assert any(
+        call[-8:]
+        == ["exec", "-T", "engine", "python", "-m", "mycomfy.cli", "runtime", "stop-snapshot"]
+        for call in calls
+    )
 
 
-def test_stop_gpu_preserves_legacy_files_without_bootstrap(checkout, run_deploy):
-    """只有预制引擎清单的旧部署可以停机，不生成新账号或维护凭据。"""
-    manifest = checkout / "var/deployment/deployment.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text("{}")
+def test_stop_gpu_skips_bootstrap(checkout, run_deploy):
+    """GPU 停机只操作已部署容器，无需为关机初始化配置或安装目录。"""
     result, _ = run_deploy("--gpu-only", "--stop")
     assert result.returncode == 0, result.stderr
-    assert not (checkout / ".env").exists() and not (checkout / "var/config").exists()
-    assert manifest.read_text() == "{}"
+    assert not (checkout / "var").exists()
 
 
 def test_conflicting_cli_roles_do_not_start_services(launch):
@@ -371,7 +370,16 @@ def test_fresh_checkout_uses_h3_template(checkout, tmp_path, run_deploy, example
     # 捕获传入安装器的 stdin，验证真实参数选择，全程无需下载模型。
     result, calls = run_deploy("--single-host")
     assert result.returncode == 0, result.stderr
-    assert any("run" in call and call[-2:] == ["--recipe", "-"] for call in calls)
+    install = next(call for call in calls if "run" in call and "engine" in call)
+    assert install[install.index("engine") :] == [
+        "engine",
+        "deploy",
+        "-",
+        "--base",
+        "/deployment",
+        "--root",
+        str(checkout / "var/data/engines"),
+    ]
     recipe = json.loads((tmp_path / "submitted-recipe.json").read_text())
     assert recipe == template["engine"] and "h3-fl2va" in recipe["models"]
     assert template_path.read_bytes() == original
@@ -381,45 +389,35 @@ def test_fresh_checkout_uses_h3_template(checkout, tmp_path, run_deploy, example
     )
 
 
-@pytest.mark.parametrize("suffix", ["yaml", "json"])
-def test_explicit_missing_config_uses_template(checkout, tmp_path, run_deploy, suffix):
-    """显式路径缺失时使用仓库模板，其相对挂载路径基于仓库解析。"""
-    missing = Path("profiles") / f"personal.{suffix}"
-    # 即使仓库中已有个人 YAML 和旧 .env，显式路径缺失时也应使用示例。
-    (checkout / "deploy.config.yaml").write_text("invalid: [")
-    old_env = checkout / ".env"
-    old_env.write_text("MYSQL_PASSWORD=old-mysql\nREDIS_PASSWORD=old-redis\n")
+@pytest.mark.parametrize("suffix", ["yaml", "yml"])
+def test_missing_explicit_yaml_selects_template(checkout, tmp_path, run_deploy, suffix):
+    """常规部署的显式 YAML 路径缺失时提示并回退示例，即使仓库有个人配置。"""
+    path = tmp_path / f"missing.{suffix}"
+    write_personal(checkout / "deploy.config.yaml", "repo-password")
     result, _ = run_deploy(
-        "--config", str(missing), "--compose", "--profile", "database", "config", "--format", "json"
+        "--config", str(path), "--compose", "--profile", "database", "config", "--format", "json"
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0 and str(path) in result.stderr
     services = json.loads(result.stdout)["services"]
     assert services["mysql"]["environment"]["MYSQL_PASSWORD"] == "123456"
     assert services["redis"]["environment"]["REDISCLI_AUTH"] == "123456"
-    assert services["core"]["environment"]["MYCOMFY_DATA_ROOT"] == str(checkout / "var/data")
-    assert not (tmp_path / missing).exists() and not (checkout / missing).exists()
-    assert old_env.read_text() == "MYSQL_PASSWORD=old-mysql\nREDIS_PASSWORD=old-redis\n"
+
+
+def test_missing_explicit_json_is_rejected(tmp_path, run_deploy):
+    """显式非 YAML 路径即使不存在，也在触发模板回退之前报告格式错误。"""
+    path = tmp_path / "missing.json"
+    result, calls = run_deploy("--config", str(path), "--compose", "ps")
+    assert result.returncode != 0 and ".yaml" in result.stderr and not calls
 
 
 def write_personal(path, label):
-    """写入可区分来源的账号和相对数据路径，YAML 用原生缩进及注释语法。"""
-    if path.suffix == ".json":
-        path.write_text(
-            json.dumps(
-                {
-                    "mysql": {"user": "db_user", "password": label},
-                    "redis": {"user": "cache_user", "password": label},
-                    "paths": {"data": "objects"},
-                }
-            )
-        )
-    else:
-        path.write_text(
-            "# 此配置中的相对路径以当前文件为基准\n"
-            f"mysql:\n  user: db_user\n  password: '{label}'\n"
-            f"redis:\n  user: cache_user\n  password: '{label}'\n"
-            "paths:\n  data: objects\n"
-        )
+    """写入可区分来源的账号和相对数据路径，保留原生 YAML 缩进和注释。"""
+    path.write_text(
+        "# 此配置中的相对路径以当前文件为基准\n"
+        f"mysql:\n  user: db_user\n  password: '{label}'\n"
+        f"redis:\n  user: cache_user\n  password: '{label}'\n"
+        "paths:\n  data: objects\n"
+    )
 
 
 def compose_services(run_deploy, *options):
@@ -431,13 +429,9 @@ def compose_services(run_deploy, *options):
     return json.loads(result.stdout)["services"]
 
 
-@pytest.mark.parametrize("suffixes", [("yaml", "yml", "json"), ("yml", "json"), ("json",)])
-def test_personal_files_take_precedence_over_legacy(checkout, run_deploy, suffixes):
-    """并存时按 YAML、YML、JSON 顺序选择个人配置，优先于旧 .env 和引擎清单。"""
-    (checkout / ".env").write_text("MYSQL_PASSWORD=legacy\nREDIS_PASSWORD=legacy\n")
-    manifest = checkout / "var/deployment/deployment.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text("{}")
+@pytest.mark.parametrize("suffixes", [("yaml", "yml"), ("yml",)])
+def test_personal_yaml_precedes_template(checkout, run_deploy, suffixes):
+    """仓库中的 YAML 优先于 YML，缺少两者时才读取内置示例。"""
     for suffix in suffixes:
         write_personal(checkout / f"deploy.config.{suffix}", f"source-{suffix}")
     services = compose_services(run_deploy)
@@ -447,7 +441,7 @@ def test_personal_files_take_precedence_over_legacy(checkout, run_deploy, suffix
     assert services["core"]["environment"]["MYCOMFY_DATA_ROOT"] == str(checkout / "objects")
 
 
-@pytest.mark.parametrize("suffix", ["yaml", "json"])
+@pytest.mark.parametrize("suffix", ["yaml", "yml"])
 def test_explicit_relative_config_resolves_from_caller(checkout, tmp_path, run_deploy, suffix):
     """从仓库外执行时，--config 以调用目录查找文件，配置中的数据路径以文件目录为基准。"""
     relative_path = Path("profiles") / f"personal.{suffix}"
@@ -460,51 +454,36 @@ def test_explicit_relative_config_resolves_from_caller(checkout, tmp_path, run_d
     assert services["core"]["environment"]["MYCOMFY_DATA_ROOT"] == str(personal.parent / "objects")
 
 
-def test_existing_env_preserves_legacy_deployment(checkout, run_deploy):
-    """旧部署的账号和安装清单继续生效，不会被模板的密码和 H3 配置替换。"""
+def test_only_yaml_can_configure_deployment(checkout, run_deploy):
+    """仓库即使残留 .env、JSON 配置或固定清单，也从 YAML 示例取账号和引擎配方。"""
     old_env = checkout / ".env"
-    data_root = checkout / "old-data"
-    saved = f"MYSQL_PASSWORD=old-mysql\nREDIS_PASSWORD=old-redis\nMYCOMFY_DATA_ROOT={data_root}\n"
-    old_env.write_text(saved)
+    old_env.write_text("MYSQL_PASSWORD=discarded\nREDIS_PASSWORD=discarded\n")
+    old_json = checkout / "deploy.config.json"
+    old_json.write_text('{"mysql": {"password": "discarded"}}')
     manifest = checkout / "var/deployment/deployment.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text("{}")
 
-    result, _ = run_deploy("--compose", "--profile", "database", "config", "--format", "json")
-    assert result.returncode == 0, result.stderr
-    services = json.loads(result.stdout)["services"]
-    assert services["mysql"]["environment"]["MYSQL_PASSWORD"] == "old-mysql"
-    assert services["redis"]["environment"]["REDISCLI_AUTH"] == "old-redis"
+    services = compose_services(run_deploy)
+    assert services["mysql"]["environment"]["MYSQL_PASSWORD"] == "123456"
+    assert services["redis"]["environment"]["REDISCLI_AUTH"] == "123456"
     result, calls = run_deploy("--single-host")
     assert result.returncode == 0, result.stderr
-    install = next(call for call in calls if "run" in call and "engine" in call)
-    assert "--recipe" not in install
-    assert old_env.read_text() == saved and manifest.read_text() == "{}"
+    assert any(
+        "run" in call and call[call.index("engine") + 1 :][:2] == ["deploy", "-"] for call in calls
+    )
+    assert old_env.is_file() and old_json.is_file() and manifest.read_text() == "{}"
 
-
-def test_existing_manifest_alone_selects_legacy(tmp_path, run_deploy, monkeypatch):
-    """仅有预制清单的部署也沿用原安装入口，包括通过环境变量指定的目录。"""
-    imports = tmp_path / "previous-imports"
-    imports.mkdir()
-    (imports / "deployment.json").write_text("{}")
-    monkeypatch.setenv("MYCOMFY_DEPLOYMENT_DIR", str(imports))
-    result, calls = run_deploy("--single-host")
-    assert result.returncode == 0, result.stderr
-    install = next(call for call in calls if "run" in call and "engine" in call)
-    assert "--recipe" not in install
+    # 即使是无需读取凭据的停机操作，也只接受本版的配置文件格式。
+    result, calls = run_deploy("--config", str(old_json), "--stop")
+    assert result.returncode != 0 and ".yaml" in result.stderr and not calls
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("suffix,broken", [("json", "{broken"), ("yaml", "mysql: [")])
-def test_invalid_existing_config_is_reported(
-    checkout, tmp_path, run_deploy, explicit, suffix, broken
-):
-    """选中的 YAML 或 JSON 解析失败时停止，避免静默改用其他配置部署。"""
-    path = tmp_path / f"custom.{suffix}" if explicit else checkout / f"deploy.config.{suffix}"
-    if suffix == "yaml":
-        write_personal(checkout / "deploy.config.json", "lower-priority")
-    path.write_text(broken)
+def test_invalid_existing_config_is_reported(checkout, tmp_path, run_deploy, explicit):
+    """选中的 YAML 解析失败时停止，避免静默改用其他配置部署。"""
+    path = tmp_path / "custom.yaml" if explicit else checkout / "deploy.config.yaml"
+    path.write_text("mysql: [")
     options = ["--config", str(path)] if explicit else []
     result, calls = run_deploy(*options, "--single-host")
-    assert result.returncode != 0 and result.stderr
-    assert not calls and path.read_text() == broken
+    assert result.returncode != 0 and result.stderr and not calls

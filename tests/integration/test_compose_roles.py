@@ -2,7 +2,6 @@
 
 import json
 import os
-import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -16,18 +15,13 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
     repo = Path(__file__).resolve().parents[2]
     for name in ("COMPOSE_FILE", "COMPOSE_PROFILES"):
         monkeypatch.delenv(name, raising=False)
-    config = tmp_path / "settings.json"
+    config = tmp_path / "settings.yaml"
     config.write_text(
-        json.dumps(
-            {
-                "mysql": {"user": "app", "password": "example", "host": "db.internal"},
-                "redis": {"user": "default", "password": "example", "host": "cache.internal"},
-                "public": {
-                    "origin": "https://workspace.example",
-                    "admin_origin": "https://admin.example:443/",
-                },
-            }
-        )
+        "mysql: {user: app, password: example, host: db.internal}\n"
+        "redis: {user: default, password: example, host: cache.internal}\n"
+        "public:\n"
+        "  origin: https://workspace.example\n"
+        "  admin_origin: https://admin.example:443/\n"
     )
     command = [
         sys.executable,
@@ -79,52 +73,35 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
         assert combined[name]["ports"][0]["host_ip"] == "127.0.0.1"
 
 
-def test_legacy_single_host_uses_bundled_credentials(tmp_path, capsys):
-    """用真实 Compose 读取旧 .env，验证强制单机时的密码解码、服务地址和发布端口。"""
+def test_single_host_uses_configured_credentials_and_ports(tmp_path, monkeypatch):
+    """用部署命令渲染单机服务，核对特殊字符凭据、服务间地址和宿主发布端口。"""
     repo = Path(__file__).resolve().parents[2]
-    legacy_settings = runpy.run_path(str(repo / "scripts" / "deployment_config.py"))[
-        "legacy_single_host_environment"
-    ]
+    for key in ("COMPOSE_FILE", "COMPOSE_PROFILES"):
+        monkeypatch.delenv(key, raising=False)
     mysql_user, mysql_password = "studio$@admin", "mysql$$@host#%/"
     redis_user, redis_password = "redis$@cache", "redis$$@host#%/"
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        f"MYSQL_USER='{mysql_user}'\nMYSQL_PASSWORD='{mysql_password}'\n"
-        f"REDIS_USER='{redis_user}'\nREDIS_PASSWORD='{redis_password}'\n"
-        "MYCOMFY_MYSQL_PORT=13306\nMYCOMFY_REDIS_PORT=16379\n"
-        "MYCOMFY_MYSQL_BIND_HOST=0.0.0.0\nMYCOMFY_REDIS_BIND_HOST=0.0.0.0\n"
-        "MYCOMFY_DATABASE_URL=mysql+pymysql://remote@remote.database:5000/mycomfy\n"
-        "MYCOMFY_ENGINE_DATABASE_URL=mysql+pymysql://remote@remote.gpu-db:5000/mycomfy\n"
-        "MYCOMFY_REDIS_URL=redis://remote.cache:6381/0\n"
+    config = tmp_path / "deploy.yaml"
+    config.write_text(
+        "single_host: true\n"
+        f"mysql: {{user: '{mysql_user}', password: '{mysql_password}', host: db.internal}}\n"
+        f"redis: {{user: '{redis_user}', password: '{redis_password}', host: cache.internal}}\n"
+        "ports: {mysql: 13306, redis: 16379}\n"
     )
-    environment = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith(("COMPOSE_", "MYSQL_", "REDIS_", "MYCOMFY_"))
-    }
-    cmd = [
-        "docker",
-        "compose",
-        "-f",
-        str(repo / "compose.yaml"),
-        "--env-file",
-        str(env_file),
-        "--profile",
-        "database",
-        "config",
-        "--format",
-        "json",
-    ]
-
-    def render():
-        """让 Compose 在隔离目录中解析 .env 与本次调用的覆盖值，配置内容仅保存在内存中。"""
-        result = subprocess.run(cmd, cwd=tmp_path, env=environment, capture_output=True, check=True)
-        return json.loads(result.stdout)["services"]
-
-    original = render()
-    assert "remote.database" in original["core"]["environment"]["MYCOMFY_DATABASE_URL"]
-    environment.update(legacy_settings(original))
-    services = render()
+    # 经正式 CLI 加载业务配置，让 Compose 验证宿主与 GPU 容器实际获得的环境。
+    output = subprocess.check_output(
+        [
+            sys.executable,
+            str(repo / "scripts/deploy.py"),
+            "--config",
+            str(config),
+            "--compose",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=tmp_path,
+    )
+    services = json.loads(output)["services"]
     for service, host, port in (
         ("core", "127.0.0.1", 13306),
         ("migrate", "127.0.0.1", 13306),
@@ -141,4 +118,36 @@ def test_legacy_single_host_uses_bundled_credentials(tmp_path, capsys):
     for service, port in (("mysql", "13306"), ("redis", "16379")):
         published = services[service]["ports"][0]
         assert (published["host_ip"], published["published"]) == ("127.0.0.1", port)
-    assert capsys.readouterr() == ("", "")
+
+
+def test_stop_configuration_does_not_invent_connection_urls(monkeypatch):
+    """停机上下文可渲染容器定义，单独的数据服务初始化参数不会被拼成业务连接串。"""
+    repo = Path(__file__).resolve().parents[2]
+    for name in ("MYCOMFY_DATABASE_URL", "MYCOMFY_ENGINE_DATABASE_URL", "MYCOMFY_REDIS_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MYSQL_PASSWORD", "db-init-only")
+    monkeypatch.setenv("REDIS_PASSWORD", "cache-init-only")
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(repo / "compose.yaml"),
+            "--env-file",
+            os.devnull,
+            "--profile",
+            "database",
+            "config",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    services = json.loads(result.stdout)["services"]
+    assert services["mysql"]["environment"]["MYSQL_PASSWORD"] == "db-init-only"
+    assert services["redis"]["environment"]["REDISCLI_AUTH"] == "cache-init-only"
+    for name in ("core", "migrate", "engine", "worker"):
+        assert services[name]["environment"]["MYCOMFY_DATABASE_URL"] == ""
+    assert services["core"]["environment"]["MYCOMFY_REDIS_URL"] == ""

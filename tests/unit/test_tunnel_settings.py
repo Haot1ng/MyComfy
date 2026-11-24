@@ -43,8 +43,8 @@ def test_default_template_and_selection_order(tmp_path, monkeypatch):
     assert explicit.public_https_port == 10000 and explicit.admin_https_port == 443
 
 
-def test_legacy_business_file_is_preserved(tmp_path):
-    """识别旧同名业务配置时给出分开传参的指引，原凭据既不输出也不改写。"""
+def test_business_settings_rejected_as_tunnel_config(tmp_path):
+    """误把业务配置填入测试文件时提示正确参数，保护其中的凭据。"""
     personal = tmp_path / "deploy.test.yaml"
     original = b"public:\n  host: 127.0.0.1\nmysql:\n  password: fixture-credential\n"
     personal.write_bytes(original)

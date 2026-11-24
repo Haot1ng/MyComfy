@@ -7,6 +7,7 @@
 ```text
 MyComfy/
 ├── src/mycomfy/                  Python 服务与命令入口
+│   ├── cli.py                    mycomfy 命令入口，分派 api、worker、runtime 等子命令
 │   ├── gateway/                  Nginx 入口规则、热加载与流量计量
 │   ├── api/                      HTTP 应用、认证与 SSE
 │   ├── generation/               批次、策略、任务状态与 Worker
@@ -19,9 +20,12 @@ MyComfy/
 │   └── admin/                    本机管理网页
 ├── migrations/                   Alembic 数据库版本
 ├── scripts/                      一键部署、测试与验收命令
+│   └── deploy.py                 宿主机部署入口，读取 YAML 并按角色运行 Compose
 ├── tests/{unit,integration,e2e}/  单元、集成和端到端测试
 └── docs/                         部署、运维与验收
 ```
+
+在宿主机用 `python3 scripts/deploy.py` 部署。引擎镜像以 `python -m mycomfy.cli` 为入口，由 `deploy` 子命令安装引擎，`runtime` 子命令管理实例。备份与恢复工具使用 `python -m mycomfy.ops.backup`。部署脚本和镜像内部命令只维护当前版本。变更入口或参数时，同步更新调用方、测试和部署手册。[部署入口](scripts/deploy.py) · [引擎配方](src/mycomfy/engine/recipe.py) · [实例管理](src/mycomfy/engine/runtime.py) · [备份工具](src/mycomfy/ops/backup.py)
 
 两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略，“用户管理”可查看全部账号并调整所属权限组。“API 流量”列出所有业务和管理 API，支持查看请求量、错误和耗时，以及在线调整每个接口的限流规则。[流量与限流说明](docs/api-traffic.md) · [C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
 
@@ -123,7 +127,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 python3 scripts/deploy.py --stop
 ```
 
-Worker 先停止领新任务，等待在途执行到达可恢复的边界。脚本随后停止引擎并核对当前代次的退出记录，最后停止业务端、MySQL 和 Redis。看到“所选服务已停止”后，就可以在 Windows 终端执行 `wsl --shutdown`。长视频可能需要数分钟以上。若提示退出凭据缺失，请保留现场，先检查该代次的 `ended.json` 和引擎日志。旧版业务端若在浏览器打开时一直等待，请关闭工作台页签，让事件订阅结束。
+Worker 先停止领新任务，等待在途执行到达可恢复的边界。脚本随后停止引擎并核对当前代次的退出记录，最后停止业务端、MySQL 和 Redis。看到“所选服务已停止”后，就可以在 Windows 终端执行 `wsl --shutdown`。长视频可能需要数分钟以上。若提示退出凭据缺失，请保留现场，先检查该代次的 `ended.json` 和引擎日志。
 
 分机部署可分别执行 `--gpu-only --stop`、`--core-only --stop`、`--db-only --stop`，数据库机最后停。容器、数据卷和未领取的任务都会保留。继续使用原单机镜像时，运行以下命令恢复服务。
 
@@ -173,11 +177,9 @@ ports:
 
 1. 仓库根目录的 `deploy.config.yaml`。
 2. 仓库根目录的 `deploy.config.yml`。
-3. 仓库根目录已有的 `deploy.config.json`。
-4. 旧版部署使用的仓库 `.env` 或部署目录下的 `deployment.json`。
-5. 仓库自带的 [deploy.config.example.yaml](deploy.config.example.yaml)。
+3. 仓库自带的 [deploy.config.example.yaml](deploy.config.example.yaml)。
 
-显式传入 `--config /路径/部署配置.yaml` 会优先使用指定文件。`.yml` 和旧 JSON 同样可用，例如 `python3 scripts/deploy.py --config ./deploy.config.json --single-host`。常规部署中指定的文件缺失时，脚本提示后改用仓库 YAML 模板。临时外网测试中显式指定的业务配置必须存在。复用已有 MySQL 数据卷时，配置中的凭据须与库内账号匹配。[部署命令手册](docs/deploy-cli.md#配置文件与落盘位置) · [旧版安装清单](docs/engine-deployment.md#安装清单)
+使用自定义配置时，运行 `python3 scripts/deploy.py --config ./deploy.prod.yaml --single-host`，并在后续启停和测试时沿用该文件。部署配置使用 `.yaml` 或 `.yml`。常规部署遇到指定的 YAML 文件缺失时，脚本提示后使用仓库模板。使用 `--test` 分享运行中的部署时，显式路径必须存在。复用 MySQL 数据卷时，填写库内已有账号的凭据。[部署命令手册](docs/deploy-cli.md#配置文件与落盘位置)
 
 ### 从 Python 环境启动
 

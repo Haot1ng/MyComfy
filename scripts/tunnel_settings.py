@@ -62,7 +62,7 @@ class TunnelSettings:
 
 
 def load_tunnel_settings(repo: Path, requested: Path | None = None) -> TunnelSettings:
-    """优先读取显式路径或个人设置，缺少个人设置时读取模板；旧业务配置保留原样。"""
+    """读取显式指定的测试 YAML 或个人设置，缺少个人设置时读取模板。"""
     personal = Path(repo) / "deploy.test.yaml"
     if requested is not None:
         path = Path(requested)
@@ -76,23 +76,11 @@ def load_tunnel_settings(repo: Path, requested: Path | None = None) -> TunnelSet
         raise ValueError(f"找不到测试配置文件 {path}，请核对路径。") from None
     except IsADirectoryError:
         raise ValueError(f"测试配置路径 {path} 指向目录，请指定文件。") from None
-    # 旧操作指引曾让用户把整份业务配置复制成 deploy.test.yaml；保留其中的数据库和部署参数。
-    if config.keys() & {
-        "single_host",
-        "manual_retry_limit",
-        "mysql",
-        "redis",
-        "paths",
-        "ports",
-        "public",
-        "engine",
-    }:
-        raise ValueError(
-            f"{path} 是业务部署配置。请用 --config 指定该文件，并用 "
-            "--test-config deploy.test.example.yaml 或单独的测试配置文件指定测试入口。"
-        )
     if config.keys() - {"machine_name", "public_https_port", "admin_https_port"}:
-        raise ValueError("测试配置仅支持 machine_name、public_https_port 和 admin_https_port")
+        raise ValueError(
+            "--test-config 仅支持 machine_name、public_https_port 和 admin_https_port。"
+            "请用 --config 指定业务部署配置。"
+        )
     return TunnelSettings(**config, _read_personal=requested is None and path == personal)
 
 

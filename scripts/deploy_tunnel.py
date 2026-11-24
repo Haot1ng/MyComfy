@@ -7,9 +7,8 @@ import signal
 import subprocess
 import threading
 from contextlib import contextmanager
-from urllib.parse import urlsplit
 
-from deployment_config import legacy_single_host_environment
+from deployment_config import read_config
 from funnel_client import FunnelClient, FunnelError
 from tunnel_settings import load_tunnel_settings, remember_machine_name
 
@@ -92,32 +91,18 @@ def _compose_hashes(run_compose):
     return dict(line.split() for line in result.stdout.splitlines() if line.strip())
 
 
-def _match_baseline(run_compose, process_env, live):
-    """只允许使用能复现当前容器的配置，兼容曾通过 --single-host 启动的部署。"""
+def _match_baseline(repo, config_path, run_compose, process_env, live):
+    """按 YAML 和启动角色核对当前容器，确保测试结束后能恢复到同一套业务配置。"""
     expected = {name: row["hash"] for name, row in live.items()}
     if _compose_hashes(run_compose) == expected:
         return
 
-    # 单机启动标记可能只在当时的命令行出现。用业务配置里的凭据和内置端口重算，
-    # 并再次比对完整服务摘要，防止把原本连接外部数据库的 Core 切到其他数据库。
-    current = live["core"]["env"]
-    if all(
-        urlsplit(current.get(key, "")).hostname == "127.0.0.1"
-        for key in ("MYCOMFY_DATABASE_URL", "MYCOMFY_REDIS_URL")
-    ):
-        profiles = process_env.get("COMPOSE_PROFILES", "")
-        process_env["COMPOSE_PROFILES"] = ",".join(filter(None, [profiles, "database"]))
-        try:
-            config = run_compose("config", "--format", "json", stdout=subprocess.PIPE, text=True)
-            services = json.loads(config.stdout)["services"]
-            process_env.update(legacy_single_host_environment(services))
-        finally:
-            if profiles:
-                process_env["COMPOSE_PROFILES"] = profiles
-            else:
-                process_env.pop("COMPOSE_PROFILES", None)
-        if _compose_hashes(run_compose) == expected:
-            return
+    # 单机标记可能只出现在首次启动命令里。用同一份 YAML 按单机模式重算，
+    # 完整摘要匹配才采用，避免把测试流量或恢复后的业务指向另一套数据库。
+    single_settings, _, _ = read_config(config_path, repo, core_only=True, single_host=True)
+    process_env.update(single_settings)
+    if _compose_hashes(run_compose) == expected:
+        return
     raise ValueError("业务配置与运行中的 Core 或网关不一致，请用 --config 指定原部署文件。")
 
 
@@ -133,7 +118,7 @@ def _apply_gateway(run_compose):
     )
 
 
-def _share(repo, requested, run_compose, process_env, protect_cleanup):
+def _share(repo, config_path, requested, run_compose, process_env, protect_cleanup):
     """预检设备及部署，在可还原的业务配置上公布本次测试会话的入口。"""
     settings = load_tunnel_settings(repo, requested)
     client = FunnelClient.discover()
@@ -145,7 +130,7 @@ def _share(repo, requested, run_compose, process_env, protect_cleanup):
             f"Tailscale 端口 {sorted(occupied)} 已有转发，请在测试配置里选择空闲端口。"
         )
     live = _live_services(run_compose)
-    _match_baseline(run_compose, process_env, live)
+    _match_baseline(repo, config_path, run_compose, process_env, live)
     gateway = live["gateway"]["env"]
     mapping = {public: int(gateway["MYCOMFY_API_PORT"]), admin: int(gateway["MYCOMFY_LOCAL_PORT"])}
     origins = [_origin(machine, port) for port in (public, admin)]
@@ -183,12 +168,12 @@ def _share(repo, requested, run_compose, process_env, protect_cleanup):
         print("原业务入口已恢复。", flush=True)
 
 
-def run_test_session(repo, requested, run_compose, process_env):
+def run_test_session(repo, config_path, requested, run_compose, process_env):
     """在同一仓库串行执行临时测试，退出时释放会话锁并还原调用方的环境。"""
     original = process_env.copy()
     try:
         with _exclusive_session(repo), _handle_shutdown() as protect_cleanup:
-            _share(repo, requested, run_compose, process_env, protect_cleanup)
+            _share(repo, config_path, requested, run_compose, process_env, protect_cleanup)
     except FunnelError as exc:
         raise ValueError(str(exc)) from exc
     except KeyboardInterrupt:

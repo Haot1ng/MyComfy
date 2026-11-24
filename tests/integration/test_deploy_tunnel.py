@@ -28,7 +28,6 @@ def checkout(tmp_path):
         "compose.yaml",
         "deploy.config.example.yaml",
         "deploy.test.example.yaml",
-        ".env.example",
     ):
         shutil.copy(source / name, repo / name)
     module = Path("src/mycomfy/origins.py")
@@ -74,10 +73,16 @@ def test_cli_test_uses_explicit_base_without_bootstrapping_gpu(checkout, tmp_pat
     orchestrator = importlib.import_module("deploy_tunnel")
     observed = []
 
-    def record(repo, requested, run_compose, process_env):
+    def record(repo, config_path, requested, run_compose, process_env):
         """记录 CLI 解析的端口与测试设置路径，不发起实际隧道或部署操作。"""
         observed.append(
-            (repo, requested, process_env["MYCOMFY_LOCAL_PORT"], process_env["MYCOMFY_API_PORT"])
+            (
+                repo,
+                config_path,
+                requested,
+                process_env["MYCOMFY_LOCAL_PORT"],
+                process_env["MYCOMFY_API_PORT"],
+            )
         )
 
     monkeypatch.setattr(orchestrator, "run_test_session", record)
@@ -85,7 +90,7 @@ def test_cli_test_uses_explicit_base_without_bootstrapping_gpu(checkout, tmp_pat
         sys, "argv", ["deploy.py", "--test", "--config", str(base), "--test-config", str(private)]
     )
     runpy.run_path(str(checkout / "scripts/deploy.py"), run_name="__main__")
-    assert observed == [(checkout, private, "18310", "18300")]
+    assert observed == [(checkout, base, private, "18310", "18300")]
     assert not (checkout / "var").exists() and not (checkout / ".env").exists()
 
 
@@ -217,7 +222,7 @@ public:
     monkeypatch.setattr(deploy, "_live_services", lambda _: deepcopy(state.live))
     monkeypatch.setattr(deploy, "FunnelClient", SimpleNamespace(discover=Client))
     state.run = lambda requested=private: deploy.run_test_session(
-        checkout, requested, run_compose, env
+        checkout, base, requested, run_compose, env
     )
     return state
 
@@ -304,8 +309,12 @@ def test_prior_single_host_deployment_keeps_its_local_database(session):
     """当初部署使用命令行 --single-host 时，临时会话仍沿用现有容器实际连接的本地数据库。"""
     # 模拟业务文件写的是远端地址，已运行服务则由此前的单机部署固定到了回环地址。
     env = session.env
-    env["MYCOMFY_DATABASE_URL"] = "mysql+pymysql://db:example-mysql@private-db:3306/mycomfy"
-    env["MYCOMFY_REDIS_URL"] = "redis://cache:example-redis@private-cache:6379/0"
+    remote = session.base.read_text().replace("user: db,", "user: db, host: private-db,")
+    session.base.write_text(remote.replace("user: cache,", "user: cache, host: private-cache,"))
+    config = importlib.import_module("deployment_config")
+    env.update(config.read_config(session.base, session.repo, core_only=True)[0])
+    assert "@private-db:" in env["MYCOMFY_DATABASE_URL"]
+    assert "@private-cache:" in env["MYCOMFY_REDIS_URL"]
     original = dict(env)
     session.run()
     for snapshot in session.updates:

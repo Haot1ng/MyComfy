@@ -1,4 +1,4 @@
-# 构建上下文包含 Python 源码、迁移、依赖清单及引擎部署入口。网页在运行时挂载。
+# 构建上下文包含 Python 源码、迁移和依赖清单。网页在运行时挂载。
 **
 !pyproject.toml
 !uv.lock
@@ -7,7 +7,5 @@
 !src/mycomfy/**
 !migrations/
 !migrations/**
-!scripts/
-!scripts/deploy-engine.sh
 **/__pycache__/
 **/*.py[cod]

@@ -1,6 +1,5 @@
 """验证部署配置向 Docker 和应用传递相同的账号、地址与挂载目录。"""
 
-import hashlib
 import json
 import os
 import runpy
@@ -18,17 +17,24 @@ REPO = Path(__file__).resolve().parents[2]
 read_config = runpy.run_path(str(REPO / "scripts/deployment_config.py"))["read_config"]
 
 
+def yaml_document(fields):
+    """用 YAML 的流式值表示嵌套结构，让参数化用例保留字符串和数字等原始类型。"""
+    return "".join(
+        f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in fields.items()
+    )
+
+
 def test_custom_accounts_and_paths(tmp_path):
     """用实际驱动解析连接串，验证特殊字符、容器内外端口和配置相对路径。"""
     repo = tmp_path / "application"
     config_dir = tmp_path / "settings"
     config_dir.mkdir()
-    path = config_dir / "config.json"
+    path = config_dir / "config.yaml"
     recipe = {"comfyui": {"url": "engine", "version": "1.0"}, "pytorch": {"torch": "2.6.0"}}
     mysql_password = "My$@:/#% 密码"
     redis_password = "R'$@:/#% 密码"
     path.write_text(
-        json.dumps(
+        yaml_document(
             {
                 "mysql": {"user": "a@b", "password": mysql_password},
                 "redis": {"user": "cache", "password": redis_password},
@@ -66,7 +72,6 @@ def test_custom_accounts_and_paths(tmp_path):
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "https://video.example"
     assert values["MYCOMFY_ADMIN_ORIGIN"] == "https://admin.example"
     assert values["MYCOMFY_COOKIE_SECURE"] == "true"
-    assert values["MYCOMFY_MYSQL_HOST"] == values["MYCOMFY_REDIS_HOST"] == "127.0.0.1"
     assert values["MYCOMFY_MYSQL_BIND_HOST"] == values["MYCOMFY_REDIS_BIND_HOST"] == "127.0.0.1"
     assert (values["MYCOMFY_UID"], values["MYCOMFY_GID"]) == (str(os.getuid()), str(os.getgid()))
 
@@ -136,24 +141,16 @@ engine:
     }
 
 
-def test_commented_yaml_preserves_published_defaults(tmp_path):
-    """以发布过的 JSON 为基线，核对整份模板、Compose 参数和原样送往 GPU 的配方。"""
-    template = REPO / "deploy.config.example.yaml"
+def test_bundled_yaml_provides_defaults_and_engine_recipe(tmp_path):
+    """核对仓库默认 YAML 中的重试上限、工作台来源和传给 GPU 安装器的完整配方。"""
+    path = tmp_path / "deploy.config.yaml"
+    path.write_bytes((REPO / "deploy.config.example.yaml").read_bytes())
+    values, engine, single_host = read_config(path, tmp_path, core_only=False)
     load_document = runpy.run_path(str(REPO / "scripts/config_document.py"))["load_document"]
-    data = load_document(template)
-    # c852c8cf562d 的 deploy.config.example.json，经下式排序及压缩后取得 SHA-256。
-    canonical = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == (
-        "31dab648e3ca97d66eb759dbb7332aebe4a1a787431a56d5ac02e9c41e32493d"
-    )
-    assert data["manual_retry_limit"] == 3
-    # 在同一个目录读两种格式，使相对挂载路径可直接比较。
-    yaml_path, json_path = tmp_path / "settings.yaml", tmp_path / "old-settings.json"
-    yaml_path.write_bytes(template.read_bytes())
-    json_path.write_text(canonical)
-    result = read_config(yaml_path, tmp_path, core_only=False)
-    assert result == read_config(json_path, tmp_path, core_only=False)
-    assert result[1] == data["engine"]
+    assert engine == load_document(path)["engine"]
+    assert "h3-fl2va" in engine["models"]
+    assert single_host is False and values["MYCOMFY_MANUAL_RETRY_LIMIT"] == "3"
+    assert values["MYCOMFY_PUBLIC_ORIGIN"] == "http://127.0.0.1:8000"
 
 
 def test_host_yaml_needs_no_installed_packages(tmp_path):
@@ -215,13 +212,13 @@ def test_yaml_schema_rejects_wrong_scalar_types(tmp_path, extra, field):
 
 def test_core_only_and_secret_errors(tmp_path):
     """业务端独立于 GPU 配置，错误反馈不会包含密码。"""
-    path = tmp_path / "config.json"
+    path = tmp_path / "config.yaml"
     data = {
         "mysql": {"user": "mycomfy", "password": "mysql-local"},
         "redis": {"user": "default", "password": "redis-local"},
         "engine": "尚未配置",
     }
-    path.write_text(json.dumps(data))
+    path.write_text(yaml_document(data))
     values, recipe, _ = read_config(path, tmp_path, core_only=True)
     assert recipe is None
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "http://127.0.0.1:8000"
@@ -230,7 +227,7 @@ def test_core_only_and_secret_errors(tmp_path):
     with pytest.raises(ValueError, match="engine"):
         read_config(path, tmp_path, core_only=False)
     data["mysql"]["password"] = "credential'not-for-logs"
-    path.write_text(json.dumps(data))
+    path.write_text(yaml_document(data))
     values, _, _ = read_config(path, tmp_path, core_only=True)
     assert make_url(values["MYCOMFY_DATABASE_URL"]).password == data["mysql"]["password"]
     with pytest.raises(ValueError, match=r"mysql\.password") as error:
@@ -238,25 +235,26 @@ def test_core_only_and_secret_errors(tmp_path):
     assert data["mysql"]["password"] not in str(error.value)
 
 
-def test_old_json_admin_origin_is_mapped_only_when_new_key_is_absent(tmp_path):
-    """读取旧 JSON 时映射旧键，显式配置的新值（包括关闭）始终优先。"""
-    config = {
-        "mysql": {"user": "db", "password": "example"},
-        "redis": {"user": "cache", "password": "example"},
-    }
-    public = {"origin": "https://studio.example", "admin_test_origin": "https://old-admin.example"}
-    config["public"] = public
-    path = tmp_path / "deploy.json"
-    for overrides, expected in (
-        ({}, "https://old-admin.example"),
-        ({"admin_origin": "https://admin.example"}, "https://admin.example"),
-        ({"admin_origin": None}, ""),
-    ):
-        config["public"] = {**public, **overrides}
-        path.write_text(json.dumps(config))
-        values, _, _ = read_config(path, tmp_path, core_only=True)
-        assert values["MYCOMFY_ADMIN_ORIGIN"] == expected
-        assert "MYCOMFY_ADMIN_TEST_ORIGIN" not in values
+def test_rejects_obsolete_admin_origin_key(tmp_path):
+    """停用的管理来源字段须给出字段名，以免部署者误认为后台入口已经配置。"""
+    path = tmp_path / "deploy.yaml"
+    path.write_text(
+        "mysql: {user: db, password: example}\nredis: {user: cache, password: example}\n"
+        "public: {origin: 'https://studio.example', admin_test_origin: 'https://admin.example'}\n"
+    )
+    with pytest.raises(ValueError, match="admin_test_origin"):
+        read_config(path, tmp_path, core_only=True)
+
+
+def test_rejects_json_config_file(tmp_path):
+    """完整有效的 JSON 配置文件也应在选择 YAML 入口时给出格式错误。"""
+    path = tmp_path / "deployment.json"
+    path.write_text(
+        '{"mysql": {"user": "db", "password": "example"}, '
+        '"redis": {"user": "default", "password": "example"}}'
+    )
+    with pytest.raises(ValueError, match=r"(?i)yaml"):
+        read_config(path, tmp_path, core_only=True)
 
 
 @pytest.mark.parametrize(
@@ -313,9 +311,9 @@ def test_admin_origin_from_environment(monkeypatch, admin, expected):
 )
 def test_invalid_test_origins_fail_before_deployment_and_startup(tmp_path, public, admin, field):
     """两种部署入口都拒绝歧义、通配、非 HTTPS 或合并为同一来源的配置。"""
-    path = tmp_path / "config.json"
+    path = tmp_path / "config.yaml"
     path.write_text(
-        json.dumps(
+        yaml_document(
             {
                 "mysql": {"user": "app", "password": "p"},
                 "redis": {"user": "default", "password": "p"},
@@ -331,13 +329,13 @@ def test_invalid_test_origins_fail_before_deployment_and_startup(tmp_path, publi
 
 def test_remote_endpoints_and_publish_addresses(tmp_path):
     """远端 MySQL 与 Redis 可在不同地址，GPU 能默认共用或显式覆盖端点。"""
-    path = tmp_path / "config.json"
+    path = tmp_path / "config.yaml"
     config = {
         "mysql": {"host": "db.internal", "bind_host": "10.0.1.2", "user": "db", "password": "p"},
         "redis": {"host": "[fd00::7]", "bind_host": "::", "user": "cache", "password": "p"},
         "ports": {"mysql": 13306, "redis": 16379},
     }
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     values, _, _ = read_config(path, tmp_path, core_only=True)
     db = make_url(values["MYCOMFY_DATABASE_URL"])
     assert (db.host, db.port) == ("db.internal", 13306)
@@ -349,13 +347,13 @@ def test_remote_endpoints_and_publish_addresses(tmp_path):
         assert (options["host"], options["port"]) == ("fd00::7", 16379)
 
     config["mysql"]["engine_host"] = "fd00::2"
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     values, _, _ = read_config(path, tmp_path, core_only=True)
     db = make_url(values["MYCOMFY_ENGINE_DATABASE_URL"])
     assert (db.host, db.port) == ("fd00::2", 13306)
 
     config["mysql"]["engine_port"] = 33306
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     values, _, _ = read_config(path, tmp_path, core_only=True)
     assert make_url(values["MYCOMFY_ENGINE_DATABASE_URL"]).port == 33306
     assert make_url(values["MYCOMFY_DATABASE_URL"]).port == 13306
@@ -363,8 +361,8 @@ def test_remote_endpoints_and_publish_addresses(tmp_path):
 
 @pytest.mark.parametrize(("configured", "forced"), [(True, False), (False, True)])
 def test_single_host_uses_local_databases_for_all_services(tmp_path, configured, forced):
-    """单机 JSON 和命令行选项都固定回环监听与各网络的访问路径，并沿用自定义宿主端口。"""
-    path = tmp_path / "config.json"
+    """单机 YAML 和命令行选项都固定回环监听与各网络的访问路径，并沿用自定义宿主端口。"""
+    path = tmp_path / "config.yaml"
     recipe = {"comfyui": {"url": "engine", "version": "1.0"}, "pytorch": {"torch": "2.6.0"}}
     config = {
         "single_host": configured,
@@ -380,11 +378,10 @@ def test_single_host_uses_local_databases_for_all_services(tmp_path, configured,
         "ports": {"mysql": 13306, "redis": 16379},
         "engine": recipe,
     }
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     values, inputs, single_host = read_config(path, tmp_path, core_only=False, single_host=forced)
     assert single_host is True and inputs == recipe
-    assert values["MYCOMFY_MYSQL_HOST"] == values["MYCOMFY_MYSQL_BIND_HOST"] == "127.0.0.1"
-    assert values["MYCOMFY_REDIS_HOST"] == values["MYCOMFY_REDIS_BIND_HOST"] == "127.0.0.1"
+    assert values["MYCOMFY_MYSQL_BIND_HOST"] == values["MYCOMFY_REDIS_BIND_HOST"] == "127.0.0.1"
     assert values["MYCOMFY_DATABASE_URL"] == "mysql+pymysql://db:pass@127.0.0.1:13306/mycomfy"
     assert values["MYCOMFY_ENGINE_DATABASE_URL"] == "mysql+pymysql://db:pass@mysql:3306/mycomfy"
     assert values["MYCOMFY_REDIS_URL"] == "redis://cache:pass@127.0.0.1:16379/0"
@@ -392,23 +389,23 @@ def test_single_host_uses_local_databases_for_all_services(tmp_path, configured,
     # 隐式全栈必须能建库。纯业务启动和诊断允许沿用已有账号，且无需准备引擎输入。
     config["mysql"]["password"] = "existing'password"
     del config["engine"]
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     with pytest.raises(ValueError, match=r"mysql\.password"):
         read_config(path, tmp_path, core_only=False, single_host=forced)
     values, inputs, single_host = read_config(path, tmp_path, core_only=True, single_host=forced)
     assert single_host is True and inputs is None
     assert make_url(values["MYCOMFY_DATABASE_URL"]).password == "existing'password"
     config["mysql"]["password"] = "pass"
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     with pytest.raises(ValueError, match="engine"):
         read_config(path, tmp_path, core_only=False, single_host=forced)
 
 
 @pytest.mark.parametrize("value", ["true", 1, None])
-def test_single_host_accepts_json_booleans_only(tmp_path, value):
+def test_single_host_accepts_booleans_only(tmp_path, value):
     """拒绝可能被误解成启用整机部署的字符串、数字和空值。"""
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps({"single_host": value}))
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml_document({"single_host": value}))
     with pytest.raises(ValueError, match="single_host"):
         read_config(path, tmp_path, core_only=True)
 
@@ -416,12 +413,12 @@ def test_single_host_accepts_json_booleans_only(tmp_path, value):
 @pytest.mark.parametrize("redis", [None, {"user": "cache", "password": ""}])
 def test_gpu_only_omits_redis_without_inheriting_password(tmp_path, monkeypatch, redis):
     """GPU 机可以只提供 MySQL 和引擎参数，运维查看配置时也能使用同一个文件。"""
-    path = tmp_path / "gpu.json"
+    path = tmp_path / "gpu.yaml"
     recipe = {"comfyui": {"url": "engine", "version": "1.0"}, "pytorch": {"torch": "2.6.0"}}
     config = {"mysql": {"host": "db.internal", "user": "db", "password": "mysql"}, "engine": recipe}
     if redis is not None:
         config["redis"] = redis
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     monkeypatch.setenv("REDIS_PASSWORD", "unrelated-ambient-secret")
     monkeypatch.setenv("MYCOMFY_REDIS_URL", "redis://other.internal")
     values, inputs, _ = read_config(path, tmp_path, core_only=False, redis_optional=True)
@@ -437,7 +434,7 @@ def test_gpu_only_omits_redis_without_inheriting_password(tmp_path, monkeypatch,
     with pytest.raises(ValueError, match="redis"):
         read_config(path, tmp_path, core_only=True, database_init=True, redis_optional=True)
     config["redis"] = {"user": "active", "password": "configured"}
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     active, _, _ = read_config(path, tmp_path, core_only=True, redis_optional=True)
     assert active["REDIS_USER"] == "active" and active["REDIS_PASSWORD"] == "configured"
 
@@ -457,21 +454,21 @@ def test_gpu_only_omits_redis_without_inheriting_password(tmp_path, monkeypatch,
 )
 def test_invalid_service_endpoint(tmp_path, field, value):
     """区分主机、端口和发布 IP 的错误，避免生成指向其他库或路径的 URL。"""
-    path = tmp_path / "config.json"
+    path = tmp_path / "config.yaml"
     config = {
         "mysql": {"user": "db", "password": "p", field: value},
         "redis": {"user": "cache", "password": "p"},
     }
-    path.write_text(json.dumps(config))
+    path.write_text(yaml_document(config))
     with pytest.raises(ValueError, match=rf"mysql\.{field}"):
         read_config(path, tmp_path, core_only=True)
 
 
 def test_credential_file_outside_engine_mounts(tmp_path):
     """全栈模式拒绝将整个含密码的用户配置挂载进 GPU 容器。"""
-    path = tmp_path / "config.json"
+    path = tmp_path / "config.yaml"
     path.write_text(
-        json.dumps(
+        yaml_document(
             {
                 "mysql": {"user": "mycomfy", "password": "mysql-local"},
                 "redis": {"user": "default", "password": "redis-local"},
@@ -501,7 +498,7 @@ def test_manual_retry_limit_reaches_core(tmp_path, monkeypatch, limit):
 @pytest.mark.parametrize("limit", [-1, True, "3", 1.5])
 def test_invalid_manual_retry_limit(tmp_path, limit):
     """错误配置在部署阶段就给出具体参数名。"""
-    path = tmp_path / "deploy.json"
-    path.write_text(json.dumps({"manual_retry_limit": limit}))
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml_document({"manual_retry_limit": limit}))
     with pytest.raises(ValueError, match="manual_retry_limit"):
         read_config(path, tmp_path, core_only=True)

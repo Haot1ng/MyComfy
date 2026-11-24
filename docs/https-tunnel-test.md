@@ -38,8 +38,6 @@ python3 scripts/deploy.py --test --config ./deploy.prod.yaml --test-config ./sha
 
 `--config` 指向**当初部署业务服务的完整配置**，包括数据库、路径、端口和常态浏览器来源。省略时沿用部署命令的默认查找顺序。`--test-config` 指向**本次测试使用的机器名和两个外部端口**。测试模式下，显式指定的文件必须存在。[部署配置的查找顺序](deploy-cli.md#配置文件与落盘位置)
 
-如果原来的 `deploy.test.yaml` 包含 `mysql`、`public` 或 `engine` 等业务分组，它属于完整部署配置。若业务服务使用它部署，可保留原文件和其中的相对路径，直接运行 `python3 scripts/deploy.py --test --config ./deploy.test.yaml --test-config ./deploy.test.example.yaml`。需要自定义设备名或端口时，再单独复制测试示例，用 `--test-config` 指向副本。执行前确认完整配置里的来源是测试结束后要使用的业务地址。
-
 ## 打开与退出
 
 - 将终端打印的工作台链接交给普通测试用户。测试期间，工作台端口临时绑定到本机回环地址，原局域网入口会暂停提供服务。切换时已打开的页面可能断线，可从终端打印的 HTTPS 地址重新进入。

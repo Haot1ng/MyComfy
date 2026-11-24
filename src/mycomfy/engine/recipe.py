@@ -189,14 +189,16 @@ def materialize(recipe, root, base):
     return manifest
 
 
-def main():
-    """从指定文件或标准输入读取引擎配置，生成清单后按需安装。"""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("recipe", help="引擎配置文件；- 表示标准输入")
-    parser.add_argument("--base", type=Path, default=Path("/deployment"))
-    parser.add_argument("--root", type=Path, required=True)
+def main(argv=None):
+    """执行 mycomfy deploy，从文件或标准输入读取引擎配置，生成固定清单后按需安装。"""
+    parser = argparse.ArgumentParser(prog="mycomfy deploy", description=__doc__)
+    parser.add_argument("recipe", help="业务配置中 engine 分组的 JSON 文件，- 表示标准输入")
+    parser.add_argument(
+        "--base", type=Path, default=Path("/deployment"), help="本地模型与源码的基准目录"
+    )
+    parser.add_argument("--root", type=Path, required=True, help="保存引擎及依赖锁的持久目录")
     parser.add_argument("--check", action="store_true", help="解析并校验配置和依赖锁")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     raw = sys.stdin.buffer.read() if args.recipe == "-" else Path(args.recipe).read_bytes()
     manifest = materialize(Recipe.model_validate_json(raw), args.root, args.base)
     print("部署清单", manifest, flush=True)
@@ -205,9 +207,6 @@ def main():
         Deployment.model_validate_json(manifest.read_bytes()).requirements_lock,
         flush=True,
     )
+    # 同一份生成的清单用于校验和安装，避免锁定后重新解析标签或依赖。
     if not args.check:
         print(provision(manifest, args.root))
-
-
-if __name__ == "__main__":
-    main()

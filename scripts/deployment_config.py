@@ -100,30 +100,6 @@ def _connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, re
     }
 
 
-def legacy_single_host_environment(services):
-    """从 Compose 已解析的旧版 .env 提取内置账号、密码和端口，为单机生成本地连接。"""
-
-    def authority(service, username, password):
-        """还原 Compose 输出中的字面量 $，用与配置文件部署相同的规则校验并编码凭据。"""
-        values = services[service]["environment"]
-        credentials = {
-            "user": values[username].replace("$$", "$"),
-            "password": values[password].replace("$$", "$"),
-        }
-        return _credentials(credentials, service, database_init=True)[2]
-
-    # 宿主网络里的业务端使用发布端口，GPU 容器用 Compose 服务名直连 MySQL。
-    loopback = "127.0.0.1"
-    urls = _connection_urls(
-        authority("mysql", "MYSQL_USER", "MYSQL_PASSWORD"),
-        authority("redis", "REDIS_USER", "REDISCLI_AUTH"),
-        _endpoint(loopback, services["mysql"]["ports"][0]["published"]),
-        "mysql:3306",
-        _endpoint(loopback, services["redis"]["ports"][0]["published"]),
-    )
-    return {**urls, "MYCOMFY_MYSQL_BIND_HOST": loopback, "MYCOMFY_REDIS_BIND_HOST": loopback}
-
-
 def read_config(
     path: Path,
     repo: Path,
@@ -133,7 +109,7 @@ def read_config(
     redis_optional: bool = False,
     single_host: bool = False,
 ) -> tuple[dict[str, str], dict | None, bool]:
-    """读取 YAML 或旧 JSON，返回 Compose 变量、引擎配置和生效的单机标记。"""
+    """读取部署 YAML，返回 Compose 变量、引擎配置和生效的单机标记。"""
     config = _object(
         load_document(path),
         "部署配置",
@@ -214,7 +190,6 @@ def read_config(
             "origin",
             "cookie_secure",
             "admin_origin",
-            "admin_test_origin",
             "trusted_proxy_cidrs",
         },
     )
@@ -227,9 +202,7 @@ def read_config(
         raise ValueError("public.trusted_proxy_cidrs 含有无效的 IP 或 CIDR") from None
     host = _text(public.get("host", "127.0.0.1"), "public.host")
     origin = _text(public.get("origin", f"http://127.0.0.1:{ports['api']}"), "public.origin")
-    # 兼容旧 JSON 使用的字段名；新字段显式设为 null 会关闭该管理来源。
-    admin = public.get("admin_origin", public.get("admin_test_origin"))
-    origin, admin_origin = normalize_origins(origin, admin)
+    origin, admin_origin = normalize_origins(origin, public.get("admin_origin"))
     try:
         address = urlsplit(origin)
         port = address.port
@@ -257,8 +230,6 @@ def read_config(
         "MYSQL_PASSWORD": mysql_password,
         "REDIS_USER": redis_user,
         "REDIS_PASSWORD": redis_password,
-        "MYCOMFY_MYSQL_HOST": mysql_host,
-        "MYCOMFY_REDIS_HOST": redis_host,
         "MYCOMFY_MYSQL_BIND_HOST": mysql_bind,
         "MYCOMFY_REDIS_BIND_HOST": redis_bind,
         **_connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, redis_endpoint),

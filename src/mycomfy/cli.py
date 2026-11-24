@@ -13,7 +13,7 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     # 部署与引擎管理有自己的子命令，原样传递参数以保留各自的帮助信息。
     if args and args[0] == "deploy":
-        from mycomfy.engine.deploy import main as deploy_main
+        from mycomfy.engine.recipe import main as deploy_main
 
         return deploy_main(args[1:])
     if args and args[0] == "runtime":
@@ -23,7 +23,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(prog="mycomfy")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("deploy", help="按清单安装 ComfyUI、依赖、节点和模型")
+    commands.add_parser("deploy", help="按引擎配置锁定并安装 ComfyUI、依赖、节点和模型")
     commands.add_parser("runtime", help="管理本机引擎实例与运行代次")
     commands.add_parser("migrate", help="升级 MySQL 结构")
     public = commands.add_parser("api", help="在一个进程运行用户及本机 API")

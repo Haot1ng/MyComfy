@@ -25,6 +25,227 @@ MyComfy/
 └── docs/                         部署、运维与验收
 ```
 
+<details>
+<summary>展开完整文件树（186 个文件，含用途注释）</summary>
+
+```text
+MyComfy/
+├── README.md                                                  # 项目入口与快速上手
+├── scripts/                                                   # 部署、测试和验收命令
+│   ├── accept_gpu.py                                          # 通过 API 验收视频生成与下载
+│   ├── config_document.py                                     # 安全读取、校验 YAML 文档
+│   ├── deploy.py                                              # 宿主机一键部署、停机及测试入口
+│   ├── deploy_tunnel.py                                       # 切换测试入口，退出时恢复
+│   ├── deployment_config.py                                   # 将 YAML 转为容器变量和引擎配方
+│   ├── funnel_client.py                                       # 启动并回收 Tailscale Funnel 转发
+│   ├── test_mysql.py                                          # 启动临时 MySQL 并运行测试
+│   ├── tunnel_settings.py                                     # 校验并保存隧道设备名和端口
+│   └── vendor/                                                # 部署端内置依赖
+│       ├── README.md                                          # 内置 YAML 解析器来源与许可
+│       └── pyyaml-6.0.3.zip                                   # 部署脚本随附的 YAML 解析器
+├── deploy.config.example.yaml                                 # 部署参数与默认 H3 引擎配置
+├── deploy.test.example.yaml                                   # 临时隧道设备名与端口示例
+├── Dockerfile                                                 # 构建 Core、网关、Worker 和引擎镜像
+├── compose.yaml                                               # 编排应用、MySQL 与 Redis 容器
+├── src/                                                       # Python 源码
+│   └── mycomfy/                                               # 服务端主包
+│       ├── __init__.py                                        # MyComfy 包说明
+│       ├── cli.py                                             # 分派服务、迁移和引擎子命令
+│       ├── config.py                                          # 从环境变量加载运行配置
+│       ├── errors.py                                          # 定义 API 与会话错误
+│       ├── origins.py                                         # 校验并规范化工作台和后台来源地址
+│       ├── api/                                               # HTTP 接口、鉴权、事件和限流
+│       │   ├── __init__.py                                    # 导出 HTTP 应用创建入口
+│       │   ├── app.py                                         # 注册工作台和管理 API、鉴权及审计
+│       │   ├── auth.py                                        # 注册登录、会话校验与撤销
+│       │   ├── events.py                                      # 分发用户事件并推送 SSE
+│       │   ├── group_admin.py                                 # 管理权限组和用户归组
+│       │   ├── pagination.py                                  # 编解码分页游标
+│       │   ├── permissions.py                                 # 查询分组权限并校验操作权限
+│       │   ├── prompt_assist.py                               # 调用模型扩写用户提示词
+│       │   ├── prompt_provider_keys.py                        # 加解密模型服务商密钥
+│       │   ├── prompt_providers.py                            # 管理并切换提示词服务商
+│       │   ├── server.py                                      # 启动用户与管理 API 监听器
+│       │   ├── session_cache.py                               # 缓存 Redis 会话预检结果
+│       │   ├── template_prompt_settings.py                    # 更新模板扩写指令与可扩写字段
+│       │   ├── traffic_admin.py                               # 查询 API 流量并修改限流规则
+│       │   ├── traffic_catalog.py                             # 枚举路由并向网关发布规则
+│       │   ├── traffic_limiter.py                             # 限制用户请求频率和模型调用并发
+│       │   └── web.py                                         # 挂载工作台和后台静态页面
+│       ├── generation/                                        # 任务受理、调度与状态
+│       │   ├── __init__.py                                    # 任务生成包说明
+│       │   ├── jobs.py                                        # 受理批次、查询任务、取消与重试
+│       │   ├── state.py                                       # 管理任务状态迁移、预算和重试结算
+│       │   ├── strategy.py                                    # 校验、发布策略版本并匹配引擎
+│       │   ├── worker.py                                      # 调度任务、核对引擎执行并恢复中断
+│       │   └── worker_health.py                               # 用协调器心跳判断 Worker 健康
+│       ├── engine/                                            # ComfyUI 安装、通信与进程管理
+│       │   ├── __init__.py                                    # ComfyUI 引擎包说明
+│       │   ├── adapter.py                                     # 提交工作流、核对队列及提取输出
+│       │   ├── bundled.py                                     # 校验并安装内置 H3 节点
+│       │   ├── deploy.py                                      # 按固定清单安装引擎、节点和模型
+│       │   ├── lockfile.py                                    # 生成 GPU 依赖及其哈希锁
+│       │   ├── progress.py                                    # 通过 WebSocket 采集节点进度
+│       │   ├── recipe.py                                      # 将引擎配方解析为固定安装清单
+│       │   ├── runtime.py                                     # 管理引擎实例、运行代次及优雅停机
+│       │   ├── supervisor.py                                  # 监护引擎进程树并记录退出凭据
+│       │   └── comfy_nodes/                                   # 随引擎安装的自定义节点
+│       │       ├── __init__.py                                # 注册五图生成四段视频的 H3 节点
+│       │       ├── segment.py                                 # 根据两个关键帧采样一段 H3 视频
+│       │       └── video.py                                   # 用 FFmpeg 分段编码并拼接 MP4
+│       ├── artifacts/                                         # 素材存储与结果发布
+│       │   ├── __init__.py                                    # 文件存储与产物发布包说明
+│       │   ├── publication.py                                 # 登记、发布产物并恢复中断的发布
+│       │   └── storage.py                                     # 校验媒体、存储文件并支持分段下载
+│       ├── database/                                          # 数据库模型与会话
+│       │   ├── __init__.py                                    # 数据库包说明
+│       │   ├── capacity_models.py                             # 定义容量控制和磁盘预留表
+│       │   ├── models.py                                      # 定义用户、任务、素材等核心表
+│       │   ├── prompt_models.py                               # 定义提示词服务商及模板设置表
+│       │   ├── schema.py                                      # 执行迁移并检查数据库版本
+│       │   ├── session.py                                     # 创建数据库会话、ID 与时间戳
+│       │   └── traffic_models.py                              # 定义 API 限流规则表
+│       ├── gateway/                                           # Nginx 网关
+│       │   ├── __init__.py                                    # Nginx 网关包说明
+│       │   ├── __main__.py                                    # 启停 Nginx、热加载规则并报告健康状态
+│       │   ├── metrics.py                                     # 按分钟汇总 Nginx 请求日志
+│       │   └── nginx.py                                       # 将路由和限流规则编译为 Nginx 配置
+│       └── ops/                                               # 监控、容量与备份
+│           ├── __init__.py                                    # 运维工具包说明
+│           ├── backup.py                                      # 备份、校验并恢复数据库与文件
+│           ├── capacity.py                                    # 检查配额、磁盘水位并预留空间
+│           ├── monitor.py                                     # 提供运行监控、日志查询和告警
+│           ├── traffic_metrics.py                             # 按路由和时间窗口查询流量
+│           └── traffic_store.py                               # 读写限流配置并计算生效规则
+├── web/                                                       # 浏览器页面
+│   ├── client/                                                # 用户工作台
+│   │   ├── README.md                                          # 工作台使用与权限接入说明
+│   │   ├── access.mjs                                         # 按权限控制页面与按钮
+│   │   ├── access.test.mjs                                    # 测试前端页面与按钮权限
+│   │   ├── app.js                                             # 工作台路由、登录注册与账户设置
+│   │   ├── client.css                                         # 工作台布局与通用控件样式
+│   │   ├── composer.css                                       # 任务创建表单样式
+│   │   ├── composer.js                                        # 按模板生成表单、上传素材并提交任务
+│   │   ├── history.css                                        # 任务历史与详情样式
+│   │   ├── history.js                                         # 查看任务、预览产物与重试失败任务
+│   │   ├── index.html                                         # 工作台网页入口
+│   │   ├── session.js                                         # 管理会话请求、媒体与事件订阅
+│   │   └── studio.webp                                        # 登录页与工作台首页封面图
+│   └── admin/                                                 # 管理后台
+│       ├── README.md                                          # 后台使用与模板维护指南
+│       ├── admin.css                                          # 后台布局与通用控件样式
+│       ├── admin.js                                           # 监控列表、详情与自动刷新
+│       ├── graph.css                                          # 工作流节点图样式
+│       ├── index.html                                         # 运行监控首页
+│       ├── navigation.js                                      # 后台侧栏与页面导航
+│       ├── overview.css                                       # 监控总览样式
+│       ├── overview.js                                        # 渲染任务分布、告警与磁盘用量
+│       ├── providers.css                                      # 提示词服务商页面样式
+│       ├── providers.html                                     # 提示词服务商配置页
+│       ├── providers.js                                       # 管理并切换扩写服务商
+│       ├── template-catalog.js                                # 合并已发布与内置模板目录
+│       ├── template-draft.js                                  # 解析 JSONC、绑定输入并生成策略草稿
+│       ├── template-editor.css                                # 模板编辑器样式
+│       ├── template-editor.js                                 # 编辑输入绑定与提示词扩写规则
+│       ├── template-example.js                                # 展示、复制和下载模板示例
+│       ├── templates.css                                      # 模板管理页面样式
+│       ├── templates.html                                     # 工作流模板管理页
+│       ├── templates.js                                       # 导入、预览和发布工作流模板
+│       ├── traffic.css                                        # 接口流量与限流表格样式
+│       ├── traffic.html                                       # API 流量管理页
+│       ├── traffic.js                                         # 展示接口流量并编辑两层限流规则
+│       ├── users.css                                          # 用户列表与分组编辑样式
+│       ├── users.html                                         # 用户与分组管理页
+│       ├── users.js                                           # 分页查看用户并修改分组
+│       ├── workflow-graph.js                                  # 解析工作流并绘制交互式节点图
+│       └── presets/                                           # 内置工作流模板
+│           ├── example-h3-text-to-video.strategy.jsonc        # 逐字段注释的 H3 文生视频示例
+│           ├── h3-i2v.strategy.json                           # H3 图生视频预设
+│           └── h3-t2v.strategy.json                           # H3 文生视频预设
+├── migrations/                                                # 数据库结构迁移
+│   ├── env.py                                                 # 加载模型并执行数据库迁移
+│   ├── script.py.mako                                         # 生成新迁移脚本的模板
+│   └── versions/                                              # 按版本执行的结构变更
+│       ├── 0001_initial_schema.py                             # 建立初始业务表
+│       ├── 0002_capacity.py                                   # 新增磁盘水位和空间预留表
+│       ├── 0003_capacity_target.py                            # 记录目标卷的预留字节数
+│       ├── 0004_user_groups.py                                # 新增用户组、成员及权限
+│       ├── 0005_manual_retry_count.py                         # 记录任务手动重试次数
+│       ├── 0006_prompt_providers.py                           # 新增扩写服务商和模板配置表
+│       └── 0007_traffic_rules.py                              # 新增限流规则表及审计字段
+├── examples/                                                  # 可导入示例
+│   └── strategies/                                            # 视频生成策略
+│       ├── h3-five-image-20s-segmented-384.strategy.json      # 五图分段视频模板，20 秒、384×384
+│       └── h3-five-image-20s-segmented-640.strategy.json      # 五图分段视频模板，20 秒、640×640
+├── tests/                                                     # 自动化测试
+│   ├── conftest.py                                            # 为测试创建独立 MySQL 库
+│   ├── e2e/                                                   # 端到端测试
+│   │   ├── test_cloud_delivery.py                             # 验证提交批次到发布 MP4 的完整流程
+│   │   ├── test_job_original_web.py                           # 验证任务原始参数与素材页面
+│   │   ├── test_job_retry_web.py                              # 验证前台重试按钮、权限与次数
+│   │   ├── test_prompt_assist_web.py                          # 验证前台扩写、预览与草稿保护
+│   │   ├── test_prompt_providers_web.py                       # 验证后台切换模型服务商与更新密钥
+│   │   ├── test_template_prompt_assist_web.py                 # 验证模板扩写配置与示例导入
+│   │   ├── test_traffic_web.py                                # 验证后台流量图表与两层限流设置
+│   │   └── test_user_admin_web.py                             # 验证后台改组与用户权限生效
+│   ├── integration/                                           # 集成测试
+│   │   ├── test_accept_gpu.py                                 # 验证 GPU 验收脚本的取证与失败报告
+│   │   ├── test_admin_origin.py                               # 验证管理入口的来源与监听边界
+│   │   ├── test_api.py                                        # 验证会话、分组、批次提交与任务接口
+│   │   ├── test_compose_roles.py                              # 验证 Compose 角色依赖与连接参数
+│   │   ├── test_deploy.py                                     # 验证引擎重复安装与模型完整性
+│   │   ├── test_deploy_cli.py                                 # 验证部署命令、角色选择与启停顺序
+│   │   ├── test_deploy_tunnel.py                              # 验证临时隧道启停与业务入口恢复
+│   │   ├── test_engine_lockfile.py                            # 验证依赖来源、锁定与哈希安装
+│   │   ├── test_events.py                                     # 验证事件续传、会话撤销与通知已读
+│   │   ├── test_gateway.py                                    # 验证 Nginx 路由、热加载与流量计数
+│   │   ├── test_migrations.py                                 # 验证数据库升降级、版本检查与数据回填
+│   │   ├── test_ops.py                                        # 验证容量预留、监控、日志与备份恢复
+│   │   ├── test_prompt_assist.py                              # 验证提示词扩写鉴权、限流与调用范围
+│   │   ├── test_prompt_providers.py                           # 验证服务商密钥保护与并发切换
+│   │   ├── test_publication.py                                # 验证产物发布中断后的恢复
+│   │   ├── test_runtime.py                                    # 验证引擎进程接管、停机与退出记录
+│   │   ├── test_segmented_node.py                             # 验证分段节点输出和失败清理
+│   │   ├── test_serve.py                                      # 验证 API 端口与 Unix 套接字隔离
+│   │   ├── test_storage.py                                    # 验证上传回滚、文件完整性与范围读取
+│   │   ├── test_template_prompt_settings.py                   # 验证模板扩写设置的保存、恢复与并发
+│   │   ├── test_traffic_admin.py                              # 验证流量管理接口与网关状态同步
+│   │   ├── test_traffic_catalog.py                            # 核对路由目录与网关配置快照
+│   │   ├── test_traffic_limiter.py                            # 验证限流窗口、并发配额与异常释放
+│   │   └── test_worker_protocol.py                            # 验证领任务、提交、重试与执行对账
+│   ├── unit/                                                  # 单元测试
+│   │   ├── test_contracts.py                                  # 核对批次摘要、策略约束与函数注释
+│   │   ├── test_deployment_config.py                          # 验证部署 YAML 解析与参数传递
+│   │   ├── test_funnel_client.py                              # 验证双端口 Funnel 转发与清理
+│   │   ├── test_segment_video.py                              # 验证 FFmpeg 分段编码、拼接与清理
+│   │   ├── test_segmented_templates.py                        # 核对 H3 分段模板与已部署节点
+│   │   ├── test_strategy_prompt_assist.py                     # 验证策略发布时的扩写字段约束
+│   │   ├── test_tunnel_settings.py                            # 验证测试隧道配置、设备名与端口
+│   │   └── test_worker_health.py                              # 验证 Worker 心跳与健康探针
+│   └── web/                                                   # 前端 JavaScript 测试
+│       ├── session.test.mjs                                   # 验证前台会话、事件重连与原始参数显示
+│       ├── template-catalog.test.mjs                          # 验证模板分页与已发布版本优先显示
+│       ├── template-draft.test.mjs                            # 验证模板草稿、JSONC 解析与输入绑定
+│       └── workflow-graph.test.mjs                            # 验证工作流预览的节点与连线
+├── docs/                                                      # 部署、运维与接口文档
+│   ├── api-traffic.md                                         # API 流量统计与两层限流说明
+│   ├── cloud-acceptance.md                                    # 云端集成验收记录
+│   ├── deploy-cli.md                                          # 部署命令和配置项手册
+│   ├── engine-deployment.md                                   # ComfyUI、节点与模型部署指南
+│   ├── gpu-acceptance.md                                      # 真实 GPU 生成与交付验收步骤
+│   ├── https-tunnel-test.md                                   # 临时 HTTPS 隧道测试指南
+│   ├── operations.md                                          # 权限、监控、容量与备份恢复手册
+│   └── web-api.md                                             # 工作台与管理后台 API 契约
+├── pyproject.toml                                             # Python 依赖、命令入口及工具配置
+├── uv.lock                                                    # 锁定 Python 依赖版本
+├── alembic.ini                                                # Alembic 数据库迁移配置
+├── .gitattributes                                             # 固定内置节点源码的换行符
+├── .gitignore                                                 # 排除本地配置、数据与缓存
+└── .dockerignore                                              # 筛选镜像构建所需文件
+```
+
+</details>
+
 在宿主机用 `python3 scripts/deploy.py` 部署。引擎镜像以 `python -m mycomfy.cli` 为入口，由 `deploy` 子命令安装引擎，`runtime` 子命令管理实例。备份与恢复工具使用 `python -m mycomfy.ops.backup`。部署脚本和镜像内部命令只维护当前版本。变更入口或参数时，同步更新调用方、测试和部署手册。[部署入口](scripts/deploy.py) · [引擎配方](src/mycomfy/engine/recipe.py) · [实例管理](src/mycomfy/engine/runtime.py) · [备份工具](src/mycomfy/ops/backup.py)
 
 两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略，“用户管理”可查看全部账号并调整所属权限组。“API 流量”列出所有业务和管理 API，支持查看请求量、错误和耗时，以及在线调整每个接口的限流规则。[流量与限流说明](docs/api-traffic.md) · [C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)

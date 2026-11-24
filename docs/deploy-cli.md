@@ -9,19 +9,22 @@
 | 首次安装或部署更新后的源码 | `python3 scripts/deploy.py --single-host` |
 | 正常停机后，用已有镜像和容器恢复服务 | `python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core gateway engine worker` |
 | 查看所有服务的状态，包括已经退出的迁移容器 | `python3 scripts/deploy.py --compose --profile database ps -a` |
+| 临时分享已运行业务的工作台和后台 | `python3 scripts/deploy.py --test`，前台保留，按 Ctrl+C 恢复 |
 | 关闭电脑或 WSL 前优雅停机 | `python3 scripts/deploy.py --stop` |
 
 日常开机用第二条；它会跳过镜像构建和 GPU 安装器。更新版本时，先用 `git pull --ff-only origin main` 拉取源码，再部署。正在处理任务的机器可先执行 `--stop`，等排空完成。
 
 ## 全部命令行参数
 
-下表每一项都接在 `python3 scripts/deploy.py` 后。五种模式 `--single-host`、`--db-only`、`--core-only`、`--gpu-only`、`--compose` 一次只能选一种。[参数和模式实现](../scripts/deploy.py)
+下表每一项都接在 `python3 scripts/deploy.py` 后。`--single-host`、`--db-only`、`--core-only`、`--gpu-only`、`--compose` 和 `--test` 一次只选一种模式。[参数和模式实现](../scripts/deploy.py)
 
 | 参数 | 实际行为及使用条件 |
 | --- | --- |
 | `-h`、`--help` | 打印当前检出版本的帮助并退出。 |
 | 无参数 | 按配置中的 `single_host` 决定是否先启动内置数据库。仓库模板为 `false`，此时要求 MySQL、Redis 已就绪，再部署业务端和 GPU 端。 |
-| `--config ./deploy.prod.yaml` | 指定 YAML（`.yaml`、`.yml`）或已有 JSON 部署配置，可与部署、停机或 Compose 操作组合。若显式指定的文件不存在，脚本会提示并使用仓库模板。 |
+| `--config ./deploy.prod.yaml` | 指定 YAML（`.yaml`、`.yml`）或已有 JSON 部署配置，供部署、停机、Compose 操作以及临时测试选取原业务配置。常规模式遇到显式路径缺失时提示并使用仓库模板，`--test` 会报错。 |
+| `--test` | 临时为已运行的 Core 和网关切换浏览器来源，开启两条 Funnel，打印工作台与后台链接。命令在前台运行，Ctrl+C 后关闭本次转发并恢复原业务入口。 |
+| `--test-config ./share.qa.yaml` | 与 `--test` 一起指定设备和外部 HTTPS 端口。默认读取仓库的 `deploy.test.yaml`。首次无此文件时采用示例，两条转发注册成功后将实际设备名和端口保存到本机 `deploy.test.yaml`。 |
 | `--single-host` | 本次启用单机连接配置，并在本机部署数据库、业务端和 GPU 端。 |
 | `--db-only` | 在数据机启动项目自带的 MySQL、Redis，等待两者健康。 |
 | `--core-only` | 在业务机构建 `migrate`、`core`、`gateway`，执行迁移并启动 API、工作台和管理后台。先准备好数据库。 |
@@ -33,6 +36,8 @@
 | `--compose <参数…>` | 用同一份部署配置运行 Docker Compose。后续参数全部传给 Compose；将 `--config` 等部署脚本参数写在它前面。 |
 
 分机启动顺序为 **数据机 → 业务机 → GPU 机**。业务机与 GPU 机还需把同一共享盘挂载到相同绝对路径，并让部署用户可读写，以便交接上传素材和结果文件。显式指定角色时只对该角色执行部署；配置里的 `single_host` 仍决定数据库连接地址。[分机配置示例](../README.md#已有部署与分机部署)
+
+仅显式使用 `--test` 会调用 Tailscale。测试使用当前部署的业务数据，管理链接具有免登录管理权限。两类配置文件的用途、首次准备和同一终端的启停步骤见[临时外网测试](https-tunnel-test.md)。
 
 ### Compose 运维
 
@@ -71,6 +76,7 @@ python3 scripts/deploy.py --compose --help
 | 文件或目录 | 谁读取、保存什么 |
 | --- | --- |
 | `deploy.config.yaml`、`deploy.config.example.yaml` | 前者存放本机配置，后者提供带中文注释的默认值。`deploy.py` 将连接地址、端口等转换为 Compose 进程的环境变量，只将 `engine` 分组传给 GPU 安装器。 |
+| `deploy.test.yaml`、`deploy.test.example.yaml` | 前者保存本机测试的设备名和外部端口，后者提供首次运行的默认值。测试时通过 `--config` 或常规查找顺序另行选取原业务配置。 |
 | `.env`、`.env.example` | 旧版部署的变量文件和模板。读取 YAML 或 JSON 部署配置时，脚本向 Compose 传入 `--env-file /dev/null`，因此仓库的 `.env` 不参与这次变量解析。 |
 | `compose.yaml` | Compose 的服务定义，包括镜像或构建目标、启动命令、网络、依赖、挂载、GPU 和健康检查。 |
 | `Dockerfile`、`pyproject.toml`、`uv.lock` | 构建 MyComfy 应用镜像和镜像内的 Python 环境，`uv.lock` 固定应用依赖。 |

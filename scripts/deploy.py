@@ -193,6 +193,12 @@ def main():
         "--gpu-only", action="store_true", help="连接已迁移的数据库，只部署 GPU 引擎和 Worker"
     )
     mode.add_argument(
+        "--test", action="store_true", help="在已运行的业务机临时分享工作台和后台，Ctrl+C 恢复"
+    )
+    parser.add_argument(
+        "--test-config", type=Path, help="测试专用 YAML，配置设备名和两个 HTTPS 端口"
+    )
+    mode.add_argument(
         "--compose", nargs=argparse.REMAINDER, help="用同一份配置执行 Compose 命令，如 ps 或 logs"
     )
     parser.add_argument(
@@ -201,6 +207,12 @@ def main():
     args = parser.parse_args()
     if args.stop and args.compose is not None:
         parser.error("--stop 不能与 --compose 一起使用")
+    if args.stop and args.test:
+        parser.error("--test 会在 Ctrl+C 后结束，请单独执行 --stop 停机")
+    if args.test_config is not None and not args.test:
+        parser.error("--test-config 需要与 --test 一起使用")
+    if args.test and args.config is not None and not args.config.is_file():
+        parser.error(f"找不到已有业务部署的配置 {args.config}")
     repo = Path(__file__).resolve().parents[1]
     config_path = select_config(repo, args.config)
     process_env = {**os.environ, "PWD": str(repo)}
@@ -217,14 +229,14 @@ def main():
         settings, recipe, single_host = read_config(
             config_path,
             repo,
-            core_only=args.db_only or args.core_only or args.compose is not None,
+            core_only=args.db_only or args.core_only or args.test or args.compose is not None,
             database_init=args.db_only,
             redis_optional=args.gpu_only or args.compose is not None,
             single_host=single_host,
         )
         process_env.update(settings)
         compose += ["--env-file", os.devnull]
-    elif args.compose is None:
+    elif args.compose is None and not args.test:
         # 已部署的项目仍可沿用原有 .env、deployment.json 和离线锁文件。
         subprocess.run(
             ["sh", "scripts/init-env.sh", "--generate-passwords"],
@@ -242,6 +254,12 @@ def main():
             [*compose, *arguments], cwd=repo, env=process_env, check=True, **options
         )
 
+    if args.test:
+        # 仅显式测试时加载 Tailscale 适配器，常规部署不依赖本机的隧道客户端。
+        from deploy_tunnel import run_test_session
+
+        run_test_session(repo, args.test_config, run_compose, process_env)
+        return
     if args.stop:
         graceful_stop(run_compose, args, repo)
         return

@@ -65,6 +65,14 @@ python3 scripts/deploy.py --single-host
 
 这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 Core、Nginx 网关、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.yaml) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
+**临时从外网测试已有部署**时，在运行 Core 和网关的业务机上登录 Tailscale 并开通 Funnel 后，在 WSL 或 Linux 的项目目录执行下面的命令。
+
+```bash
+python3 scripts/deploy.py --test
+```
+
+终端会打印工作台和管理后台的 HTTPS 链接。管理链接提供免登录管理权限。保持终端打开，结束时按 **Ctrl+C**，等待两条临时转发关闭并恢复原业务来源。首次使用默认值成功开通两条转发后，脚本将本机的完整设备名及外部端口保存到 `deploy.test.yaml`。也可提前复制 `deploy.test.example.yaml` 并编辑。原业务配置由 `--config` 或默认查找顺序选定。[首次准备与配置示例](docs/https-tunnel-test.md)
+
 **启用 AI 提示词扩写**时，在管理后台的“提示词服务商”添加兼容 OpenAI Chat Completions 的 API 基址、模型标识及可选 API 密钥，再点击“启用”。基址由业务端容器访问，例如填 `https://api.example.com/v1`，服务端会追加 `/chat/completions`。可以保存多套配置，切换后从下一次扩写开始生效。
 
 在“工作流模板”的“打开 JSON 文件”旁可查看、下载带逐字段中文注释的 H3 模板（JSONC），也可以下载标准 JSON。上传文件时可以省略 `prompt_assist`，先发布并正常生成视频。选中已发布模板后，在“AI 提示词辅助”里填写指令、勾选文本字段并单独保存。新设置从下一次扩写生效，无需重新上传文件、发布版本或重启服务。内置 H3 文生视频、图生视频预设和仓库的五图分段示例均附有各自的指令。工作台用户可以直接提交原文，也可以点击“扩写提示词”，预览并编辑建议后再采用。一次扩写仅将模板指令、当前字段及其草稿发给生效的服务。[完整注释示例](web/admin/presets/example-h3-text-to-video.strategy.jsonc) · [API 与字段说明](docs/web-api.md#策略与素材)
@@ -169,7 +177,7 @@ ports:
 4. 旧版部署使用的仓库 `.env` 或部署目录下的 `deployment.json`。
 5. 仓库自带的 [deploy.config.example.yaml](deploy.config.example.yaml)。
 
-显式传入 `--config /路径/部署配置.yaml` 会优先使用指定文件。`.yml` 和旧 JSON 同样可用，例如 `python3 scripts/deploy.py --config ./deploy.config.json --single-host`。指定的文件缺失时，脚本提示后改用仓库 YAML 模板。复用已有 MySQL 数据卷时，配置中的凭据须与库内账号匹配。[部署命令手册](docs/deploy-cli.md#配置文件与落盘位置) · [旧版安装清单](docs/engine-deployment.md#安装清单)
+显式传入 `--config /路径/部署配置.yaml` 会优先使用指定文件。`.yml` 和旧 JSON 同样可用，例如 `python3 scripts/deploy.py --config ./deploy.config.json --single-host`。常规部署中指定的文件缺失时，脚本提示后改用仓库 YAML 模板。临时外网测试中显式指定的业务配置必须存在。复用已有 MySQL 数据卷时，配置中的凭据须与库内账号匹配。[部署命令手册](docs/deploy-cli.md#配置文件与落盘位置) · [旧版安装清单](docs/engine-deployment.md#安装清单)
 
 ### 从 Python 环境启动
 

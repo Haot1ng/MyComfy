@@ -31,10 +31,11 @@ def test_custom_accounts_and_paths(tmp_path):
                 "mysql": {"user": "a@b", "password": mysql_password},
                 "redis": {"user": "cache", "password": redis_password},
                 "ports": {"mysql": 3333, "redis": 6380, "api": 8080, "admin": 8081},
-                "paths": {"data": "files", "deployment": "/srv/engine-import"},
+                "paths": {"data": "files", "gateway": "edge", "deployment": "/srv/engine-import"},
                 "public": {
                     "origin": "https://video.example/",
-                    "admin_test_origin": "HTTPS://ADMIN.Example:443/",
+                    "admin_origin": "HTTPS://ADMIN.Example:443/",
+                    "trusted_proxy_cidrs": ["192.0.2.10", "2001:db8::/48"],
                 },
                 "engine": recipe,
             }
@@ -57,9 +58,11 @@ def test_custom_accounts_and_paths(tmp_path):
         assert (options["host"], options["port"], options["db"]) == ("127.0.0.1", 6380, 0)
     assert values["MYCOMFY_DATA_ROOT"] == str(config_dir / "files")
     assert values["MYCOMFY_CONFIG_DIR"] == str(repo / "var/config")
+    assert values["MYCOMFY_GATEWAY_STATE_DIR"] == str(config_dir / "edge")
+    assert values["MYCOMFY_TRUSTED_PROXY_CIDRS"] == "192.0.2.10/32,2001:db8::/48"
     assert values["MYCOMFY_DEPLOYMENT_DIR"] == "/srv/engine-import"
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "https://video.example"
-    assert values["MYCOMFY_ADMIN_TEST_ORIGIN"] == "https://admin.example"
+    assert values["MYCOMFY_ADMIN_ORIGIN"] == "https://admin.example"
     assert values["MYCOMFY_COOKIE_SECURE"] == "true"
     assert values["MYCOMFY_MYSQL_HOST"] == values["MYCOMFY_REDIS_HOST"] == "127.0.0.1"
     assert values["MYCOMFY_MYSQL_BIND_HOST"] == values["MYCOMFY_REDIS_BIND_HOST"] == "127.0.0.1"
@@ -78,7 +81,8 @@ def test_core_only_and_secret_errors(tmp_path):
     values, recipe, _ = read_config(path, tmp_path, core_only=True)
     assert recipe is None
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "http://127.0.0.1:8000"
-    assert values["MYCOMFY_ADMIN_TEST_ORIGIN"] == ""
+    assert values["MYCOMFY_ADMIN_ORIGIN"] == ""
+    assert values["MYCOMFY_TRUSTED_PROXY_CIDRS"] == ""
     with pytest.raises(ValueError, match="engine"):
         read_config(path, tmp_path, core_only=False)
     data["mysql"]["password"] = "credential'not-for-logs"
@@ -88,6 +92,26 @@ def test_core_only_and_secret_errors(tmp_path):
     with pytest.raises(ValueError, match=r"mysql\.password") as error:
         read_config(path, tmp_path, core_only=True, database_init=True)
     assert data["mysql"]["password"] not in str(error.value)
+
+
+def test_old_json_admin_origin_is_mapped_only_when_new_key_is_absent(tmp_path):
+    """读取旧 JSON 时映射旧键，显式配置的新值（包括关闭）始终优先。"""
+    config = json.loads(
+        (Path(__file__).resolve().parents[2] / "deploy.config.example.json").read_text()
+    )
+    public = {"origin": "https://studio.example", "admin_test_origin": "https://old-admin.example"}
+    config["public"] = public
+    path = tmp_path / "deploy.json"
+    for overrides, expected in (
+        ({}, "https://old-admin.example"),
+        ({"admin_origin": "https://admin.example"}, "https://admin.example"),
+        ({"admin_origin": None}, ""),
+    ):
+        config["public"] = {**public, **overrides}
+        path.write_text(json.dumps(config))
+        values, _, _ = read_config(path, tmp_path, core_only=True)
+        assert values["MYCOMFY_ADMIN_ORIGIN"] == expected
+        assert "MYCOMFY_ADMIN_TEST_ORIGIN" not in values
 
 
 @pytest.mark.parametrize(
@@ -105,16 +129,16 @@ def test_admin_origin_from_environment(monkeypatch, admin, expected):
     monkeypatch.setenv("MYCOMFY_DATABASE_URL", "sqlite://")
     monkeypatch.setenv("MYCOMFY_PUBLIC_ORIGIN", "https://front.example")
     if admin is None:
-        monkeypatch.delenv("MYCOMFY_ADMIN_TEST_ORIGIN", raising=False)
+        monkeypatch.delenv("MYCOMFY_ADMIN_ORIGIN", raising=False)
     else:
-        monkeypatch.setenv("MYCOMFY_ADMIN_TEST_ORIGIN", admin)
-    assert Settings.from_env().admin_test_origin == expected
+        monkeypatch.setenv("MYCOMFY_ADMIN_ORIGIN", admin)
+    assert Settings.from_env().admin_origin == expected
 
 
 @pytest.mark.parametrize(
     ("public", "admin", "field"),
     [
-        ("https://front.example", value, r"public\.admin_test_origin")
+        ("https://front.example", value, r"public\.admin_origin")
         for value in (
             False,
             "*",
@@ -150,14 +174,14 @@ def test_invalid_test_origins_fail_before_deployment_and_startup(tmp_path, publi
             {
                 "mysql": {"user": "app", "password": "p"},
                 "redis": {"user": "default", "password": "p"},
-                "public": {"origin": public, "admin_test_origin": admin},
+                "public": {"origin": public, "admin_origin": admin},
             }
         )
     )
     with pytest.raises(ValueError, match=field):
         read_config(path, tmp_path, core_only=True)
     with pytest.raises(ValueError, match=field):
-        Settings("sqlite://", tmp_path, public_origin=public, admin_test_origin=admin)
+        Settings("sqlite://", tmp_path, public_origin=public, admin_origin=admin)
 
 
 def test_remote_endpoints_and_publish_addresses(tmp_path):

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="same-origin">
+  <title>API 流量 · MyComfy</title>
+  <link rel="stylesheet" href="./admin.css">
+  <link rel="stylesheet" href="./traffic.css">
+  <script type="module" src="./traffic.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳至内容</a>
+  <div class="shell">
+    <aside>
+      <a class="brand" href="./#/overview" aria-label="MyComfy 监控总览"><span class="brandmark" aria-hidden="true"><i></i><i></i><i></i></span>MyComfy</a>
+      <nav id="nav" aria-label="管理后台导航"></nav>
+    </aside>
+    <main id="content" tabindex="-1">
+      <header class="topbar"><span class="crumb"><a href="./#/overview">管理后台</a><span aria-hidden="true">/</span><strong>API 流量</strong></span></header>
+      <div class="workspace">
+        <div class="pagehead">
+          <h1>API 流量</h1>
+          <div class="toolbar">
+            <label for="window-minutes">统计时段</label>
+            <select id="window-minutes">
+              <option value="5">最近 5 分钟</option><option value="15" selected>最近 15 分钟</option>
+              <option value="60">最近 1 小时</option><option value="1440">最近 24 小时</option>
+            </select>
+            <button id="refresh" type="button">刷新</button>
+            <label><input id="auto-refresh" type="checkbox" checked>每 15 秒自动刷新</label>
+          </div>
+        </div>
+        <section class="traffic-summary panel" aria-label="全部接口流量汇总">
+          <dl><div><dt>请求总数</dt><dd id="requests-total">—</dd></div><div><dt>平均每分钟请求</dt><dd id="rpm-total">—</dd></div><div><dt>网关限流拒绝</dt><dd id="edge-total">—</dd></div><div><dt>Core 限流拒绝</dt><dd id="core-total">—</dd></div></dl>
+        </section>
+        <div class="traffic-health"><span id="edge-sync" class="state" role="status">正在读取网关状态</span><span id="sync-detail" class="faint"></span></div>
+        <p class="traffic-note faint">仅统计已登记的 API。首次启用网关前的请求可在<a href="./#/requests">请求审计</a>中查看。</p>
+        <p id="metrics-note" class="traffic-note" hidden></p>
+        <p id="list-status" class="traffic-feedback" role="status"></p>
+        <section class="panel" aria-labelledby="routes-title">
+          <div class="traffic-filters">
+            <h2 id="routes-title">接口明细</h2>
+            <div class="toolbar">
+              <label for="listener">入口</label>
+              <select id="listener"><option value="">全部入口</option><option value="public">业务端</option><option value="local">管理端</option></select>
+              <label for="route-search">查找接口</label>
+              <input type="search" id="route-search" placeholder="方法或路径" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <div class="tablebox" role="region" aria-label="接口明细，可横向滚动" tabindex="0">
+            <table>
+              <thead><tr><th scope="col">方法与路径</th><th scope="col">请求量</th><th scope="col">网关拒绝</th><th scope="col">Core 拒绝</th><th scope="col">4xx / 5xx</th><th scope="col">平均响应耗时</th><th scope="col">网关 IP 限额</th><th scope="col">Core 限额</th><th scope="col">操作</th></tr></thead>
+              <tbody id="traffic-rows"></tbody>
+            </table>
+          </div>
+          <p id="no-routes" class="empty" hidden>没有匹配的接口。</p>
+        </section>
+        <noscript>启用 JavaScript 后可查看接口流量和调整限额。</noscript>
+      </div>
+    </main>
+  </div>
+  <dialog id="rule-editor" aria-labelledby="rule-title" aria-describedby="rule-target">
+    <form id="rule-form">
+      <h2 id="rule-title">编辑限流规则</h2>
+      <p id="rule-target" class="code"></p>
+      <fieldset id="edge-fields">
+        <legend>第一层 · 网关按来源 IP</legend>
+        <label for="edge-rpm">每分钟请求上限</label>
+        <input id="edge-rpm" type="number" min="0" max="60000" step="1" required aria-describedby="edge-rpm-help">
+        <small id="edge-rpm-help"></small>
+        <label for="edge-burst">额外突发请求数</label>
+        <input id="edge-burst" type="number" min="0" max="10000" step="1" required aria-describedby="edge-burst-help">
+        <small id="edge-burst-help"></small>
+      </fieldset>
+      <fieldset id="core-fields">
+        <legend>第二层 · Core</legend>
+        <div id="user-setting">
+          <label for="user-rpm">每用户每分钟请求上限</label>
+          <input id="user-rpm" type="number" min="0" max="60000" step="1" required aria-describedby="user-rpm-help">
+          <small id="user-rpm-help"></small>
+        </div>
+        <div id="provider-setting">
+          <label for="provider-concurrency">每服务商并发上限</label>
+          <input id="provider-concurrency" type="number" min="0" max="1024" step="1" required aria-describedby="provider-concurrency-help">
+          <small id="provider-concurrency-help"></small>
+        </div>
+      </fieldset>
+      <p id="form-status" class="traffic-feedback" role="status"></p>
+      <div class="rule-actions"><button id="reset-rule" type="button">恢复默认</button><button id="cancel" type="button">取消</button><button type="submit" id="save" class="highlight">保存规则</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

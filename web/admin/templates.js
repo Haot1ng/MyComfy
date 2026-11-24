@@ -293,7 +293,7 @@ function rejection(status, data) {
   const error = data?.error;
   const lines = ["发布失败（HTTP " + status + "）"];
   if (error?.code === "STRATEGY_ALREADY_EXISTS") lines.push("模板标识已存在。请换一个标识，再预览并创建。");
-  else if (status === 403) lines.push("请从本机管理地址或部署时启用的 HTTPS 后台链接打开模板页，再次发布。");
+  else if (status === 403) lines.push("请从管理后台重新打开模板页，再次发布。");
   else if (error?.message) lines.push(error.message);
   if (Array.isArray(error?.details)) {
     for (const field of error.details) {

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -14,15 +16,87 @@ from mycomfy.api import prompt_assist
 from mycomfy.api.app import create_app
 from mycomfy.config import Settings
 from mycomfy.database.models import Job, StrategySeries, StrategyVersion, UserGroupPermission
+from mycomfy.database.prompt_models import TemplatePromptSettings
 from mycomfy.database.schema import migrate
 from mycomfy.database.session import db_now, make_sessions
 from mycomfy.errors import ApiError
+from mycomfy.ops.traffic_store import store_rule
 
 PROVIDER = SimpleNamespace(
-    base_url="https://provider.invalid/v1", model="editor", api_key="test-secret"
+    id="provider-1", base_url="https://provider.invalid/v1", model="editor", api_key="test-secret"
 )
 ORIGIN = "https://workspace.example"
 PATH = "/api/v1/strategy-versions/v1/prompt-assist"
+
+
+def test_assist_rate_and_provider_limits_across_versions(assist_backend, monkeypatch):
+    """真实路由在鉴权后计数一次；不同版本共用模板配额，同一服务商并发已满时不调用模型。"""
+    settings, sessions = assist_backend
+    path = "/api/v1/strategy-versions/{version_id}/prompt-assist"
+    rule = {"edge_rpm": 0, "edge_burst": 0, "user_rpm": 3, "provider_concurrency": 1}
+    with sessions.begin() as db:
+        store_rule(db, {"listener": "public", "method": "POST", "path": path}, rule)
+        db.add(
+            TemplatePromptSettings(
+                strategy_key="clip", config={"fields": ["shot"], "instructions": "共同规则"}
+            )
+        )
+    entered, proceed = Event(), Event()
+    calls = []
+
+    async def generate(*args):
+        """持有真实服务商租约，直到测试允许第一个请求返回。"""
+        calls.append(args[1])
+        entered.set()
+        assert await asyncio.to_thread(proceed.wait, 5)
+        return "候选"
+
+    monkeypatch.setattr(prompt_assist, "active_prompt_provider", lambda *args: PROVIDER)
+    monkeypatch.setattr(prompt_assist, "generate_text", generate)
+    with TestClient(create_app(settings, sessions=sessions), base_url=ORIGIN) as client:
+        headers = login_headers(client)
+        json_draft = {"field": "shot", "text": "草稿"}
+        with ThreadPoolExecutor() as requests:
+            first = requests.submit(client.post, PATH, json=json_draft, headers=headers)
+            try:
+                assert entered.wait(5)
+                blocked = client.post(
+                    PATH.replace("/v1/prompt", "/v2/prompt"), json=json_draft, headers=headers
+                )
+                assert blocked.status_code == 429
+                assert blocked.json()["error"]["code"] == "PROVIDER_CONCURRENCY_LIMIT"
+                assert int(blocked.headers["Retry-After"]) >= 1
+            finally:
+                proceed.set()
+            first.result().raise_for_status()
+        client.post(PATH, json=json_draft, headers=headers).raise_for_status()
+        denied = client.post(PATH, json=json_draft, headers=headers)
+        assert denied.status_code == 429 and denied.json()["error"]["code"] == "USER_RATE_LIMIT"
+        assert len(calls) == 2
+
+
+def test_authenticated_reads_share_the_gate_with_events_and_media(assist_backend):
+    """普通会话、事件模块和媒体链接均走相同鉴权限流；匿名、登出和路由间相互独立。"""
+    settings, sessions = assist_backend
+    paths = ("/api/v1/me", "/api/v1/events/cursor", "/api/v1/assets/{asset_id}/content")
+    with sessions.begin() as db:
+        for path in paths:
+            store_rule(
+                db,
+                {"listener": "public", "method": "GET", "path": path},
+                {"edge_rpm": 0, "edge_burst": 0, "user_rpm": 1, "provider_concurrency": 0},
+            )
+    with TestClient(create_app(settings, sessions=sessions), base_url=ORIGIN) as client:
+        for path in paths:
+            assert client.get(path.replace("{asset_id}", "not-owned")).status_code == 401
+        headers = login_headers(client)
+        for path in paths:
+            is_media = "{asset_id}" in path
+            first = client.get(path.replace("{asset_id}", "missing-one"), headers=headers)
+            assert first.status_code == (404 if is_media else 200)
+            denied = client.get(path.replace("{asset_id}", "missing-two"), headers=headers)
+            assert denied.status_code == 429 and denied.json()["error"]["code"] == "USER_RATE_LIMIT"
+        assert client.delete("/api/v1/sessions/current", headers=headers).status_code == 204
 
 
 def test_provider_receives_only_selected_draft():

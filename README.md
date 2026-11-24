@@ -7,6 +7,7 @@
 ```text
 MyComfy/
 ├── src/mycomfy/                  Python 服务与命令入口
+│   ├── gateway/                  Nginx 入口规则、热加载与流量计量
 │   ├── api/                      HTTP 应用、认证与 SSE
 │   ├── generation/               批次、策略、任务状态与 Worker
 │   ├── engine/                   ComfyUI 部署、进程管理与协议适配
@@ -22,7 +23,7 @@ MyComfy/
 └── docs/                         部署、运维与验收
 ```
 
-两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略，“用户管理”可查看全部账号并调整所属权限组。[C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
+两个网页使用原生 ES 模块和本地静态资源，随 Python 服务安装。业务监听器的根路径提供用户工作台，本机监听器的根路径提供只读监控，管理后台的“工作流模板”可新增模板、预览节点并发布策略，“用户管理”可查看全部账号并调整所属权限组。“API 流量”列出所有业务和管理 API，支持查看请求量、错误和耗时，以及在线调整每个接口的限流规则。[流量与限流说明](docs/api-traffic.md) · [C 端开发入口](web/client/README.md) · [管理后台开发入口](web/admin/README.md) · [前后台 API 契约](docs/web-api.md)
 
 后端可以跟随一次视频请求读代码。
 
@@ -62,13 +63,11 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 python3 scripts/deploy.py --single-host
 ```
 
-这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 API、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 Core、Nginx 网关、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
 **启用 AI 提示词扩写**时，在管理后台的“提示词服务商”添加兼容 OpenAI Chat Completions 的 API 基址、模型标识及可选 API 密钥，再点击“启用”。基址由业务端容器访问，例如填 `https://api.example.com/v1`，服务端会追加 `/chat/completions`。可以保存多套配置，切换后从下一次扩写开始生效。
 
 在“工作流模板”的“打开 JSON 文件”旁可查看、下载带逐字段中文注释的 H3 模板（JSONC），也可以下载标准 JSON。上传文件时可以省略 `prompt_assist`，先发布并正常生成视频。选中已发布模板后，在“AI 提示词辅助”里填写指令、勾选文本字段并单独保存。新设置从下一次扩写生效，无需重新上传文件、发布版本或重启服务。内置 H3 文生视频、图生视频预设和仓库的五图分段示例均附有各自的指令。工作台用户可以直接提交原文，也可以点击“扩写提示词”，预览并编辑建议后再采用。一次扩写仅将模板指令、当前字段及其草稿发给生效的服务。[完整注释示例](web/admin/presets/example-h3-text-to-video.strategy.jsonc) · [API 与字段说明](docs/web-api.md#策略与素材)
-
-要把这两个页面临时分享给外网测试人员，在一个 WSL 窗口启动 MyComfy，再在一个 Windows PowerShell 窗口运行 `scripts/share-test.ps1`。脚本使用 Tailscale Funnel 同时打开两个 HTTPS 链接，按 Ctrl+C 可一起关闭。工作台使用原有账号，后台链接允许任何访客查看全局监控、发布模板、浏览所有账号、修改任意用户的分组，并可切换后续扩写请求使用的服务商。[两个窗口的启动命令](docs/https-tunnel-test.md)
 
 **需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
 
@@ -82,7 +81,8 @@ cp -n deploy.config.example.json deploy.config.json
 | `single_host` | 顶层布尔值。设置为 `true` 后，直接运行 `python3 scripts/deploy.py` 即可在这台 GPU 主机的 Docker 中部署全部服务。省略或设为 `false` 时，无参部署连接已就绪的数据服务。 |
 | `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
 | `public.host`、`public.origin` | `public.host` 是业务机监听 API 的本机地址，端口取 `ports.api`。`public.origin` 填用户浏览器实际访问工作台的来源（协议、主机、端口），供登录和写请求校验。 |
-| `public.admin_test_origin` | 可选，默认关闭。设置后，指定 HTTPS 来源可经保留原始 Host 的本机代理打开完整管理后台。其页面与操作权限和本机管理地址一致。工作台和管理后台需使用两个不同的 HTTPS 来源。临时测试可用 `--test-tunnel` 自动配置。 |
+| `public.admin_origin` | 可选的管理后台 HTTPS 来源，默认仅接受本机管理地址。通过自管反向代理使用管理域名时，填写独立于工作台的 HTTPS 来源，并让上游保留浏览器的 Host。两个管理入口提供相同权限。 |
+| `public.trusted_proxy_cidrs` | 可提供客户端地址的上游代理 IP 或 CIDR 数组，默认为空。Nginx 按此配置处理转发头，供 IP 限流使用。 |
 | `mysql.bind_host`、`redis.bind_host` | 可选。运行随附数据库容器时，端口发布到数据库服务器的哪个本机 IP，默认都是 `127.0.0.1`。分机示例见下文。 |
 | `mysql.user`、`mysql.password` | MySQL 应用账号和密码。随附容器在空数据卷上创建 `mycomfy` 库并初始化所填账号，初始化凭据请避开单引号和反斜杠。复用已有数据卷时填写已有凭据。 |
 | `redis.user`、`redis.password` | Redis 缓存账号和密码。两个服务的密码均填原值，由脚本编码连接串。 |
@@ -93,12 +93,13 @@ cp -n deploy.config.example.json deploy.config.json
 
 **已有独立 MySQL 和 Redis** 时，保留模板的 `"single_host": false`，在 JSON 中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
 
-**先体验网页**时，可直接使用模板的本机数据库参数。先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `"single_host": true` 仍决定这些服务连接本机数据库。
+**先体验网页**时，可直接使用模板的本机数据库参数。先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core` 和 `gateway`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `"single_host": true` 仍决定这些服务连接本机数据库。
 
 | 服务 | 容器职责 |
 | --- | --- |
-| `mysql`、`redis`、`migrate` | 保存业务状态、缓存会话预检、在服务启动前迁移数据库。 |
-| `core` | 托管 API、工作台和本机管理后台。公网 HTTPS 代理可通过 JSON 的 `public.origin` 设置外部来源，并设置 `public.cookie_secure` 为 `true`。 |
+| `mysql`、`redis`、`migrate` | 保存业务状态和限流规则、缓存会话及共享限流计数、在服务启动前迁移数据库。 |
+| `gateway` | Nginx 接收工作台和管理后台的 HTTP 流量，通过专用 Unix 套接字转发给 Core，按来源 IP 执行各 API 的入口限额。管理端口绑定回环地址。 |
+| `core` | 托管 API、工作台和本机管理后台，并在鉴权后执行用户限额。公网 HTTPS 代理可通过 JSON 的 `public.origin` 设置外部来源，并设置 `public.cookie_secure` 为 `true`。 |
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
 | `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。镜像自带健康检查，在 `docker ps` 的 STATUS 列显示协调循环的状态。队列为空时，能正常完成轮询的 Worker 同样显示 `healthy`。 |
 
@@ -106,7 +107,7 @@ cp -n deploy.config.example.json deploy.config.json
 
 ### 优雅停机
 
-单机部署在 WSL 的项目目录运行以下命令。如果开着测试隧道，先在 PowerShell 的隧道窗口按 Ctrl+C，等它恢复业务端配置并退出。
+单机部署在 WSL 的项目目录运行以下命令。
 
 ```bash
 python3 scripts/deploy.py --stop
@@ -117,7 +118,7 @@ Worker 先停止领新任务，等待在途执行到达可恢复的边界。脚�
 分机部署可分别执行 `--gpu-only --stop`、`--core-only --stop`、`--db-only --stop`，数据库机最后停。容器、数据卷和未领取的任务都会保留。继续使用原单机镜像时，运行以下命令恢复服务。
 
 ```bash
-python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core engine worker
+python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core gateway engine worker
 ```
 
 如果使用了自定义配置文件，沿用 `--config /路径/部署配置.json`。查看容器状态可执行 `python3 scripts/deploy.py --compose --profile database ps -a`。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
@@ -135,7 +136,7 @@ python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-
 }
 ```
 
-只有业务机的 `core` 会绑定 `public.host` 和 `ports.api`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
+业务机的 `gateway` 负责绑定 `public.host` 和 `ports.api`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
 
 | 顺序 | 在哪里运行 | 配置和命令 |
 | --- | --- | --- |
@@ -147,7 +148,7 @@ python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-
 
 业务机与 GPU 机还要把同一共享盘挂载到相同绝对路径，例如两边的 `paths.data` 都填写 `/srv/mycomfy/data`。两端容器使用部署用户的 UID/GID，需有共享读写权限，文件系统需支持文件锁和原子重命名。部署时核对两端共享卷的设备编号与容量预留。[容量核算](src/mycomfy/ops/capacity.py#L91)
 
-默认情况下，`mysql.host` 填写私网地址时，GPU 容器也连接该地址及 `ports.mysql`。填写回环地址时，默认按项目自带的单机数据库处理，GPU 容器通过同一 Compose 网络连接 `mysql:3306`。如果 GPU 容器需要走另一条路（例如宿主机的独立数据库或私网隧道），填写从容器可达的 `mysql.engine_host` 和 `mysql.engine_port`。
+默认情况下，`mysql.host` 填写私网地址时，GPU 容器也连接该地址及 `ports.mysql`。填写回环地址时，默认按项目自带的单机数据库处理，GPU 容器通过同一 Compose 网络连接 `mysql:3306`。如果 GPU 容器需要走另一条路（例如宿主机的独立数据库地址），填写从容器可达的 `mysql.engine_host` 和 `mysql.engine_port`。
 
 #### 配置读取顺序
 
@@ -179,7 +180,7 @@ uv run --locked mycomfy runtime serve
 uv run --locked mycomfy worker
 ```
 
-用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。管理后台提供全局监控、工作流模板和用户分组管理。后台页面免登录，命令行维护调用可以使用 `Authorization: Bearer <token>`。用户工作台登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。[本机管理后台](http://127.0.0.1:8001/)
+用户 API 位于 `/api/v1`。公开 HTTPS 入口将网页、静态资源和用户 API 转发至业务端口 8000，SSE 连接需关闭代理缓冲并将空闲超时设为大于心跳周期。管理后台提供全局监控、API 流量和限流配置、工作流模板和用户分组管理。后台页面免登录，命令行维护调用可以使用 `Authorization: Bearer <token>`。用户工作台登录后的写请求携带有效 Cookie、`Origin`、`X-Session-Generation` 和 `X-CSRF-Token`。[本机管理后台](http://127.0.0.1:8001/)
 
 ## 部署和验收
 

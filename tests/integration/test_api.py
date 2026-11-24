@@ -194,6 +194,7 @@ def redis_probe(monkeypatch):
     """模拟 Redis 命中和删除超时，保留实际会话缓存代码。"""
     entries = {}
     client = Mock(spec=Redis)
+    client.eval.return_value = 0  # 分布式限流正常放行，仅在本组测试模拟会话缓存。
     client.get.side_effect = entries.get
     client.set.side_effect = lambda key, value, *, ex: entries.__setitem__(key, value)
     client.delete.side_effect = lambda key: entries.pop(key, None)

@@ -9,6 +9,7 @@ import stat
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -57,6 +58,9 @@ from .template_prompt_settings import (
     build_template_prompt_settings_router,
     is_template_prompt_settings_operation,
 )
+from .traffic_admin import build_traffic_admin_router, is_traffic_admin_operation
+from .traffic_catalog import gateway_sync, match_traffic_route, register_catalog
+from .traffic_limiter import TrafficLimiter
 from .web import install_web_routes
 
 logger = logging.getLogger(__name__)
@@ -112,42 +116,53 @@ def _user_admin_operation(request):
     )
 
 
-def _local_request(request, test_origin):
+def _local_request(request, admin_origin):
     """校验管理监听器的直连对端和目标 Host，识别配置的 HTTPS 浏览器来源。"""
 
-    def loopback(host):
-        """识别回环 IP 或本机主机名。"""
+    def loopback_ip(host):
+        """按 IP 地址判断传输层对端或请求目标是否回环。"""
         try:
             return ipaddress.ip_address(host).is_loopback
         except ValueError:
-            return host == "localhost"
+            return False
 
     hosts = request.headers.getlist("host")
-    if len(hosts) != 1 or not request.client or not loopback(request.client.host):
+    if len(hosts) != 1 or not request.client or not loopback_ip(request.client.host):
         raise ApiError(403, "LOCAL_ONLY", "Loopback access required")
 
-    # 隧道在本机终止 TLS 并保留原始 Host；转发头不能用来选择信任的访问来源。
+    # 原始 Host 标识目标入口；代理头不能指定来源、补全 Host 或授权管理访问。
     raw_host = hosts[0]
-    if test_origin:
-        configured = urlsplit(test_origin)
-        test_host = raw_host.lower()
-        if test_host == configured.netloc or (
-            configured.port is None and test_host == configured.netloc + ":443"
+    if admin_origin:
+        configured = urlsplit(admin_origin)
+        authority = raw_host.lower()
+        if authority == configured.netloc or (
+            configured.port is None and authority == configured.netloc + ":443"
         ):
             origins = request.headers.getlist("origin")
-            if origins and origins != [test_origin]:
+            if origins and origins != [admin_origin]:
                 raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not allowed")
-            return test_origin
+            return admin_origin
 
-    # Funnel 标记只用于拒绝降级：即使隧道请求携带 localhost Host，也不能走本机维护路径。
-    if "tailscale-funnel-request" in request.headers:
+    # 本机直连不需要代理元数据；来自代理的请求只能使用显式配置的 HTTPS 管理入口。
+    forwarded_headers = (
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-forwarded-port",
+        "x-real-ip",
+    )
+    if any(name in request.headers for name in forwarded_headers):
         raise ApiError(403, "LOCAL_ONLY", "Loopback access required")
     try:
         host = urlsplit("//" + raw_host)
-        _ = host.port
-        if host.username or host.password or host.path or host.query or host.fragment:
+        if host.hostname != "localhost" and not loopback_ip(host.hostname):
             raise ValueError
-        if not loopback(host.hostname):
+        # 完整核对 authority，避免 URL 解析器忽略空查询、方括号后缀等额外字符。
+        authority = f"[{host.hostname}]" if ":" in host.hostname else host.hostname
+        if host.port is not None:
+            authority += f":{host.port}"
+        if raw_host.lower() != authority:
             raise ValueError
     except (TypeError, ValueError):
         raise ApiError(403, "LOCAL_ONLY", "Loopback access required") from None
@@ -157,7 +172,7 @@ def _local_request(request, test_origin):
     return None
 
 
-def _maintenance(request, settings, media_type, test_origin):
+def _maintenance(request, settings, media_type, admin_origin):
     """按页面和操作核验浏览器同源交互，或用本机维护凭据授权程序调用。"""
     page = request.headers.getlist("x-mycomfy-admin")
     area = None
@@ -170,8 +185,10 @@ def _maintenance(request, settings, media_type, test_origin):
         area = "user"
     elif page == ["prompt-providers"] and is_prompt_provider_operation(request):
         area = "prompt-provider"
+    elif page == ["traffic"] and is_traffic_admin_operation(request):
+        area = "traffic"
     if area and "authorization" not in request.headers:
-        origin = test_origin or f"{request.url.scheme}://{request.headers['host']}"
+        origin = admin_origin or f"{request.url.scheme}://{request.headers['host']}"
         origins = request.headers.getlist("origin")
         sites = request.headers.getlist("sec-fetch-site")
         # 浏览器同源 GET 常省略 Origin；仅在浏览器明确标识同源读取时接受该情形。
@@ -184,7 +201,7 @@ def _maintenance(request, settings, media_type, test_origin):
             media_type != "application/json" or len(request.headers.getlist("content-type")) != 1
         ):
             raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Expected application/json")
-        location = "test" if test_origin else "local"
+        location = "remote" if admin_origin else "local"
         request.state.actor = f"{location}-{area}-admin"
         return
 
@@ -207,13 +224,14 @@ def _maintenance(request, settings, media_type, test_origin):
     supplied = request.headers.get("authorization", "").encode()
     if not hmac.compare_digest(b"Bearer " + token, supplied):
         raise ApiError(403, "MAINTENANCE_FORBIDDEN", "Maintenance credentials required")
-    request.state.actor = "test-maintenance" if test_origin else "local-maintenance"
+    request.state.actor = "remote-maintenance" if admin_origin else "local-maintenance"
 
 
 def _audit(db, request, status):
     """在当前事务中记录资源、调用者、状态和耗时，不记录请求体或令牌。"""
     route = request.scope.get("route")
-    action = getattr(route, "path", "<unmatched>")
+    entry = getattr(request.state, "traffic_route", None)
+    action = entry["path"] if entry else getattr(route, "path", "<unmatched>")
     target = getattr(request.state, "target", None)
     if target is None:
         # 使用已匹配的资源路径参数建立查询链，忽略查询串与原始路径中的敏感内容。
@@ -228,6 +246,8 @@ def _audit(db, request, status):
             action=f"{request.method} {action}"[:160],
             target=target,
             result=status,
+            traffic_listener=request.app.state.traffic_listener,
+            rate_limit_layer=getattr(request.state, "rate_limit_layer", None),
             duration_ms=int((time.monotonic() - request.state.started) * 1000),
             created_at=db_now(db),
         )
@@ -272,16 +292,22 @@ def create_app(settings, *, local=False, sessions=None, stop_streams=None):
         try:
             await run_in_threadpool(capacity.initialize, sessions)
             if local:
-                yield
+                async with gateway_sync(app):
+                    yield
             else:
                 async with event_dispatcher(settings, sessions):
                     yield
         finally:
+            await run_in_threadpool(app.state.traffic_limiter.close)
             if cache is not None:
                 await run_in_threadpool(cache.close)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.sessions = sessions
+    app.state.traffic_limiter = TrafficLimiter(settings.redis_url)
+    app.state.traffic_listener = "local" if local else "public"
+    gateway_directory = os.environ.get("MYCOMFY_GATEWAY_DIR")
+    app.state.gateway_dir = Path(gateway_directory) if gateway_directory else None
 
     @app.exception_handler(ApiError)
     async def api_error(request, exc):
@@ -371,19 +397,21 @@ def create_app(settings, *, local=False, sessions=None, stop_streams=None):
         request.state.request_id = new_id("r")
         request.state.started = time.monotonic()
         path = request.scope["path"]
+        request.state.traffic_route = match_traffic_route(app, request.method, path)
         media_type = request.headers.get("content-type", "").split(";", 1)[0].lower().strip()
         try:
             if local:
-                test_origin = _local_request(request, settings.admin_test_origin)
+                admin_origin = _local_request(request, settings.admin_origin)
                 if path.startswith("/local/v1/") and (
                     request.method not in {"GET", "HEAD", "OPTIONS"}
                     or path.rstrip("/") in {"/local/v1/groups", "/local/v1/users"}
                     or path.startswith(("/local/v1/groups/", "/local/v1/users/"))
                     or is_prompt_provider_operation(request)
                     or is_template_prompt_settings_operation(request)
+                    or is_traffic_admin_operation(request)
                 ):
                     await run_in_threadpool(
-                        _maintenance, request, settings, media_type, test_origin
+                        _maintenance, request, settings, media_type, admin_origin
                     )
             elif path.startswith("/api/v1/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
                 auth.check_origin(request, settings.public_origin)
@@ -430,24 +458,34 @@ def create_app(settings, *, local=False, sessions=None, stop_streams=None):
             except SQLAlchemyError:
                 logger.error("Audit unavailable for %s", request.state.request_id)
             response.headers["Cache-Control"] = "no-store"
+        if getattr(request.state, "rate_limit_layer", None) == "core":
+            response.headers["X-MyComfy-Rate-Limit-Layer"] = "core"
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    install_web_routes(app, local=local)
-    if local:
-        from mycomfy.ops.monitor import build_monitor_router
+    from mycomfy.ops.monitor import build_monitor_router
 
-        app.include_router(_local_routes(settings, sessions, cache))
-        app.include_router(build_group_admin_router(sessions, _audit))
-        app.include_router(build_prompt_provider_router(settings, sessions, _audit))
-        app.include_router(build_template_prompt_settings_router(sessions, _audit))
-        app.include_router(build_monitor_router(settings, sessions))
-    else:
-        store = LocalStore(settings.data_root)
-        app.include_router(_public_routes(settings, sessions, store, capacity, cache))
-        app.include_router(build_prompt_assist_router(settings, sessions, _session))
-        app.include_router(build_event_router(settings, sessions, stop_streams=stop_streams))
+    # 两个入口共用同一组注册定义；目录能列出零流量端点，路由只挂载到所属监听器。
+    routers = {
+        "local": [
+            _local_routes(settings, sessions, cache),
+            build_group_admin_router(sessions, _audit),
+            build_prompt_provider_router(settings, sessions, _audit),
+            build_template_prompt_settings_router(sessions, _audit),
+            build_monitor_router(settings, sessions),
+            build_traffic_admin_router(sessions, _audit),
+        ],
+        "public": [
+            _public_routes(settings, sessions, LocalStore(settings.data_root), capacity, cache),
+            build_prompt_assist_router(settings, sessions, _session),
+            build_event_router(settings, sessions, stop_streams=stop_streams),
+        ],
+    }
+    register_catalog(app, routers, app.state.traffic_listener)
+    install_web_routes(app, local=local)
+    for router in routers[app.state.traffic_listener]:
+        app.include_router(router)
     return app
 
 

@@ -1,4 +1,4 @@
-# Linux 或 Docker Desktop WSL 2。core 的本机管理端口使用 host 网络；
+# Linux 或 Docker Desktop WSL 2。gateway 承接宿主端口，core 使用私有 Unix 套接字；
 # engine 和 worker 使用同一个私有容器网络命名空间，ComfyUI 仅绑定该空间内的回环地址。
 x-app-environment: &app-environment
   MYCOMFY_DATABASE_URL: "${MYCOMFY_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-mycomfy}:${MYSQL_PASSWORD:-}@${MYCOMFY_MYSQL_HOST:-127.0.0.1}:${MYCOMFY_MYSQL_PORT:-3306}/mycomfy}"
@@ -11,6 +11,14 @@ x-data-mount: &data-mount
   type: bind
   source: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}"
   target: "${MYCOMFY_DATA_ROOT:-/srv/mycomfy/data}"
+  bind:
+    create_host_path: false
+
+# 网关只需读写访问规则、状态和统计，和业务数据、数据库凭据、维护令牌分别挂载。
+x-gateway-state: &gateway-state
+  type: bind
+  source: "${MYCOMFY_GATEWAY_STATE_DIR:-./var/gateway}"
+  target: /var/lib/mycomfy-gateway
   bind:
     create_host_path: false
 
@@ -99,16 +107,19 @@ services:
     restart: unless-stopped
     init: true
     user: "${MYCOMFY_UID:-10001}:${MYCOMFY_GID:-10001}"
-    command: ["api", "--host", "${MYCOMFY_API_HOST:-127.0.0.1}", "--port", "${MYCOMFY_API_PORT:-8000}", "--local-port", "${MYCOMFY_LOCAL_PORT:-8001}"]
+    command: ["api", "--socket-dir", "/run/mycomfy-api"]
     environment:
       <<: *app-environment
       MYCOMFY_MANUAL_RETRY_LIMIT: "${MYCOMFY_MANUAL_RETRY_LIMIT:-3}"
       MYCOMFY_COOKIE_SECURE: "${MYCOMFY_COOKIE_SECURE:-false}"
-      MYCOMFY_ADMIN_TEST_ORIGIN: "${MYCOMFY_ADMIN_TEST_ORIGIN:-}"
+      MYCOMFY_ADMIN_ORIGIN: "${MYCOMFY_ADMIN_ORIGIN:-}"
       MYCOMFY_REDIS_URL: "${MYCOMFY_REDIS_URL:-redis://${REDIS_USER:-default}:${REDIS_PASSWORD:-}@${MYCOMFY_REDIS_HOST:-127.0.0.1}:${MYCOMFY_REDIS_PORT:-6379}/0}"
       MYCOMFY_MAINTENANCE_TOKEN_FILE: /run/mycomfy/maintenance-token
+      MYCOMFY_GATEWAY_DIR: /var/lib/mycomfy-gateway
     volumes:
       - *data-mount
+      - *gateway-state
+      - api-sockets:/run/mycomfy-api
       - ${MYCOMFY_CONFIG_DIR:-./var/config}:/run/mycomfy:ro
       # 只有提供网页的进程挂载这两处静态资源。
       - ./web/client:/opt/mycomfy/mycomfy/web/client:ro
@@ -117,10 +128,33 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', ${MYCOMFY_LOCAL_PORT:-8001}), 2).close()"]
+      test: ["CMD", "python", "-c", "import http.client,socket; c=http.client.HTTPConnection('localhost',timeout=2); s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/run/mycomfy-api/admin.sock'); c.sock=s; c.request('HEAD','/'); assert c.getresponse().status == 200"]
       interval: 10s
       timeout: 3s
       retries: 6
+      start_period: 10s
+
+  gateway:
+    build:
+      context: .
+      target: gateway
+    image: mycomfy-gateway:local
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    user: "${MYCOMFY_UID:-10001}:${MYCOMFY_GID:-10001}"
+    environment:
+      MYCOMFY_API_HOST: "${MYCOMFY_API_HOST:-127.0.0.1}"
+      MYCOMFY_API_PORT: "${MYCOMFY_API_PORT:-8000}"
+      MYCOMFY_LOCAL_PORT: "${MYCOMFY_LOCAL_PORT:-8001}"
+      MYCOMFY_GATEWAY_DIR: /var/lib/mycomfy-gateway
+      MYCOMFY_TRUSTED_PROXY_CIDRS: "${MYCOMFY_TRUSTED_PROXY_CIDRS:-}"
+    volumes:
+      - *gateway-state
+      - api-sockets:/run/mycomfy-api:ro
+    depends_on:
+      core:
+        condition: service_healthy
 
   engine:
     build:
@@ -176,3 +210,4 @@ services:
 
 volumes:
   mysql-data:
+  api-sockets:

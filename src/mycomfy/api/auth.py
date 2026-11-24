@@ -14,6 +14,7 @@ from mycomfy.database.session import db_now, new_id
 from mycomfy.errors import ApiError, invalid_session
 
 from .permissions import DEFAULT_GROUP_KEY
+from .traffic_limiter import check_user_traffic
 
 COOKIE = "mycomfy_session"
 HASHER = PasswordHasher()
@@ -202,6 +203,7 @@ def authenticate(db, request, *, write=False, allow_revoked=False, generation=No
     ):
         # 只对数据库确认失效的 Cookie 标记删除。页签头不匹配仍可能对应有效会话。
         raise invalid_session(token_digest)
+    check_user_traffic(db, request, user.id)
     return user, session
 
 

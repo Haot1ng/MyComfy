@@ -1,6 +1,8 @@
 """用两个真实监听端口验证单进程 API 的物理访问边界和启停行为。"""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Thread
 from time import monotonic, sleep
 
@@ -12,6 +14,69 @@ from mycomfy.api.server import api_server
 from mycomfy.config import Settings
 from mycomfy.database.models import Base
 from mycomfy.database.session import make_sessions
+
+
+def test_private_gateway_unix_sockets(tmp_path):
+    """通过 Uvicorn 的真实 UDS 验证物理路由、管理 Host 检查、文件权限和重复启动保护。"""
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'gateway.sqlite'}",
+        data_root=tmp_path,
+        admin_origin="https://admin.example",
+    )
+    factory = make_sessions(settings.database_url)
+    Base.metadata.create_all(factory.kw["bind"])
+    try:
+        # 使用简短路径，避免较长 pytest 临时目录超出 Unix sockaddr 的路径上限。
+        with TemporaryDirectory() as folder:
+            directory = Path(folder)
+            with api_server(settings, None, 0, 0, sessions=factory, socket_dir=directory) as (
+                server,
+                sockets,
+            ):
+                for listener in sockets:
+                    assert Path(listener.getsockname()).stat().st_mode & 0o777 == 0o600
+                with (
+                    pytest.raises(BlockingIOError),
+                    api_server(settings, None, 0, 0, socket_dir=directory),
+                ):
+                    pass
+                thread = Thread(target=server.run, kwargs={"sockets": sockets}, daemon=True)
+                thread.start()
+                try:
+                    deadline = monotonic() + 10
+                    while not server.started:
+                        assert thread.is_alive() and monotonic() < deadline
+                        sleep(0.01)
+                    monitor = "/local/v1/monitor/overview"
+                    for name, expected in (("public", 404), ("admin", 200)):
+                        transport = httpx.HTTPTransport(uds=str(directory / f"{name}.sock"))
+                        with httpx.Client(
+                            transport=transport, base_url="http://localhost"
+                        ) as client:
+                            assert client.head("/").status_code == 200
+                            assert client.get(monitor).status_code == expected
+                            if name == "admin":
+                                # 经网关转发的请求须保留规范域名，专用 UDS 本身不允许降级到回环 Host。
+                                marker = {"Forwarded": "for=unknown"}
+                                assert client.get(monitor, headers=marker).status_code == 403
+                                assert (
+                                    client.get(
+                                        monitor, headers={**marker, "Host": "admin.example"}
+                                    ).status_code
+                                    == 200
+                                )
+                                assert (
+                                    client.get(
+                                        monitor, headers={"host": "untrusted.example"}
+                                    ).status_code
+                                    == 403
+                                )
+                finally:
+                    server.should_exit = True
+                    thread.join(timeout=10)
+            assert not list(directory.iterdir())
+    finally:
+        factory.kw["bind"].dispose()
 
 
 def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monkeypatch):
@@ -54,14 +119,14 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                 assert lifecycle == ["start"]
                 public = f"http://127.0.0.1:{public_port}"
                 local = f"http://127.0.0.1:{local_port}"
+                direct = {"Origin": local, "Authorization": "Bearer fixture-local-token"}
                 forged = {
+                    **direct,
                     "Host": f"127.0.0.1:{local_port}",
                     "X-Forwarded-Host": f"127.0.0.1:{local_port}",
                     "X-Forwarded-Port": str(local_port),
                     "X-Forwarded-For": "127.0.0.1",
                     "X-Forwarded-Proto": "http",
-                    "Origin": local,
-                    "Authorization": "Bearer fixture-local-token",
                 }
                 with httpx.Client(timeout=3, trust_env=False) as client:
                     monitor = "/local/v1/monitor/overview"
@@ -103,7 +168,8 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                         == 403
                     )
                     assert client.post(local + publish, json={}).status_code == 403
-                    assert client.post(local + publish, headers=forged, json={}).status_code == 422
+                    assert client.post(local + publish, headers=forged, json={}).status_code == 403
+                    assert client.post(local + publish, headers=direct, json={}).status_code == 422
                     # 回环维护页包含模板发布入口，并禁止其他页面把它嵌入框架。
                     template_page = client.get(local + "/templates.html").raise_for_status()
                     assert (
@@ -117,7 +183,7 @@ def test_single_process_binds_public_and_local_to_different_ports(tmp_path, monk
                         assert client.get(public + asset, headers=forged).status_code == 404
                         template = client.get(local + asset).raise_for_status().json()
                         assert client.post(local + publish, json=template).status_code == 403
-                        result = client.post(local + publish, headers=forged, json=template)
+                        result = client.post(local + publish, headers=direct, json=template)
                         assert result.status_code == 201
                         assert result.json()["strategy_key"] == f"minimax-h3-{kind}"
                         assert result.json()["version"] == 1

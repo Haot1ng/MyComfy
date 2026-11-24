@@ -1,4 +1,4 @@
-"""验证隧道后端收到的 HTTP 请求与公开 HTTPS 页面之间的访问边界。"""
+"""验证管理应用的物理监听边界、HTTPS 来源与同源管理授权。"""
 
 from dataclasses import replace
 
@@ -11,10 +11,10 @@ from mycomfy.database.models import Audit, Base, User
 from mycomfy.database.session import make_sessions
 from mycomfy.generation.state import canonical_digest
 
-HOST = "test-node.example.ts.net:8443"
+HOST = "admin.example:8443"
 ORIGIN = f"https://{HOST}"
 PUBLISH = "/local/v1/strategy-versions"
-PROXY = {"Host": HOST, "Tailscale-Funnel-Request": "?1"}
+PROXY = {"Host": HOST}
 PAGE = {**PROXY, "Origin": ORIGIN, "X-MyComfy-Admin": "templates"}
 BEARER = {"Authorization": "Bearer fixture-maintenance"}
 
@@ -29,8 +29,8 @@ def backend(tmp_path):
         database_url=f"sqlite:///{tmp_path / 'test.sqlite'}",
         data_root=tmp_path / "data",
         maintenance_token_file=token,
-        public_origin="https://test-node.example.ts.net",
-        admin_test_origin=ORIGIN,
+        public_origin="https://admin.example",
+        admin_origin=ORIGIN,
     )
     factory = make_sessions(settings.database_url)
     Base.metadata.create_all(factory.kw["bind"])
@@ -50,9 +50,9 @@ def listener(settings, factory, *, local=True, peer="127.0.0.1"):
 
 
 def test_anonymous_admin_browser_flow(backend):
-    """访客能查看监控、预览并发布内置模板，数据库按测试身份记录发布。"""
+    """访客能查看监控、预览并发布内置模板，数据库记录 HTTPS 管理入口的操作主体。"""
     settings, factory = backend
-    # 删除凭据文件，覆盖实际匿名测试部署；隧道会保留 Host 并标记公网流量。
+    # 覆盖未配置维护令牌的浏览器用法，HTTPS 入口按原始 Host 识别。
     settings.maintenance_token_file.unlink()
     with listener(settings, factory) as admin:
         assert admin.get("/", headers=PROXY).status_code == 200
@@ -72,7 +72,7 @@ def test_anonymous_admin_browser_flow(backend):
         assert listed.json()["items"][0]["strategy_version_id"] == version
         with factory() as db:
             audit = db.get(Audit, published.headers["X-Request-ID"])
-            assert audit.actor == "test-template-admin" and audit.target == version
+            assert audit.actor == "remote-template-admin" and audit.target == version
 
 
 def test_admin_template_preview_returns_exact_published_version(backend):
@@ -105,8 +105,8 @@ def test_admin_template_preview_returns_exact_published_version(backend):
 
 @pytest.mark.parametrize(
     ("entry", "origin", "actor"),
-    [({}, "http://127.0.0.1:8001", "local-user-admin"), (PROXY, ORIGIN, "test-user-admin")],
-    ids=["direct", "tunnel"],
+    [({}, "http://127.0.0.1:8001", "local-user-admin"), (PROXY, ORIGIN, "remote-user-admin")],
+    ids=["direct", "https-origin"],
 )
 def test_same_user_management_and_maintenance_policy(backend, entry, origin, actor):
     """两个后台入口使用相同的用户管理、程序维护和未知路由规则。"""
@@ -155,7 +155,7 @@ def test_same_user_management_and_maintenance_policy(backend, entry, origin, act
         assert reset_result.status_code == 204
         with factory() as db:
             audit = db.get(Audit, reset_result.headers["X-Request-ID"])
-            assert audit.actor == ("test-maintenance" if entry else "local-maintenance")
+            assert audit.actor == ("remote-maintenance" if entry else "local-maintenance")
             assert audit.target == "u-a"
         assert (
             admin.get(user_list, headers={**bearer, "Origin": "https://invalid.test"}).status_code
@@ -236,7 +236,7 @@ def test_browser_publication_requires_same_origin_json_and_page_header(backend):
             {**PROXY, "X-MyComfy-Admin": "templates"},
             {**PROXY, "Origin": ORIGIN},
             {**PAGE, "Origin": "http://" + HOST},
-            {**PAGE, "Origin": "https://test-node.example.ts.net"},
+            {**PAGE, "Origin": "https://admin.example"},
             {**PAGE, "X-MyComfy-Admin": "groups"},
             {**PAGE, "Sec-Fetch-Site": "same-site"},
             {**PAGE, "Sec-Fetch-Site": "cross-site"},
@@ -249,7 +249,7 @@ def test_browser_publication_requires_same_origin_json_and_page_header(backend):
         )
 
 
-def test_tunnel_requires_enabled_exact_host_and_physical_loopback(backend):
+def test_admin_requires_configured_host_and_physical_loopback(backend):
     """物理对端、目标端口、原始 Host 和开关共同决定管理入口，转发头不能授权。"""
     settings, factory = backend
     forged = {
@@ -258,13 +258,13 @@ def test_tunnel_requires_enabled_exact_host_and_physical_loopback(backend):
         "X-Forwarded-Proto": "https",
     }
     with (
-        listener(replace(settings, admin_test_origin=None), factory) as disabled,
+        listener(replace(settings, admin_origin=None), factory) as disabled,
         listener(settings, factory) as admin,
         listener(settings, factory, peer="192.0.2.18") as remote,
         listener(settings, factory, local=False) as public,
     ):
         assert disabled.get("/templates.html", headers={**PROXY, **forged}).status_code == 403
-        for host in ("test-node.example.ts.net", "unrelated.example:8443", "127.0.0.1:8001"):
+        for host in ("admin.example", "unrelated.example:8443", "127.0.0.1:8001"):
             headers = {**PROXY, **forged, "Host": host}
             assert admin.get("/templates.html", headers=headers).status_code == 403
         assert (
@@ -273,3 +273,24 @@ def test_tunnel_requires_enabled_exact_host_and_physical_loopback(backend):
         assert remote.get("/templates.html", headers={**PROXY, **forged}).status_code == 403
         assert public.get("/templates.html", headers={**PROXY, **forged}).status_code == 404
         assert public.post(PUBLISH, headers=PAGE, json={}).status_code == 404
+
+
+def test_proxy_metadata_cannot_select_local_administration(backend):
+    """经代理访问须保留配置的管理 Host；来源头仅用于拒绝降级，不授予机器凭据。"""
+    path = "/local/v1/groups"
+    with listener(*backend) as admin:
+        for name in (
+            "Forwarded",
+            "X-Forwarded-For",
+            "X-Forwarded-Host",
+            "X-Forwarded-Proto",
+            "X-Forwarded-Port",
+            "X-Real-IP",
+        ):
+            assert admin.get(path, headers={name: "for=unknown", **BEARER}).status_code == 403
+        proxy = {**PROXY, "Forwarded": "for=unknown"}
+        assert admin.get(path, headers=proxy).status_code == 403
+        assert admin.get(path, headers={**proxy, **BEARER}).status_code == 200
+        assert admin.get(path, headers=[("Host", HOST), ("Host", "localhost")]).status_code == 403
+        for malformed in ("localhost?", "@localhost", "[::1]extra:8001"):
+            assert admin.get(path, headers={"Host": malformed, **BEARER}).status_code == 403

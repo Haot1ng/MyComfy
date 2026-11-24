@@ -142,7 +142,11 @@ def build_prompt_assist_router(settings, sessions, authenticate):
         provider, instructions = await run_in_threadpool(
             select_provider, request, version_id, draft.field
         )
-        text = await generate_text(provider, instructions, draft.field, draft.text)
+        # 服务商配置快照已离开数据库事务，租约只覆盖实际调用及其超时清理。
+        async with request.app.state.traffic_limiter.provider_slot(
+            request, provider.id, PROVIDER_DEADLINE
+        ):
+            text = await generate_text(provider, instructions, draft.field, draft.text)
         return {"text": text}
 
     return router

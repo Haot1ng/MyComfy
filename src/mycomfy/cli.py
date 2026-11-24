@@ -30,6 +30,9 @@ def main(argv=None):
     public.add_argument("--host", default="127.0.0.1")
     public.add_argument("--port", type=int, default=8000)
     public.add_argument("--local-port", type=int, default=8001, help="本机监控与维护端口")
+    public.add_argument(
+        "--socket-dir", help="为同 UID 网关创建 public.sock、admin.sock 两个 Unix 监听"
+    )
     local = commands.add_parser("local-api", help="仅运行回环诊断入口")
     local.add_argument("--port", type=int, default=8001)
     worker = commands.add_parser("worker", help="运行单机 Worker 协调进程")
@@ -48,7 +51,13 @@ def main(argv=None):
     if selected.command == "api":
         from mycomfy.api.server import api_server
 
-        with api_server(settings, selected.host, selected.port, selected.local_port) as (
+        with api_server(
+            settings,
+            selected.host,
+            selected.port,
+            selected.local_port,
+            socket_dir=selected.socket_dir,
+        ) as (
             server,
             sockets,
         ):

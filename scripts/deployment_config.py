@@ -6,14 +6,14 @@ import json
 import os
 import re
 import runpy
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 # 宿主 Python 无需安装业务包，仍与容器进程使用同一个标准库校验器。
-normalize_test_origins = runpy.run_path(
+normalize_origins = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "src/mycomfy/origins.py")
-)["normalize_test_origins"]
+)["normalize_origins"]
 
 
 def _object(value, field, allowed):
@@ -168,9 +168,9 @@ def read_config(
         redis_user, redis_password, redis_auth = _credentials(redis, "redis", database_init)
 
     # 用户指定的相对路径以配置文件为基准。省略时沿用仓库的 var 目录布局。
-    paths = _object(config.get("paths", {}), "paths", {"data", "config", "deployment"})
+    paths = _object(config.get("paths", {}), "paths", {"data", "config", "deployment", "gateway"})
     directories = {}
-    for name in ("data", "config", "deployment"):
+    for name in ("data", "config", "deployment", "gateway"):
         if name in paths:
             target = path.parent / _text(paths[name], f"paths.{name}")
         else:
@@ -206,11 +206,29 @@ def read_config(
     redis_endpoint = _endpoint(redis_host, ports["redis"])
 
     public = _object(
-        config.get("public", {}), "public", {"host", "origin", "cookie_secure", "admin_test_origin"}
+        config.get("public", {}),
+        "public",
+        {
+            "host",
+            "origin",
+            "cookie_secure",
+            "admin_origin",
+            "admin_test_origin",
+            "trusted_proxy_cidrs",
+        },
     )
+    proxies = public.get("trusted_proxy_cidrs", [])
+    if not isinstance(proxies, list) or not all(isinstance(value, str) for value in proxies):
+        raise ValueError("public.trusted_proxy_cidrs 需要填写 IP 或 CIDR 字符串数组")
+    try:
+        proxy_cidrs = ",".join(str(ip_network(value)) for value in proxies)
+    except ValueError:
+        raise ValueError("public.trusted_proxy_cidrs 含有无效的 IP 或 CIDR") from None
     host = _text(public.get("host", "127.0.0.1"), "public.host")
     origin = _text(public.get("origin", f"http://127.0.0.1:{ports['api']}"), "public.origin")
-    origin, admin_test_origin = normalize_test_origins(origin, public.get("admin_test_origin"))
+    # 只在读取旧 JSON 时识别曾使用的字段名；新字段显式设为 null 会关闭该管理来源。
+    admin = public.get("admin_origin", public.get("admin_test_origin"))
+    origin, admin_origin = normalize_origins(origin, admin)
     try:
         address = urlsplit(origin)
         port = address.port
@@ -246,6 +264,8 @@ def read_config(
         "MYCOMFY_DATA_ROOT": directories["data"],
         "MYCOMFY_CONFIG_DIR": directories["config"],
         "MYCOMFY_DEPLOYMENT_DIR": directories["deployment"],
+        "MYCOMFY_GATEWAY_STATE_DIR": directories["gateway"],
+        "MYCOMFY_TRUSTED_PROXY_CIDRS": proxy_cidrs,
         "MYCOMFY_MYSQL_PORT": str(ports["mysql"]),
         "MYCOMFY_REDIS_PORT": str(ports["redis"]),
         "MYCOMFY_API_PORT": str(ports["api"]),
@@ -255,7 +275,7 @@ def read_config(
         "MYCOMFY_API_HOST": host,
         "MYCOMFY_MANUAL_RETRY_LIMIT": str(retry_limit),
         "MYCOMFY_PUBLIC_ORIGIN": origin.rstrip("/"),
-        "MYCOMFY_ADMIN_TEST_ORIGIN": admin_test_origin or "",
+        "MYCOMFY_ADMIN_ORIGIN": admin_origin or "",
         "MYCOMFY_COOKIE_SECURE": str(cookie_secure).lower(),
     }
     if core_only:

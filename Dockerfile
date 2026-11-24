@@ -46,9 +46,25 @@ COPY --chmod=0755 scripts/deploy-engine.sh /usr/local/bin/mycomfy-deploy-engine
 USER mycomfy
 CMD ["runtime", "serve", "--stop-engines-on-exit"]
 
+FROM ${PYTHON_IMAGE} AS gateway
+# 网关控制程序只依赖 Python 标准库，入口限流由 Debian 的原生 Nginx 模块执行。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nginx \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -m 1777 /run/mycomfy-api \
+    && install -d -o 10001 -g 10001 /var/lib/mycomfy-gateway
+WORKDIR /opt/mycomfy
+COPY src/mycomfy/gateway/ ./mycomfy/gateway/
+RUN chmod -R a+rX mycomfy
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 10001:10001
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-m", "mycomfy.gateway", "health"]
+ENTRYPOINT ["python", "-m", "mycomfy.gateway"]
+
 FROM runtime AS api
 # StaticFiles 初始化时会校验目录。Compose 将网页只读挂载到这里。
-RUN mkdir -p mycomfy/web/client mycomfy/web/admin
+RUN mkdir -p mycomfy/web/client mycomfy/web/admin && install -d -m 1777 /run/mycomfy-api
 USER mycomfy
 EXPOSE 8000
 CMD ["api", "--host", "0.0.0.0"]

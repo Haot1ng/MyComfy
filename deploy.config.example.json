@@ -14,7 +14,8 @@
   "paths": {
     "data": "var/data",
     "config": "var/config",
-    "deployment": "var/deployment"
+    "deployment": "var/deployment",
+    "gateway": "var/gateway"
   },
   "ports": {
     "mysql": 3306,
@@ -25,7 +26,8 @@
   "public": {
     "host": "127.0.0.1",
     "origin": "http://127.0.0.1:8000",
-    "admin_test_origin": null
+    "admin_origin": null,
+    "trusted_proxy_cidrs": []
   },
   "engine": {
     "comfyui": {

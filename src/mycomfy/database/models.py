@@ -290,11 +290,14 @@ class Notification(Base):
 
 class Audit(Base):
     __tablename__ = "audits"
+    __table_args__ = (Index("ix_audits_rate_layer_time", "rate_limit_layer", "created_at"),)
 
     id: Mapped[str] = mapped_column(ID, primary_key=True)
     actor: Mapped[str | None] = mapped_column(ID)
     action: Mapped[str] = mapped_column(String(160))
     result: Mapped[int] = mapped_column(Integer)
     duration_ms: Mapped[int] = mapped_column(Integer)
+    traffic_listener: Mapped[str | None] = mapped_column(String(8))
+    rate_limit_layer: Mapped[str | None] = mapped_column(String(12))
     target: Mapped[str | None] = mapped_column(ID, index=True)
     created_at: Mapped[datetime] = mapped_column(TIME, index=True)

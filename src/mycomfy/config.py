@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mycomfy.origins import normalize_test_origins
+from mycomfy.origins import normalize_origins
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class Settings:
     sse_send_timeout_seconds: float = 10.0
     redis_url: str | None = field(default=None, repr=False)
     session_cache_ttl_seconds: int = 60
-    admin_test_origin: str | None = None
+    admin_origin: str | None = None
     manual_retry_limit: int = 3
 
     def __post_init__(self):
@@ -43,9 +43,9 @@ class Settings:
             raise ValueError("Session, upload, batch, aging and polling settings must be positive")
         if type(self.manual_retry_limit) is not int or self.manual_retry_limit < 0:
             raise ValueError("manual_retry_limit 需要填写非负整数")
-        public, admin = normalize_test_origins(self.public_origin, self.admin_test_origin)
+        public, admin = normalize_origins(self.public_origin, self.admin_origin)
         object.__setattr__(self, "public_origin", public.rstrip("/"))
-        object.__setattr__(self, "admin_test_origin", admin)
+        object.__setattr__(self, "admin_origin", admin)
 
     @classmethod
     def from_env(cls):
@@ -60,7 +60,7 @@ class Settings:
             database_url=os.environ["MYCOMFY_DATABASE_URL"],
             data_root=Path(os.environ.get("MYCOMFY_DATA_ROOT", "var")).resolve(),
             public_origin=os.environ.get("MYCOMFY_PUBLIC_ORIGIN", "https://localhost"),
-            admin_test_origin=os.environ.get("MYCOMFY_ADMIN_TEST_ORIGIN"),
+            admin_origin=os.environ.get("MYCOMFY_ADMIN_ORIGIN"),
             cookie_secure=os.environ.get("MYCOMFY_COOKIE_SECURE", "true").lower() != "false",
             session_seconds=int(os.environ.get("MYCOMFY_SESSION_SECONDS", "86400")),
             max_upload_bytes=int(

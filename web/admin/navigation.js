@@ -34,6 +34,7 @@ export function renderAdminNav(nav, currentView) {
   const links = document.createDocumentFragment();
   const views = {
     ...pages,
+    traffic: {title: "API 流量", symbol: "⇅", href: "./traffic.html"},
     templates: {title: "工作流模板", symbol: "◇", href: "./templates.html"},
     users: {title: "用户管理", symbol: "◎", href: "./users.html"},
     providers: {title: "提示词服务商", symbol: "✦", href: "./providers.html"},

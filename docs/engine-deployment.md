@@ -30,7 +30,7 @@
 
 需要用五张图生成 20 秒视频时，可导入 [384×384 模板](../examples/strategies/h3-five-image-20s-segmented-384.strategy.json) 或 [640×640 模板](../examples/strategies/h3-five-image-20s-segmented-640.strategy.json)。内存紧张的机器可先使用 384 版。两版均保留全片风格提示和四段可分别编辑的运镜。
 
-1. **更新引擎。** 已部署的 WSL 单机在项目根目录依次执行下面的命令。如果开着测试隧道，先结束隧道窗口，等它恢复业务端配置。使用自定义配置文件时沿用原来的 `--config`。分机部署可只在 GPU 机使用 `--gpu-only --stop` 和 `--gpu-only`。
+1. **更新引擎。** 已部署的 WSL 单机在项目根目录依次执行下面的命令。使用自定义配置文件时沿用原来的 `--config`。分机部署可只在 GPU 机使用 `--gpu-only --stop` 和 `--gpu-only`。
 
    ```bash
    git pull --ff-only origin main &&

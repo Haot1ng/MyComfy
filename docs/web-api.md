@@ -10,16 +10,17 @@
 | 后台监控 | `/local/v1/monitor` | 免账号登录，只读查询。 |
 | 后台模板页 | `/local/v1/strategies`、`/local/v1/strategy-versions` | 查看已发布模板，或用同源 JSON 请求发布模板。 |
 | 后台用户管理页 | `/local/v1/users`、`/local/v1/groups`、`/local/v1/users/{user_id}/groups` | 查看全部账号、分组和权限，保存所选用户的新分组。 |
+| 后台 API 流量页 | `GET /local/v1/traffic`、`PUT /local/v1/traffic/rules` | 列出各入口、统计和同步状态，保存或恢复两层限流配置。[接口与示例](api-traffic.md) |
 | 后台提示词服务商页 | `/local/v1/prompt-providers` | 同源浏览器可管理模型配置、启用或停用服务。 |
 | 维护程序 | `/local/v1` | 通过管理入口使用 `Authorization: Bearer <token>` 可调用分组定义、密码重置等维护操作。 |
 
-API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。默认在业务机本地打开管理页。启用外网测试后，同一个后台也通过配置的 HTTPS 地址提供，菜单、数据和授权规则一致。任何拿到该链接的人都可以修改用户分组和后续扩写请求使用的服务商。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [外网测试](https-tunnel-test.md) · [部署与运维](operations.md)
+API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两个监听器分别在各自的根路径 `/` 提供用户网页和管理网页。用户网页的同源反向代理将页面、前台静态资源和业务 API 转到业务端口。默认在业务机本地打开管理页。使用自管反向代理时，可通过 `public.admin_origin` 指定独立的 HTTPS 管理地址，菜单、数据和授权规则一致。任何拿到该链接的人都可以修改用户分组和后续扩写请求使用的服务商。公开代理转发 SSE 时关闭缓冲，空闲超时设得长于心跳周期。[双端口监听](../src/mycomfy/api/server.py) · [部署与运维](operations.md)
 
 ## 通用约定
 
 - 资源 ID、会话代次和 64 位事件序号使用字符串。事件序号按十进制整数精确比较，JavaScript 可使用 `BigInt`。时间使用带时区的 RFC 3339，响应中的 UTC 时间可按用户所在时区展示。
 - 普通请求和响应使用 JSON。素材上传、媒体字节和 SSE 使用各自的媒体类型。成功的 `204` 响应没有响应体。
-- 每次 API 请求返回 `X-Request-ID` 并登记业务审计。网页静态资源使用 ETag 和条件读取。业务失败还在响应体提供 `request_id`，可通过本机请求监控查询。重放请求有新的请求 ID，业务幂等性由对应接口单独定义。
+- 到达 Core 的 API 请求返回 `X-Request-ID` 并登记业务审计。Nginx 直接拒绝的请求返回自己的请求 ID，计入“API 流量”中的网关拒绝。网页静态资源使用 ETag 和条件读取。业务失败还在响应体提供 `request_id`，可通过本机请求监控查询。重放请求有新的请求 ID，业务幂等性由对应接口单独定义。
 - 分页响应为 `{items, next_cursor}`，其中 `next_cursor` 为字符串或 `null`。用户列表 `limit` 默认 50、最大 100，本机列表默认 50、最大 200。使用原筛选条件和返回的游标续页，变更筛选时从首页重新加载。任务列表按创建时间和 ID 倒序，批次详情按提交顺序列任务，通知按事件序号倒序。
 
 错误响应示例。批量校验错误的 `index` 从零开始，`path` 为 JSON Pointer。界面根据 `error.code` 和 `details` 定位错误，并提供请求 ID 供排查。部分错误的 `details` 为 `null`。
@@ -47,8 +48,8 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | 413、415 | `UPLOAD_TOO_LARGE`、`INVALID_MEDIA` 或 `UNSUPPORTED_MEDIA_TYPE`。检查大小、实际媒体内容或请求编码。 |
 | 416 | `INVALID_RANGE`。媒体请求的单段字节范围不可满足。 |
 | 422 | `VALIDATION_FAILED` 等参数或业务校验错误。按 `details` 映射到表单和任务项。 |
-| 429 | `LOGIN_LIMIT`、`USER_JOB_QUOTA` 或 `USER_STORAGE_QUOTA`。提示对应限制，响应有 `Retry-After` 时按其指示等待。 |
-| 503 | `GLOBAL_QUEUE_FULL`、`VOLUME_LOW`、`STORAGE_UNAVAILABLE`、`OBJECT_UNAVAILABLE`、`DATABASE_UNAVAILABLE` 等。提示受影响操作暂不可用。批次提交结果不明时按原请求重放。 |
+| 429 | `EDGE_RATE_LIMIT`、`USER_RATE_LIMIT`、`PROVIDER_CONCURRENCY_LIMIT` 表示命中接口限流。其他限制包括 `LOGIN_LIMIT`、`USER_JOB_QUOTA` 或 `USER_STORAGE_QUOTA`。提示对应限制，响应有 `Retry-After` 时按其指示等待。 |
+| 503 | `RATE_LIMIT_UNAVAILABLE` 表示共享限流服务暂时不可用。其他情况包括 `GLOBAL_QUEUE_FULL`、`VOLUME_LOW`、`STORAGE_UNAVAILABLE`、`OBJECT_UNAVAILABLE`、`DATABASE_UNAVAILABLE` 等。提示受影响操作暂不可用。批次提交结果不明时按原请求重放。 |
 
 [HTTP 路由与错误处理](../src/mycomfy/api/app.py) · [分页实现](../src/mycomfy/api/pagination.py) · [容量限制](../src/mycomfy/ops/capacity.py)
 

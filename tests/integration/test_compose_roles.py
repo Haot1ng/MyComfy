@@ -24,7 +24,7 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
                 "redis": {"user": "default", "password": "example", "host": "cache.internal"},
                 "public": {
                     "origin": "https://workspace.example",
-                    "admin_test_origin": "https://admin.example:443/",
+                    "admin_origin": "https://admin.example:443/",
                 },
             }
         )
@@ -43,7 +43,22 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
         return json.loads(output)["services"]
 
     application = services()
-    assert set(application) == {"core", "migrate", "engine", "worker"}
+    assert set(application) == {"gateway", "core", "migrate", "engine", "worker"}
+    gateway = application["gateway"]
+    assert gateway["depends_on"]["core"]["condition"] == "service_healthy"
+    assert gateway["network_mode"] == application["core"]["network_mode"] == "host"
+    assert application["core"]["command"] == ["api", "--socket-dir", "/run/mycomfy-api"]
+    assert gateway["user"] == application["core"]["user"]
+    mounts = {mount["target"]: mount for mount in gateway["volumes"]}
+    assert set(mounts) == {"/run/mycomfy-api", "/var/lib/mycomfy-gateway"}
+    assert mounts["/run/mycomfy-api"]["read_only"]
+    assert set(gateway["environment"]) == {
+        "MYCOMFY_API_HOST",
+        "MYCOMFY_API_PORT",
+        "MYCOMFY_LOCAL_PORT",
+        "MYCOMFY_GATEWAY_DIR",
+        "MYCOMFY_TRUSTED_PROXY_CIDRS",
+    }
     assert set(application["core"]["depends_on"]) == {"migrate"}
     assert not application["migrate"].get("depends_on")
     for name in ("engine", "worker"):
@@ -55,10 +70,10 @@ def test_database_profile_is_independent(tmp_path, monkeypatch):
     combined = services("--profile", "database")
     assert set(combined) - set(application) == {"mysql", "redis"}
     # 只有处理管理请求的 core 获得该来源，其他进程照常使用原有配置。
-    assert combined["core"]["environment"]["MYCOMFY_ADMIN_TEST_ORIGIN"] == "https://admin.example"
+    assert combined["core"]["environment"]["MYCOMFY_ADMIN_ORIGIN"] == "https://admin.example"
     for name, service in combined.items():
         if name != "core":
-            assert "MYCOMFY_ADMIN_TEST_ORIGIN" not in service["environment"]
+            assert "MYCOMFY_ADMIN_ORIGIN" not in service["environment"]
     for name in ("mysql", "redis"):
         assert not combined[name].get("depends_on")
         assert combined[name]["ports"][0]["host_ip"] == "127.0.0.1"

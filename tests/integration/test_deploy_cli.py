@@ -35,7 +35,6 @@ def run_deploy(checkout, tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_DOCKER", real_docker)
     log = tmp_path / "docker.jsonl"
     monkeypatch.setenv("TEST_DOCKER_LOG", str(log))
-    monkeypatch.setenv("TEST_CORE_CONFIG", str(tmp_path / "core-web.json"))
     for name in list(os.environ):
         if name.startswith(("COMPOSE_", "MYSQL_", "REDIS_", "MYCOMFY_")):
             monkeypatch.delenv(name)
@@ -50,14 +49,6 @@ def run_deploy(checkout, tmp_path, monkeypatch):
         "    log.write(json.dumps(args) + '\\n')\n"
         "if 'config' in args:\n"
         "    os.execv(os.environ['TEST_DOCKER'], [os.environ['TEST_DOCKER'], *args])\n"
-        "if 'up' in args and args[-1] == 'core':\n"
-        "    keys = ('API_HOST', 'PUBLIC_ORIGIN', 'ADMIN_TEST_ORIGIN', 'COOKIE_SECURE')\n"
-        "    with open(os.environ['TEST_CORE_CONFIG'], 'w') as output:\n"
-        "        json.dump({k: os.getenv('MYCOMFY_' + k) for k in keys}, output)\n"
-        "    if os.getenv('TEST_CORE_LOGS'):\n"
-        "        print('build-step', flush=True)\n"
-        "        print('engine diagnostic', os.getenv('MYSQL_PASSWORD'), file=sys.stderr)\n"
-        "        sys.exit(int(os.environ['TEST_CORE_LOGS']))\n"
         "if '--recipe' in args:\n"
         "    with open(os.environ['TEST_RECIPE'], 'wb') as output:\n"
         "        output.write(sys.stdin.buffer.read())\n"
@@ -136,12 +127,12 @@ def test_full_deployment_order(launch, options, setting):
     # install 即引擎容器的安装命令，应用 up 时 Compose 根据依赖先执行迁移。
     install = next(i for i, call in enumerate(calls) if "run" in call and "engine" in call)
     app = next(i for i, call in enumerate(calls) if "up" in call and "core" in call)
-    assert install < app and {"core", "engine", "worker"} <= set(calls[app])
+    assert install < app and {"core", "gateway", "engine", "worker"} <= set(calls[app])
     db = [i for i, call in enumerate(calls) if "up" in call and {"mysql", "redis"} <= set(call)]
     if options or setting:
         assert len(db) == 1 and db[0] < install
         assert "--wait" in calls[db[0]]
-        assert not {"core", "engine", "worker", "migrate"}.intersection(calls[db[0]])
+        assert not {"core", "gateway", "engine", "worker", "migrate"}.intersection(calls[db[0]])
     else:
         assert not db
 
@@ -150,21 +141,38 @@ def test_full_deployment_order(launch, options, setting):
     ("options", "targets", "install"),
     [
         (("--db-only",), {"mysql", "redis"}, False),
-        (("--core-only",), {"core"}, False),
+        (("--core-only",), {"core", "gateway"}, False),
         (("--gpu-only",), {"engine", "worker"}, True),
         (("--compose", "ps"), set(), False),
     ],
 )
-def test_explicit_role_overrides_config(launch, options, targets, install):
+def test_explicit_role_overrides_config(launch, checkout, options, targets, install):
     """已有的独立部署和运维命令优先，单机默认值不会让它们额外启动组件。"""
     result, calls = launch(*options, single_host=True)
     assert result.returncode == 0, result.stderr
     up = [call for call in calls if "up" in call]
-    services = {"mysql", "redis", "core", "migrate", "engine", "worker"}
+    services = {"mysql", "redis", "gateway", "core", "migrate", "engine", "worker"}
     assert [services.intersection(call) for call in up] == ([targets] if targets else [])
+    assert (checkout / "var/gateway").is_dir() == ("gateway" in targets)
     assert any("run" in call and "engine" in call for call in calls) is install
     if "--compose" in options:
         assert calls[-1][-1] == "ps"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"paths": {"gateway": "var/config"}}, {"ports": {"api": 8001}}, {"ports": {"redis": 8000}}],
+)
+def test_gateway_deployment_rejects_port_and_mount_conflicts(checkout, run_deploy, change):
+    """单机部署在启动任何服务之前报告监听冲突或会把维护凭据暴露给网关的挂载。"""
+    config = json.loads((checkout / "deploy.config.example.json").read_text())
+    for key, value in change.items():
+        config[key].update(value)
+    (checkout / "deploy.config.json").write_text(json.dumps(config))
+    result, calls = run_deploy("--single-host")
+    assert result.returncode != 0
+    assert all("config" in call for call in calls)
+    assert not (checkout / "var").exists()
 
 
 def test_database_failure_blocks_application(launch):
@@ -179,11 +187,15 @@ def test_database_failure_blocks_application(launch):
 @pytest.mark.parametrize(
     ("roles", "single_host", "expected"),
     [
-        ((), False, [{"worker"}, {"engine"}, {"core"}, {"mysql", "redis"}]),
-        ((), True, [{"worker"}, {"engine"}, {"core"}, {"mysql", "redis"}]),
-        (("--single-host",), False, [{"worker"}, {"engine"}, {"core"}, {"mysql", "redis"}]),
+        ((), False, [{"worker"}, {"engine"}, {"core"}, {"gateway"}, {"mysql", "redis"}]),
+        ((), True, [{"worker"}, {"engine"}, {"core"}, {"gateway"}, {"mysql", "redis"}]),
+        (
+            ("--single-host",),
+            False,
+            [{"worker"}, {"engine"}, {"core"}, {"gateway"}, {"mysql", "redis"}],
+        ),
         (("--gpu-only",), True, [{"worker"}, {"engine"}]),
-        (("--core-only",), True, [{"core"}]),
+        (("--core-only",), True, [{"core"}, {"gateway"}]),
         (("--db-only",), True, [{"mysql", "redis"}]),
     ],
 )
@@ -209,7 +221,10 @@ def test_stop_limits_shutdown_to_selected_role(launch, checkout, roles, single_h
 
 @pytest.mark.parametrize(
     ("failing", "remaining"),
-    [("worker", {"engine", "core", "mysql", "redis"}), ("engine", {"core", "mysql", "redis"})],
+    [
+        ("worker", {"engine", "core", "gateway", "mysql", "redis"}),
+        ("engine", {"core", "mysql", "redis"}),
+    ],
 )
 def test_stop_failure_preserves_remaining_services(launch, monkeypatch, failing, remaining):
     """停止某个服务失败应返回原退出码，保留其后续对账所需的服务。"""
@@ -253,7 +268,7 @@ def test_stop_verifies_container_exit_and_generation_receipt(
             i for i, call in enumerate(calls) if "stop" in call and "engine" in call
         )
     if not expect_success:
-        assert not any({"core", "mysql", "redis"}.intersection(call) for call in stops)
+        assert not any({"core", "gateway", "mysql", "redis"}.intersection(call) for call in stops)
 
 
 def test_stop_retry_rechecks_exited_engine_until_receipt_is_restored(
@@ -275,7 +290,7 @@ def test_stop_retry_rechecks_exited_engine_until_receipt_is_restored(
     assert second.returncode != 0
     assert not any("exec" in call and "engine" in call for call in second_calls)
     for call in first_calls + second_calls:
-        assert not ("stop" in call and {"core", "mysql", "redis"}.intersection(call))
+        assert not ("stop" in call and {"core", "gateway", "mysql", "redis"}.intersection(call))
 
     # 模拟运维核实原代次后恢复退出凭据，只有此时重试才应完成后续停机。
     (run_dir / "ended.json").write_text(json.dumps({"generation": 7}))
@@ -283,16 +298,18 @@ def test_stop_retry_rechecks_exited_engine_until_receipt_is_restored(
     assert restored.returncode == 0, restored.stderr
     assert not any("exec" in call and "engine" in call for call in calls)
     stops = [call for call in calls if "stop" in call]
-    assert [set(call).intersection({"core", "mysql", "redis"}) for call in stops[-2:]] == [
+    assert [
+        set(call).intersection({"core", "gateway", "mysql", "redis"}) for call in stops[-3:]
+    ] == [
         {"core"},
+        {"gateway"},
         {"mysql", "redis"},
     ]
 
 
-@pytest.mark.parametrize("options", [("--test-tunnel", "off"), ("--compose", "ps")])
-def test_stop_rejects_conflicting_actions(run_deploy, options):
-    """停机不能和重配隧道或原样转发的 Compose 操作混用。"""
-    result, calls = run_deploy("--stop", *options)
+def test_stop_rejects_conflicting_actions(run_deploy):
+    """停机不能和原样转发的 Compose 操作混用。"""
+    result, calls = run_deploy("--stop", "--compose", "ps")
     assert result.returncode == 2 and not calls
 
 
@@ -325,83 +342,6 @@ def test_conflicting_cli_roles_do_not_start_services(launch):
     result, calls = launch("--single-host", "--gpu-only")
     assert result.returncode == 2
     assert not calls
-
-
-def test_https_tunnel_enable_and_restore(checkout, run_deploy, tmp_path):
-    """开启时仅重建 core 并输出两条匹配自定义端口的隧道命令，关闭时复原来源。"""
-    path = checkout / "deploy.config.json"
-    config = json.loads((checkout / "deploy.config.example.json").read_text())
-    config["ports"].update(api=9000, admin=9001)
-    config["public"].update(origin="http://workstation:9000", host="0.0.0.0")
-    saved = json.dumps(config)
-    path.write_text(saved)
-    target = tmp_path / "core-web.json"
-    result, calls = run_deploy("--single-host", "--test-tunnel", "PC.My-Tail.ts.net.")
-    assert result.returncode == 0, result.stderr
-    assert [c[c.index("up") :] for c in calls if "up" in c] == [
-        ["up", "-d", "--no-deps", "--build", "--wait", "core"]
-    ]
-    assert not any("run" in c for c in calls)
-    assert json.loads(target.read_text()) == {
-        "API_HOST": "127.0.0.1",
-        "PUBLIC_ORIGIN": "https://pc.my-tail.ts.net",
-        "ADMIN_TEST_ORIGIN": "https://pc.my-tail.ts.net:8443",
-        "COOKIE_SECURE": "true",
-    }
-    assert "tailscale funnel --https=443 http://127.0.0.1:9000" in result.stdout
-    assert "tailscale funnel --https=8443 http://127.0.0.1:9001" in result.stdout
-
-    # 再次启动时从同一份原始配置恢复工作台登录来源和后台默认范围。
-    result, _ = run_deploy("--single-host", "--test-tunnel", "off")
-    assert result.returncode == 0, result.stderr
-    assert json.loads(target.read_text()) == {
-        "API_HOST": "0.0.0.0",
-        "PUBLIC_ORIGIN": "http://workstation:9000",
-        "ADMIN_TEST_ORIGIN": "",
-        "COOKIE_SECURE": "false",
-    }
-    assert path.read_text() == saved
-
-
-@pytest.mark.parametrize("value", ["https://a.ts.net", "a.ts.net/path", "a.ts.net:443", "off.ts"])
-def test_https_tunnel_invalid_name(run_deploy, value):
-    """域名填写错误时在调用 Docker 前报告。"""
-    result, calls = run_deploy("--test-tunnel", value)
-    assert result.returncode == 2 and not calls
-
-
-def test_https_tunnel_json_reports_only_ports_or_empty_object(checkout, run_deploy, monkeypatch):
-    """脚本调用可完整解析标准输出；启停成功时构建日志不占用两个输出流。"""
-    config = json.loads((checkout / "deploy.config.example.json").read_text())
-    config["ports"].update(api=9400, admin=9501)
-    (checkout / "deploy.config.json").write_text(json.dumps(config))
-    monkeypatch.setenv("TEST_CORE_LOGS", "0")
-    for host, expected in (
-        ("pc.my-tail.ts.net", {"public_port": 9400, "admin_port": 9501}),
-        ("off", {}),
-    ):
-        result, _ = run_deploy("--test-tunnel", host, "--tunnel-json")
-        assert result.returncode == 0, result.stderr
-        assert json.loads(result.stdout) == expected
-        assert "build-step" not in result.stderr and "engine diagnostic" not in result.stderr
-
-
-def test_https_tunnel_json_preserves_failure_without_logs(launch, monkeypatch):
-    """构建失败保留退出码，脚本只提示查看服务状态，原始日志和密码都不会输出。"""
-    monkeypatch.setenv("TEST_CORE_LOGS", "73")
-    result, _ = launch("--test-tunnel", "pc.my-tail.ts.net", "--tunnel-json")
-    assert result.returncode == 73 and result.stdout == ""
-    assert "docker compose ps -a core" in result.stderr
-    assert len(result.stderr.splitlines()) == 1
-    assert not any(
-        value in result.stderr for value in ("build-step", "engine diagnostic", "test-mysql")
-    )
-
-
-def test_tunnel_json_requires_tunnel_action(run_deploy):
-    """单独给出输出格式时报告用法错误，避免意外启动默认的全栈部署。"""
-    result, calls = run_deploy("--tunnel-json")
-    assert result.returncode == 2 and not calls
 
 
 def test_fresh_checkout_uses_h3_template(checkout, tmp_path, run_deploy):

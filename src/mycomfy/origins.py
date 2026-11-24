@@ -1,4 +1,4 @@
-"""部署脚本和服务进程共同使用的 HTTPS 测试入口校验，仅依赖标准库。"""
+"""部署脚本和服务进程共同使用的 HTTPS 入口校验，仅依赖标准库。"""
 
 import re
 from ipaddress import IPv4Address, IPv6Address
@@ -31,12 +31,12 @@ def _https_origin(value, field):
     return f"https://{host}" + (f":{port}" if port != 443 else "")
 
 
-def normalize_test_origins(public, admin):
-    """启用公网管理测试时校验两个独立入口，关闭时保留工作台的原有配置。"""
+def normalize_origins(public, admin):
+    """配置 HTTPS 管理入口时，要求管理与工作台各自使用独立的浏览器来源。"""
     if admin is None or admin == "":
         return public, None
-    admin = _https_origin(admin, "public.admin_test_origin")
+    admin = _https_origin(admin, "public.admin_origin")
     public = _https_origin(public, "public.origin")
     if public == admin:
-        raise ValueError("public.admin_test_origin 和 public.origin 必须使用两个不同的来源")
+        raise ValueError("public.admin_origin 和 public.origin 必须使用两个不同的来源")
     return public, admin

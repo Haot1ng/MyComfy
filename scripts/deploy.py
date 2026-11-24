@@ -4,7 +4,6 @@
 import argparse
 import json
 import os
-import re
 import secrets
 import subprocess
 import sys
@@ -41,6 +40,34 @@ def bind_source(service, target):
     raise ValueError(f"Compose 配置中缺少目录挂载 {target}")
 
 
+def prepare_gateway(services, repo, config_path, deploy_local_stack):
+    """核对本机监听端口和所选挂载范围，给网关准备独立的持久状态目录。"""
+    gateway = services["gateway"]
+    edge_ports = [
+        int(gateway["environment"][name]) for name in ("MYCOMFY_API_PORT", "MYCOMFY_LOCAL_PORT")
+    ]
+    if len(set(edge_ports)) != len(edge_ports):
+        raise ValueError("ports.api 和 ports.admin 必须不同")
+    if deploy_local_stack:
+        local_ports = edge_ports + [
+            int(services[name]["ports"][0]["published"]) for name in ("mysql", "redis")
+        ]
+        if len(set(local_ports)) != len(local_ports):
+            raise ValueError("单机部署的 ports 监听端口必须分别配置")
+    state = bind_source(gateway, "/var/lib/mycomfy-gateway").resolve()
+    core = services["core"]
+    private = [
+        bind_source(core, "/run/mycomfy"),
+        bind_source(core, core["environment"]["MYCOMFY_DATA_ROOT"]),
+        bind_source(services["engine"], "/deployment"),
+        repo / ".env",
+        config_path or repo / "deploy.config.json",
+    ]
+    if any(path.resolve().is_relative_to(state) for path in private):
+        raise ValueError("网关状态须使用独立目录，不能包含维护凭据、部署文件或业务数据")
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
 def prepare_token(directory):
     """首次部署生成本机维护令牌，保留已有令牌及并发部署先发布的令牌。"""
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -56,36 +83,6 @@ def prepare_token(directory):
                 pass
     if not token.is_file() or not token.stat().st_size or token.stat().st_mode & 0o077:
         raise ValueError(f"请检查 {token}，需要保存非空令牌并设置权限 0600")
-
-
-def funnel_host(value):
-    """接受 Tailscale 给本机分配的 DNS 名称，off 表示恢复原部署配置。"""
-    if value == "off":
-        return value
-    # status 返回的绝对域名末尾可能带一个点。只接受 DNS 标签，避免混入路径或端口。
-    host = value.lower().removesuffix(".")
-    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-    if len(host) > 253 or not re.fullmatch(rf"(?:{label}\.)+ts\.net", host):
-        raise argparse.ArgumentTypeError(
-            "请填写 Tailscale 显示的完整设备名（以 .ts.net 结尾），或 off"
-        )
-    return host
-
-
-def start_tunnel_core(run_compose, json_output):
-    """重建并等待 core，程序调用时只在失败后提示如何查看服务状态。"""
-    command = ("up", "-d", "--no-deps", "--build", "--wait", "core")
-    if not json_output:
-        run_compose(*command)
-        return
-    # 隧道启动器只读取端口结果；Docker 的构建和启动输出直接丢弃。
-    try:
-        run_compose(*command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        print(
-            "core 启动失败，请在项目目录运行 docker compose ps -a core 查看状态。", file=sys.stderr
-        )
-        raise
 
 
 def container_states(run_compose, service):
@@ -159,7 +156,9 @@ def graceful_stop(run_compose, args, repo):
         stop_engine(run_compose, repo)
 
     if not (args.db_only or args.gpu_only):
+        # Core 先关闭长连接，让网关在没有活动 SSE 的情况下排空客户端。
         run_compose("stop", "--timeout", "-1", "core")
+        run_compose("stop", "--timeout", "-1", "gateway")
     if not (args.core_only or args.gpu_only):
         run_compose("stop", "--timeout", "-1", "mysql", "redis")
     print("所选服务已停止。", flush=True)
@@ -186,26 +185,11 @@ def main():
         "--compose", nargs=argparse.REMAINDER, help="用同一份配置执行 Compose 命令，如 ps 或 logs"
     )
     parser.add_argument(
-        "--test-tunnel",
-        type=funnel_host,
-        metavar="设备名或off",
-        help="为已部署的 core 配置两个 Tailscale Funnel 测试网址，off 恢复原配置",
-    )
-    parser.add_argument(
-        "--tunnel-json", action="store_true", help="为隧道启动器输出 JSON 格式的实际监听端口"
-    )
-    parser.add_argument(
         "--stop", action="store_true", help="排空在途任务后停止本项目服务，可指定机器角色"
     )
     args = parser.parse_args()
-    if args.stop and (args.test_tunnel or args.compose is not None):
-        parser.error("--stop 不能与 --test-tunnel 或 --compose 一起使用")
-    if args.tunnel_json and not args.test_tunnel:
-        parser.error("--tunnel-json 需要与 --test-tunnel 一起使用")
-    if args.test_tunnel and (
-        args.db_only or args.core_only or args.gpu_only or args.compose is not None
-    ):
-        parser.error("--test-tunnel 仅可单独使用或与 --single-host 一起使用")
+    if args.stop and args.compose is not None:
+        parser.error("--stop 不能与 --compose 一起使用")
     repo = Path(__file__).resolve().parents[1]
     config_path = select_config(repo, args.config)
     process_env = {**os.environ, "PWD": str(repo)}
@@ -222,17 +206,14 @@ def main():
         settings, recipe, single_host = read_config(
             config_path,
             repo,
-            core_only=bool(args.test_tunnel)
-            or args.db_only
-            or args.core_only
-            or args.compose is not None,
+            core_only=args.db_only or args.core_only or args.compose is not None,
             database_init=args.db_only,
             redis_optional=args.gpu_only or args.compose is not None,
             single_host=single_host,
         )
         process_env.update(settings)
         compose += ["--env-file", os.devnull]
-    elif args.compose is None and not args.test_tunnel:
+    elif args.compose is None:
         # 已部署的项目仍可沿用原有 .env、deployment.json 和离线锁文件。
         subprocess.run(
             ["sh", "scripts/init-env.sh", "--generate-passwords"],
@@ -243,15 +224,6 @@ def main():
     if single_host or args.db_only or (args.stop and not (args.core_only or args.gpu_only)):
         # 两阶段复用同一 Compose 项目和网络，后续运维也可用配置开关查看数据库。
         compose += ["--profile", "database"]
-
-    if args.test_tunnel and args.test_tunnel != "off":
-        # 只覆盖此次 core 启动。原配置中的数据库、端口和目录继续生效。
-        process_env.update(
-            MYCOMFY_API_HOST="127.0.0.1",
-            MYCOMFY_PUBLIC_ORIGIN=f"https://{args.test_tunnel}",
-            MYCOMFY_ADMIN_TEST_ORIGIN=f"https://{args.test_tunnel}:8443",
-            MYCOMFY_COOKIE_SECURE="true",
-        )
 
     def run_compose(*arguments, **options):
         """让部署和日常 Compose 命令使用相同的工作目录和配置快照。"""
@@ -282,25 +254,8 @@ def main():
     if deploy_local_stack and config_path is None:
         # 旧版 .env 也可切换到单机，连接串使用随附数据库的实际账号和发布端口。
         process_env.update(legacy_single_host_environment(services))
-    if args.test_tunnel:
-        # 两个页面都由 core 提供，仅重建这一个容器，复用现有数据库和 GPU 部署。
-        start_tunnel_core(run_compose, args.tunnel_json)
-        if args.test_tunnel == "off":
-            print("{}" if args.tunnel_json else "core 已恢复原部署配置。")
-            return
-        core = services["core"]
-        # 监听端口取自 Compose 已解析的 core 命令，支持旧 .env 和 JSON 中的自定义值。
-        command = core["command"]
-        public_port = int(command[command.index("--port") + 1])
-        admin_port = int(command[command.index("--local-port") + 1])
-        if args.tunnel_json:
-            print(json.dumps({"public_port": public_port, "admin_port": admin_port}))
-        else:
-            print(f"tailscale funnel --https=443 http://127.0.0.1:{public_port}")
-            print(core["environment"]["MYCOMFY_PUBLIC_ORIGIN"])
-            print(f"tailscale funnel --https=8443 http://127.0.0.1:{admin_port}")
-            print(core["environment"]["MYCOMFY_ADMIN_TEST_ORIGIN"])
-        return
+    if not args.gpu_only:
+        prepare_gateway(services, repo, config_path, deploy_local_stack)
     owner = services["engine" if args.gpu_only else "core"]
     data = bind_source(owner, owner["environment"]["MYCOMFY_DATA_ROOT"])
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -309,8 +264,8 @@ def main():
     start = []
     if not args.gpu_only:
         prepare_token(bind_source(services["core"], "/run/mycomfy"))
-        build.extend(["migrate", "core"])
-        start.append("core")
+        build.extend(["migrate", "core", "gateway"])
+        start.extend(["core", "gateway"])
     if not args.core_only:
         deployment = bind_source(services["engine"], "/deployment")
         deployment.mkdir(mode=0o700, parents=True, exist_ok=True)

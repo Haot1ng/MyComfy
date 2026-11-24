@@ -1,0 +1,38 @@
+.crumb a {color:var(--muted);text-decoration:none}
+.traffic-summary dl {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:16px 0}
+.traffic-summary dl div {min-width:0;padding:0 clamp(12px,2vw,26px);border-left:1px solid var(--line)}
+.traffic-summary dl div:first-child {border:0}
+.traffic-summary dt,.traffic-health,.traffic-filters label,#rule-editor small {color:var(--muted);font-size:13px}
+.traffic-summary dd {font:500 clamp(21px,2.2vw,32px)/1.45 var(--mono);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.traffic-health,.traffic-filters,.rule-actions {display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.traffic-health {margin:15px 0}
+.traffic-health .faint {min-width:0;overflow-wrap:anywhere}
+.traffic-note,.traffic-feedback {margin:0 0 14px;overflow-wrap:anywhere}
+#metrics-note {color:var(--amber)}
+.traffic-feedback:empty {margin:0}
+.traffic-feedback[data-tone="error"] {color:var(--red)}
+.traffic-feedback[data-tone="success"] {color:var(--accent)}
+.traffic-filters {justify-content:space-between;padding:16px}
+.traffic-filters .toolbar {gap:7px}
+.workspace select,.traffic-filters input,#rule-editor input {min-width:0;max-width:100%;padding:7px 9px;background:var(--base);color:var(--text);border:1px solid #465455;border-radius:6px}
+#route-search {width:16ch}
+#traffic-rows td {padding:10px 13px;font-variant-numeric:tabular-nums;vertical-align:top}
+#traffic-rows td:first-child {min-width:190px}
+#traffic-rows td:nth-child(7),#traffic-rows td:nth-child(8) {min-width:125px}
+#traffic-rows small {display:block;color:var(--muted);margin-top:3px;font-size:12px}
+#traffic-rows .route-path {font:12px/1.5 var(--mono);overflow-wrap:anywhere}
+#traffic-rows .method {font:600 12px/1.4 var(--mono);color:var(--accent);margin-right:6px}
+#traffic-rows .number {white-space:nowrap}
+#rule-editor {width:min(460px,calc(100% - 32px));max-height:90dvh;overflow:auto;padding:22px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text)}
+#rule-editor::backdrop {background:#080d10bb}
+#rule-target {color:var(--accent);overflow-wrap:anywhere}
+#rule-editor fieldset {display:grid;gap:4px;min-width:0;margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:7px}
+#rule-editor fieldset div {display:grid;gap:4px}
+#rule-editor legend {font-weight:600}
+#rule-editor label {margin-top:4px}
+.rule-actions {justify-content:flex-end}
+#reset-rule {margin-right:auto}
+@media(max-width:650px) {
+  .traffic-summary dl {grid-template-columns:repeat(2,minmax(0,1fr));row-gap:12px}
+  .traffic-summary dl div:nth-child(3) {border:0}
+}

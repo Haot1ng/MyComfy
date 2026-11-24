@@ -166,8 +166,8 @@ services:
   engine:
     build:
       context: .
-      target: engine
-    image: mycomfy-engine:local
+      target: "${MYCOMFY_ENGINE_BUILD_TARGET:-engine}"
+    image: mycomfy-${MYCOMFY_ENGINE_BUILD_TARGET:-engine}:local
     gpus: all
     init: true
     restart: unless-stopped

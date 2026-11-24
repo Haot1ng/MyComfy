@@ -204,7 +204,9 @@ def test_bundled_yaml_provides_defaults_and_engine_recipe(tmp_path):
     path.write_bytes((REPO / "deploy.config.example.yaml").read_bytes())
     values, engine, single_host = read_config(path, tmp_path, core_only=False)
     load_document = runpy.run_path(str(REPO / "scripts/config_document.py"))["load_document"]
-    assert engine == load_document(path)["engine"]
+    configured = load_document(path)["engine"]
+    assert configured.pop("ref2va_in_image") is False
+    assert engine == configured and values["MYCOMFY_ENGINE_BUILD_TARGET"] == "engine"
     assert "h3-fl2va" in engine["models"]
     assert single_host is False and values["MYCOMFY_MANUAL_RETRY_LIMIT"] == "3"
     assert values["MYCOMFY_PUBLIC_ORIGIN"] == "http://127.0.0.1:8000"
@@ -233,6 +235,32 @@ assert load_document(Path(sys.argv[2]))['engine']['instances'][0]['gpu'] == '0'
     )
 
 
+@pytest.mark.parametrize("mismatch", ["sha256", "path"])
+def test_ref2va_image_rejects_conflicts_but_preserves_equivalent_source(tmp_path, mismatch):
+    """启用预置镜像时保留同一权重的备用来源，拒绝覆盖同名用户配置。"""
+    preset = REPO / "examples/deployment/h3-ref2va.models.yaml"
+    load_document = runpy.run_path(str(REPO / "scripts/config_document.py"))["load_document"]
+    model = load_document(preset)["engine"]["models"]["h3-ref2va"]
+    model["source"] = "https://mirror.example/ref2va.safetensors"
+    config = {
+        "mysql": {"user": "app", "password": "example"},
+        "engine": {
+            "ref2va_in_image": True,
+            "comfyui": {},
+            "pytorch": {},
+            "models": {"h3-ref2va": model},
+        },
+    }
+    path = tmp_path / "gpu.yaml"
+    path.write_text(yaml_document(config))
+    _, recipe, _ = read_config(path, tmp_path, core_only=False, redis_optional=True)
+    assert recipe["models"]["h3-ref2va"] == model
+    model[mismatch] = "0" * 64 if mismatch == "sha256" else "diffusion_models/custom.safetensors"
+    path.write_text(yaml_document(config))
+    with pytest.raises(ValueError, match=r"engine\.models\.h3-ref2va"):
+        read_config(path, tmp_path, core_only=False, redis_optional=True)
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -254,7 +282,11 @@ def test_yaml_parse_errors_hide_credentials(tmp_path, text):
 
 @pytest.mark.parametrize(
     ("extra", "field"),
-    [("single_host: 'false'", "single_host"), ("ports: {api: true}", r"ports\.api")],
+    [
+        ("single_host: 'false'", "single_host"),
+        ("ports: {api: true}", r"ports\.api"),
+        ("engine: {ref2va_in_image: 'false'}", r"engine\.ref2va_in_image"),
+    ],
 )
 def test_yaml_schema_rejects_wrong_scalar_types(tmp_path, extra, field):
     """YAML 语法虽正确，带引号的布尔值和作为端口的布尔值仍应明确报字段类型错误。"""

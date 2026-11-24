@@ -134,6 +134,19 @@ def _connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, re
     }
 
 
+def _register_ref2va(engine):
+    """把镜像固定的参考模型加入安装清单，核对用户已声明的同名模型。"""
+    preset = Path(__file__).resolve().parents[1] / "examples/deployment/h3-ref2va.models.yaml"
+    expected = load_document(preset)["engine"]["models"]["h3-ref2va"]
+    models = engine.setdefault("models", {})
+    if not isinstance(models, dict):
+        raise ValueError("engine.models 需要填写键值映射")  # noqa: TRY004
+    # 保留个人配置里的镜像站 URL；工作流所依赖的摘要和目标文件名必须匹配。
+    model = models.setdefault("h3-ref2va", expected)
+    if not isinstance(model, dict) or any(model.get(k) != expected[k] for k in ("path", "sha256")):
+        raise ValueError("engine.models.h3-ref2va 的 path 和 sha256 须与镜像预置模型一致")
+
+
 def read_config(
     path: Path,
     repo: Path,
@@ -265,6 +278,14 @@ def read_config(
     if not isinstance(cookie_secure, bool):
         raise ValueError("public.cookie_secure 需要填写 true 或 false")  # noqa: TRY004
 
+    # Compose 的构建目标在运维命令中也须一致。只有 GPU 部署需要校验完整安装清单。
+    engine = config.get("engine")
+    ref2va_in_image = False
+    if isinstance(engine, dict):
+        ref2va_in_image = engine.pop("ref2va_in_image", False)
+    if not isinstance(ref2va_in_image, bool):
+        raise ValueError("engine.ref2va_in_image 需要填写布尔值 true 或 false")  # noqa: TRY004
+
     # 客户端连接地址与数据库宿主机用于发布端口的监听地址分别传递。
     variables = {
         "MYSQL_USER": mysql_user,
@@ -275,6 +296,7 @@ def read_config(
         "MYCOMFY_REDIS_BIND_HOST": redis_bind,
         **_connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, redis_endpoint),
         "MYCOMFY_DATA_ROOT": directories["data"],
+        "MYCOMFY_ENGINE_BUILD_TARGET": "engine-ref2va" if ref2va_in_image else "engine",
         "MYCOMFY_CONFIG_DIR": directories["config"],
         "MYCOMFY_DEPLOYMENT_DIR": directories["deployment"],
         "MYCOMFY_GATEWAY_STATE_DIR": directories["gateway"],
@@ -301,10 +323,10 @@ def read_config(
             raise ValueError(f"请将包含数据库密码的配置文件移出 paths.{name} 挂载目录")
 
     # 仅传递引擎分组。安装器在准备版本、模型和依赖锁前进一步校验其结构。
-    engine = _object(
-        config.get("engine"), "engine", {"comfyui", "pytorch", "nodes", "models", "instances"}
-    )
+    engine = _object(engine, "engine", {"comfyui", "pytorch", "nodes", "models", "instances"})
     for required in ("comfyui", "pytorch"):
         if required not in engine:
             raise ValueError(f"engine.{required} 为全栈部署必填项")
+    if ref2va_in_image:
+        _register_ref2va(engine)
     return variables, engine, single_host

@@ -20,6 +20,7 @@ from . import bundled
 
 Name = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")]
 Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+IMAGE_MODEL_OBJECTS = Path("/opt/mycomfy/model-objects")
 
 
 class Record(BaseModel):
@@ -115,7 +116,7 @@ def write_json(path, value):
 
 
 def copy_model(model, target, base):
-    """复用通过摘要校验的模型，或流式下载到目标盘上再原子发布。"""
+    """复用已校验的缓存，或从镜像、HTTPS、本地来源复制权重并原子发布。"""
     if target.exists():
         if file_digest(target) != model.sha256:
             raise ValueError(f"已存在模型摘要不符，保留原文件 {model.path}")
@@ -127,17 +128,20 @@ def copy_model(model, target, base):
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
         temporary = Path(output.name)
         try:
-            stream = (
-                urllib.request.urlopen(model.source, timeout=60)
-                if source.scheme
-                else (base / model.source).open("rb")
-            )
+            # 仅用同摘要镜像文件替代远端下载。显式指定的本地文件始终从原路径读取。
+            packaged = IMAGE_MODEL_OBJECTS / model.sha256
+            if not source.scheme:
+                stream = (base / model.source).open("rb")
+            elif packaged.is_file():
+                stream = packaged.open("rb")
+            else:
+                stream = urllib.request.urlopen(model.source, timeout=60)
             with stream:
                 shutil.copyfileobj(stream, output, length=1024 * 1024)
             output.flush()
             os.fsync(output.fileno())
             if file_digest(temporary) != model.sha256:
-                raise ValueError(f"模型下载摘要不符 {model.path}")
+                raise ValueError(f"模型内容摘要不符 {model.path}")
             os.link(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)

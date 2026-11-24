@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import runpy
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,50 @@ def test_partial_model_never_becomes_visible(tmp_path):
     source.write_bytes(b"complete")
     deploy.copy_model(model, target, tmp_path)
     assert target.read_bytes() == b"complete"
+
+
+def test_image_model_installs_offline_and_reuses_persistent_cache(tmp_path, monkeypatch):
+    """同摘要的镜像权重从本地校验安装，重试时优先使用已发布的持久缓存。"""
+    image_objects = tmp_path / "image"
+    image_objects.mkdir()
+    monkeypatch.setattr(deploy, "IMAGE_MODEL_OBJECTS", image_objects)
+
+    def unexpected_download(*args, **kwargs):
+        """镜像命中或持久缓存命中时，测试不允许访问远端。"""
+        pytest.fail("预置权重在部署时触发了下载")
+
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", unexpected_download)
+    digest = hashlib.sha256(b"verified-weights").hexdigest()
+    model = deploy.ModelFile(
+        path="diffusion_models/ref.safetensors", source="https://example.invalid/ref", sha256=digest
+    )
+    target = tmp_path / "cache" / digest
+    packaged = image_objects / digest
+    packaged.write_bytes(b"wrong-weights")
+    with pytest.raises(ValueError, match="摘要不符"):
+        deploy.copy_model(model, target, tmp_path)
+    assert list(target.parent.iterdir()) == []
+
+    # 重新构建得到正确权重后可重试。之后切回普通镜像仍可沿用这份缓存。
+    packaged.write_bytes(b"verified-weights")
+    deploy.copy_model(model, target, tmp_path)
+    packaged.unlink()
+    deploy.copy_model(model, target, tmp_path)
+    assert target.read_bytes() == b"verified-weights"
+
+
+def test_ref2va_image_weight_matches_deployment_preset():
+    """防止镜像下载地址、校验和或模型对象路径与 GPU 部署预设发生偏移。"""
+    root = Path(__file__).resolve().parents[2]
+    load_document = runpy.run_path(str(root / "scripts/config_document.py"))["load_document"]
+    model = load_document(root / "examples/deployment/h3-ref2va.models.yaml")["engine"]["models"][
+        "h3-ref2va"
+    ]
+    dockerfile = (root / "Dockerfile").read_text().replace("\\\n", " ")
+    target = dockerfile.split("FROM engine AS engine-ref2va\n", 1)[1].split("\nFROM ", 1)[0]
+    [download] = [line.split() for line in target.splitlines() if line.startswith("ADD ")]
+    assert f"--checksum=sha256:{model['sha256']}" in download
+    assert download[-2:] == [model["source"], str(deploy.IMAGE_MODEL_OBJECTS / model["sha256"])]
 
 
 def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, monkeypatch):

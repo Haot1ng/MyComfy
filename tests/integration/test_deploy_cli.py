@@ -23,9 +23,12 @@ def checkout(tmp_path):
     shutil.copytree(
         source / "scripts", repo / "scripts", ignore=shutil.ignore_patterns("__pycache__")
     )
-    module = Path("src/mycomfy/origins.py")
-    (repo / module.parent).mkdir(parents=True)
-    shutil.copy(source / module, repo / module)
+    for resource in (
+        Path("src/mycomfy/origins.py"),
+        Path("examples/deployment/h3-ref2va.models.yaml"),
+    ):
+        (repo / resource.parent).mkdir(parents=True)
+        shutil.copy(source / resource, repo / resource)
     return repo
 
 
@@ -381,7 +384,9 @@ def test_fresh_checkout_uses_h3_template(checkout, tmp_path, run_deploy, example
         str(checkout / "var/data/engines"),
     ]
     recipe = json.loads((tmp_path / "submitted-recipe.json").read_text())
+    assert template["engine"].pop("ref2va_in_image") is False
     assert recipe == template["engine"] and "h3-fl2va" in recipe["models"]
+    assert services["engine"]["build"]["target"] == "engine" and "h3-ref2va" not in recipe["models"]
     assert template_path.read_bytes() == original
     assert not any(
         (checkout / name).exists()
@@ -427,6 +432,28 @@ def compose_services(run_deploy, *options):
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)["services"]
+
+
+def test_ref2va_build_and_gpu_install_use_one_config(
+    checkout, run_deploy, example_config, tmp_path
+):
+    """从相同配置渲染 Compose 和 GPU 安装清单，核对角色模型和原有首帧模型同时注册。"""
+    example_config["engine"]["ref2va_in_image"] = True
+    (checkout / "deploy.config.yaml").write_text(json.dumps(example_config))
+    services = compose_services(run_deploy)
+    assert services["engine"]["build"]["target"] == "engine-ref2va"
+    assert services["engine"]["image"] == "mycomfy-engine-ref2va:local"
+    assert services["worker"]["build"]["target"] == "worker"
+
+    result, _ = run_deploy("--gpu-only")
+    assert result.returncode == 0, result.stderr
+    recipe = json.loads((tmp_path / "submitted-recipe.json").read_text())
+    assert "ref2va_in_image" not in recipe
+    load_document = runpy.run_path(str(checkout / "scripts/config_document.py"))["load_document"]
+    preset = load_document(checkout / "examples/deployment/h3-ref2va.models.yaml")["engine"][
+        "models"
+    ]
+    assert recipe["models"] == {**example_config["engine"]["models"], **preset}
 
 
 @pytest.mark.parametrize(

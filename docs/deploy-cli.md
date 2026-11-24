@@ -106,6 +106,30 @@ python3 scripts/deploy.py --compose --help
 
 实际端口以本机部署为准。例如 `ps -a` 显示 `127.0.0.1:13306->3306/tcp` 时，宿主机客户端使用 `13306`，单机 GPU 容器仍通过 Compose 网络连接 `mysql:3306`。[完整配置模板](../deploy.config.example.yaml)
 
+### 部署角色参考视频模型
+
+内置首帧模板使用 FL2VA，「角色参考与动作」模板使用 Ref2VA。两份主模型可以装在同一个引擎中。每个工作流的 `UNETLoader` 指定要加载的文件，调度器按模板要求的模型标识和 SHA-256 匹配引擎。
+
+1. 在已有 `deploy.config.yaml` 的 `engine:` 下添加 `ref2va_in_image: true`，与 `comfyui:` 同级。保留现有的模型、目录和实例配置。脚本自动登记 `h3-ref2va`。此模板还使用默认 H3 部署中的文本编码器、视频 VAE 和音频 VAE。
+2. 在 GPU 机运行下面的命令。第一条可提前构建带权重的镜像，构建阶段只需网络和支持 Dockerfile 前端 1.14 或更高版本的 BuildKit。已有任务时，第二条等待 Worker 排空并关闭旧引擎。第三条使用构建缓存，完成 GPU 探测、安装和启动。若原部署指定了 `--config`，三条命令均使用原文件。
+
+   ```bash
+   python3 scripts/deploy.py --compose build engine
+   python3 scripts/deploy.py --gpu-only --stop
+   python3 scripts/deploy.py --gpu-only
+   ```
+
+   构建器从锁定的 Hugging Face 版本下载约 **20.97 GB** 并校验 SHA-256，镜像标签为 `mycomfy-engine-ref2va:local`。首次安装时，引擎会把镜像中的文件复制到持久模型缓存并校验。镜像与数据目录各需约 21 GB，还应为 Docker 构建缓存和新的引擎虚拟环境留出空间。后续部署会复用已校验的模型缓存。[固定权重来源](../examples/deployment/h3-ref2va.models.yaml)
+3. 在业务机的管理后台打开「工作流模板 → 打开 JSON 文件」，选择 [角色参考模板](../examples/strategies/h3-character-reference.strategy.jsonc)，点击「发布新版本」。工作台选取新模板后，上传一张图，填写主体要做的动作即可。模板自动引用 `<Picture 1>`，默认输出 640×384、24 fps、约 5.17 秒的 MP4。[ComfyUI 原生参考视频工作流](https://docs.comfy.org/tutorials/video/minimax/minimax-h3-native)
+
+要确认 GPU 已能接单，可在业务机上运行以下只读查询。默认实例为 `gpu0`；如果改过实例名，替换 URL 的最后一段。预期 `accepting` 为 `True`，模型摘要为 `9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779`。
+
+```bash
+admin=$(docker port mycomfy-gateway-1 8001/tcp)
+curl --noproxy '*' -fsS "http://$admin/local/v1/monitor/instances/gpu0" |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["accepting"], d["manifest"]["models"].get("h3-ref2va"))'
+```
+
 ## Docker 镜像和容器行为
 
 完整单机部署有七项服务，通常可见六个常驻容器和一个成功退出的迁移容器。下表采用默认项目名 `mycomfy`。[Compose 服务定义](../compose.yaml) · [镜像构建定义](../Dockerfile)

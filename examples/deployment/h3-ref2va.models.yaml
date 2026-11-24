@@ -1,0 +1,11 @@
+# 开启 engine.ref2va_in_image 后，部署脚本自动读取此处的权重清单。
+# 如需在安装阶段下载，可将 h3-ref2va 条目合并到个人 deploy.config.yaml 的 engine.models 下，保留已有条目。
+engine:
+  models:
+    h3-ref2va:  # 策略按此名称和摘要选择具备参考图生成能力的引擎。
+      # 固定 Comfy-Org 模型版本。首次下载约 20.97 GB。
+      source: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+      # 安装路径相对于引擎模型目录，文件名须与工作流的 UNETLoader 一致。
+      path: "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+      # 部署器使用 SHA-256 验证下载内容和已有模型缓存。
+      sha256: "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779"

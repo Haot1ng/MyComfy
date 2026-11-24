@@ -1,0 +1,111 @@
+// MyComfy 管理后台 → 工作流模板 → 打开 JSON 文件。选中后可预览节点并发布。
+// 一张图片提供角色外观，文字决定角色在新场景中的动作。输出一段带音轨的 MP4。
+{
+  "strategy_key": "minimax-h3-character-reference", // 模板系列标识；再次发布同名系列会创建新版本。
+  "name": "MiniMax H3 · 角色参考与动作",
+  "workflow": {
+    // [节点 ID, 输出序号] 表示 ComfyUI 节点连线。编号 6、13、11、24 加载本图使用的四份权重。
+    "6": {
+      "class_type": "UNETLoader",
+      "inputs": {"unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}
+    },
+    "13": {
+      "class_type": "CLIPLoader",
+      "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}
+    },
+    "11": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"}},
+    "24": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
+    "114": {
+      "class_type": "LoadImage",
+      "inputs": {"image": "reference.png"} // Worker 在执行时填入本次上传图片的文件名。
+    },
+    "36": {
+      "class_type": "StringConcatenate",
+      "inputs": {
+        "string_a": "以 <Picture 1> 中动作描述所指的主体为主角，保持其辨识特征与外观连续。以动作描述指定的场景、初始姿态和镜头开始拍摄。",
+        "string_b": "", // 用户输入的动作与场景，或用户手动采用的扩写结果。
+        "delimiter": "\n" // 换行后接动作描述。固定参考标记在整个过程中保留。
+      }
+    },
+    "104": {
+      "class_type": "MiniMaxH3ReferenceToVideo",
+      "inputs": {
+        "clip": ["13", 0],
+        "vae": ["11", 0],
+        "audio_vae": ["24", 0],
+        "prompt": ["36", 0],
+        "ref_images.ref_image_0": ["114", 0], // 第一张参考图对应提示词中的 <Picture 1>。
+        "ref_image_size": "match", // 按生成画布的像素规模处理参考图。
+        "width": 640, "height": 384,
+        "length": 124 // 17 × 7 + 5 帧，按 24 fps 播放约 5.17 秒。
+      }
+    },
+    "15": {"class_type": "RandomNoise", "inputs": {"noise_seed": 791336}},
+    "16": {"class_type": "BasicGuider", "inputs": {"model": ["6", 0], "conditioning": ["104", 0]}},
+    "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+    "9": {
+      "class_type": "BasicScheduler",
+      "inputs": {"model": ["6", 0], "scheduler": "beta", "steps": 20, "denoise": 1.0} // 使用基础权重采样。
+    },
+    "14": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": ["15", 0], "guider": ["16", 0], "sampler": ["17", 0],
+        "sigmas": ["9", 0], "latent_image": ["104", 1] // R2V 的第二路输出给出联合音视频潜变量。
+      }
+    },
+    "10": {"class_type": "VAEDecode", "inputs": {"samples": ["14", 0], "vae": ["11", 0]}},
+    "23": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["14", 0], "vae": ["24", 0]}},
+    "91": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "audio": ["23", 0], "fps": 24, "bit_depth": 8}},
+    "92": {
+      "class_type": "SaveVideo",
+      "inputs": {"video": ["91", 0], "filename_prefix": "video/H3_Character", "format": "mp4", "codec": "auto"}
+    }
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "reference_image": {
+        "type": "string", "minLength": 1,
+        "title": "角色参考图",
+        "description": "上传一张能看清主角的图片。多人合影可先裁出主角，也可以在下方写明角色的位置和特征。"
+      },
+      "prompt": {
+        "type": "string", "minLength": 1, "maxLength": 8000,
+        "title": "场景与动作",
+        "description": "描述角色在哪里、先做什么、接着做什么，以及镜头怎样拍摄。模板会自动引用上面的角色图。",
+        "default": "雨夜站台，中景固定镜头。主角听到汽笛后转头望向左侧，随后提起脚边的旅行袋，朝刚停下的列车走去。"
+      }
+    },
+    "required": ["reference_image", "prompt"],
+    "additionalProperties": false
+  },
+  "bindings": [
+    {"input": "reference_image", "node_id": "114", "node_input": "image", "kind": "asset"}, // 生成上传控件。
+    {"input": "prompt", "node_id": "36", "node_input": "string_b", "kind": "value"} // 用户只需输入动作文字。
+  ],
+  "prompt_assist": {
+    "fields": ["prompt"], // 仅发送用户主动选择扩写的文字，图片留在视频生成流程。
+    "instructions": "用用户的语言把动作与场景整理成约五秒可完成的单镜头。保留用户点名的主体和特征，把动作写成有先后顺序的可见行为，遵循用户指定的镜头。角色参考标记由工作流添加。只输出可直接用于生成的动作描述，保留用户给出的外观信息，不猜测参考图内容。"
+  },
+  "requirements": {
+    "comfyui": "2f35f4a08176d993cded35dac3332be4f7287f41", // MyComfy 默认部署的 v0.33.0 提交。
+    "models": { // 调度器按模型标识和文件 SHA-256 核对 GPU 实例。
+      "h3-ref2va": "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+      "h3-text": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "h3-video-vae": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e",
+      "h3-audio-vae": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    }
+  },
+  "progress_mapping": [
+    {"node_ids": ["114", "36", "104"], "stage": "读取角色参考与动作"},
+    {"node_ids": ["14"], "stage": "生成角色动作"},
+    {"node_ids": ["10", "23", "91", "92"], "stage": "解码与导出"}
+  ],
+  "output_contract": [
+    {"role": "video", "node_id": "92", "media_types": ["video/mp4"], "width": 640, "height": 384, "fps": 24}
+  ],
+  "scheduling": {}, // 使用平台默认调度优先级。
+  "retry": {}, // 使用平台默认自动重试策略。
+  "artifacts": {} // 使用平台默认结果发布策略。
+}

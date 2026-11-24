@@ -174,7 +174,10 @@ MyComfy/
 │       ├── 0006_prompt_providers.py                           # 新增扩写服务商和模板配置表
 │       └── 0007_traffic_rules.py                              # 新增限流规则表及审计字段
 ├── examples/                                                  # 可导入示例
+│   ├── deployment/
+│   │   └── h3-ref2va.models.yaml                              # 角色参考主模型的锁定来源和校验值
 │   └── strategies/                                            # 视频生成策略
+│       ├── h3-character-reference.strategy.jsonc              # 单张参考图指定角色，文字驱动动作
 │       ├── h3-five-image-20s-segmented-384.strategy.json      # 五图分段视频模板，20 秒、384×384
 │       └── h3-five-image-20s-segmented-640.strategy.json      # 五图分段视频模板，20 秒、640×640
 ├── tests/                                                     # 自动化测试
@@ -325,6 +328,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | `engine.pytorch` | 模板在 Linux x86_64、Python 3.12 下使用 PyTorch `2.11.0+cu130`，目标机需要支持 CUDA 13.0 的 NVIDIA 驱动。 |
 | `engine.nodes`、`engine.models` | 默认 H3 工作流使用 ComfyUI 内置节点。五个模型文件均固定下载地址和 SHA-256。要让用户在工作台选择文生或图生视频，还需发布相应的业务策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
+| `engine.ref2va_in_image` | 设为 `true` 时，Docker 在构建引擎镜像时下载 H3 Ref2VA 权重，供「角色参考与动作」模板使用。默认关闭。[配置及导入步骤](docs/deploy-cli.md#部署角色参考视频模型) |
 
 **已有独立 MySQL 和 Redis** 时，保留模板的 `single_host: false`，在配置中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
 

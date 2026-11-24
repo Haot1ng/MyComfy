@@ -50,6 +50,11 @@ public:
 
 # 全栈或 GPU 端部署使用以下配置。默认下载 5 份 MiniMax H3 权重，共约 42 GB；另需预留引擎、依赖及视频磁盘空间。
 engine:
+  # true 在 Docker 构建 engine 镜像时下载并校验约 21 GB 的 Ref2VA 权重，并把 h3-ref2va 加入引擎模型清单。
+  # GPU 部署时从镜像复制权重到持久模型缓存。首次使用需为镜像层和模型缓存分别预留约 21 GB，另需构建临时空间。
+  # false 或省略时使用普通 engine 镜像，引擎安装器按下方 models 的显式配置准备各模型。
+  ref2va_in_image: false
+
   comfyui:
     url: "https://github.com/Comfy-Org/ComfyUI.git"   # ComfyUI 源码仓库。可填 HTTPS 地址，或 paths.deployment 内的本地 Git 仓库路径。
     version: "v0.33.0"                               # Git 标签或 40 位完整提交号。部署器固定实际提交，策略按该提交检查兼容性。

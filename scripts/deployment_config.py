@@ -1,8 +1,7 @@
-"""用宿主 Python 标准库读取部署参数，为 Compose 和 GPU 安装器分别提供所需数据。"""
+"""在宿主 Python 中读取部署参数，为 Compose 和 GPU 安装器分别提供所需数据。"""
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import runpy
@@ -10,6 +9,8 @@ from ipaddress import ip_address, ip_network
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+# 按脚本位置加载解析器，使部署入口可从任意工作目录直接运行。
+load_document = runpy.run_path(str(Path(__file__).with_name("config_document.py")))["load_document"]
 # 宿主 Python 无需安装业务包，仍与容器进程使用同一个标准库校验器。
 normalize_origins = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "src/mycomfy/origins.py")
@@ -19,7 +20,7 @@ normalize_origins = runpy.run_path(
 def _object(value, field, allowed):
     """检查配置分组及其键名，在应用默认值前报告拼写错误。"""
     if not isinstance(value, dict):
-        raise ValueError(f"{field} 需要填写 JSON 对象")  # noqa: TRY004 - 用户配置校验错误
+        raise ValueError(f"{field} 需要填写键值映射")  # noqa: TRY004 - 用户配置校验错误
     unknown = value.keys() - allowed
     if unknown:
         raise ValueError(f"{field} 含有未支持的字段：{', '.join(sorted(unknown))}")
@@ -54,7 +55,7 @@ def _credentials(values, service, database_init):
 def _host(value, field, *, bind=False):
     """校验单个主机地址，返回未带方括号的主机和回环标记。发布端口只能绑定 IP。"""
     name = _text(value, field)
-    # 同时支持 JSON 中常见的裸 IPv6 地址和 URL 风格的方括号 IPv6 地址。
+    # 同时支持裸 IPv6 地址和 URL 风格的方括号 IPv6 地址。
     if name.startswith("[") and name.endswith("]") and ":" in name:
         name = name[1:-1]
     try:
@@ -103,7 +104,7 @@ def legacy_single_host_environment(services):
     """从 Compose 已解析的旧版 .env 提取内置账号、密码和端口，为单机生成本地连接。"""
 
     def authority(service, username, password):
-        """还原 Compose 输出中的字面量 $，用与 JSON 部署相同的规则校验并编码凭据。"""
+        """还原 Compose 输出中的字面量 $，用与配置文件部署相同的规则校验并编码凭据。"""
         values = services[service]["environment"]
         credentials = {
             "user": values[username].replace("$$", "$"),
@@ -132,9 +133,9 @@ def read_config(
     redis_optional: bool = False,
     single_host: bool = False,
 ) -> tuple[dict[str, str], dict | None, bool]:
-    """读取一次 JSON，返回 Compose 变量、当前角色所需的引擎配置和生效的单机标记。"""
+    """读取 YAML 或旧 JSON，返回 Compose 变量、引擎配置和生效的单机标记。"""
     config = _object(
-        json.loads(path.read_text(encoding="utf-8-sig")),
+        load_document(path),
         "部署配置",
         {
             "single_host",
@@ -152,7 +153,7 @@ def read_config(
         raise ValueError("manual_retry_limit 需要填写非负整数，0 表示关闭手动重试")
     configured_single_host = config.get("single_host", False)
     if not isinstance(configured_single_host, bool):
-        raise ValueError("single_host 需要填写 JSON 布尔值 true 或 false")  # noqa: TRY004
+        raise ValueError("single_host 需要填写布尔值 true 或 false")  # noqa: TRY004
     single_host = single_host or configured_single_host
     # 单机全栈会创建内置库。按角色执行的命令仍只校验其所需的凭据与引擎参数。
     if single_host and not core_only and not redis_optional:
@@ -226,7 +227,7 @@ def read_config(
         raise ValueError("public.trusted_proxy_cidrs 含有无效的 IP 或 CIDR") from None
     host = _text(public.get("host", "127.0.0.1"), "public.host")
     origin = _text(public.get("origin", f"http://127.0.0.1:{ports['api']}"), "public.origin")
-    # 只在读取旧 JSON 时识别曾使用的字段名；新字段显式设为 null 会关闭该管理来源。
+    # 兼容旧 JSON 使用的字段名；新字段显式设为 null 会关闭该管理来源。
     admin = public.get("admin_origin", public.get("admin_test_origin"))
     origin, admin_origin = normalize_origins(origin, admin)
     try:

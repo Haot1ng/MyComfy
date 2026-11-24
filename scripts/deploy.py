@@ -14,10 +14,17 @@ from deployment_config import legacy_single_host_environment, read_config
 
 
 def select_config(repo, requested):
-    """选择指定或本机 JSON。新部署使用仓库模板，已有旧版部署返回 None。"""
-    path = requested.resolve() if requested is not None else repo / "deploy.config.json"
-    if path.exists():
-        return path
+    """优先使用显式配置，否则依次查找本机 YAML、YML 和旧 JSON。"""
+    if requested is not None:
+        candidates = [requested.resolve()]
+    else:
+        candidates = [
+            repo / name
+            for name in ("deploy.config.yaml", "deploy.config.yml", "deploy.config.json")
+        ]
+    for path in candidates:
+        if path.exists():
+            return path
 
     if requested is None:
         # 已有部署可能只在数据库机保存 .env，或在 GPU 机使用预制引擎清单。
@@ -26,8 +33,9 @@ def select_config(repo, requested):
             return None
 
     # 模板相对路径以仓库为基准。提示写到 stderr，保持 Compose 的标准输出可供解析。
-    template = repo / "deploy.config.example.json"
-    print(f"未找到配置 {path}，使用默认模板 {template}。", file=sys.stderr)
+    template = repo / "deploy.config.example.yaml"
+    missing = "、".join(str(path) for path in candidates)
+    print(f"未找到配置 {missing}，使用默认模板 {template}。", file=sys.stderr)
     return template
 
 
@@ -61,8 +69,9 @@ def prepare_gateway(services, repo, config_path, deploy_local_stack):
         bind_source(core, core["environment"]["MYCOMFY_DATA_ROOT"]),
         bind_source(services["engine"], "/deployment"),
         repo / ".env",
-        config_path or repo / "deploy.config.json",
     ]
+    if config_path is not None:
+        private.append(config_path)
     if any(path.resolve().is_relative_to(state) for path in private):
         raise ValueError("网关状态须使用独立目录，不能包含维护凭据、部署文件或业务数据")
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -168,7 +177,9 @@ def main():
     """读取一份部署配置，按所选模式构建镜像、部署引擎并等待服务就绪。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, help="部署参数文件，默认查找 deploy.config.json，缺失时使用仓库模板"
+        "--config",
+        type=Path,
+        help="部署参数文件；自动查找 deploy.config.yaml、.yml、.json，缺失时使用仓库 YAML 模板",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -272,7 +283,7 @@ def main():
         if recipe is None and not (deployment / "deployment.json").is_file():
             raise ValueError(
                 f"旧版部署缺少 {deployment / 'deployment.json'}。"
-                "使用默认 H3 模板可在部署命令中指定 --config deploy.config.example.json。"
+                "使用默认 H3 模板可在部署命令中指定 --config deploy.config.example.yaml。"
             )
         build += ["engine", "worker"]
         start += ["engine", "worker"]

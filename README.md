@@ -57,26 +57,28 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 
 **在同一台 GPU 机器上部署**，需要 Python 3、Docker Compose 2.30.0 或更新版本，以及可在容器中使用的 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用支持 WSL 的 NVIDIA 驱动和 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
 
-**首次部署**可在新检出的仓库根目录直接运行以下命令。脚本读取仓库自带的 `deploy.config.example.json`，MySQL 和 Redis 的默认密码都是字符串 `123456`，数据库和网页端口仅绑定本机 `127.0.0.1`。模板预置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。
+**首次部署**可在新检出的仓库根目录直接运行以下命令。脚本读取仓库自带的中文注释模板 `deploy.config.example.yaml`，MySQL 和 Redis 的默认密码都是字符串 `123456`，数据库和网页端口仅绑定本机 `127.0.0.1`。模板预置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。
 
 ```bash
 python3 scripts/deploy.py --single-host
 ```
 
-这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 Core、Nginx 网关、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.json) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
+这条命令先启动 MySQL 和 Redis 并等待健康检查通过，再构建应用镜像、在容器里安装 ComfyUI、执行数据库迁移，最后启动 Core、Nginx 网关、引擎和 Worker。业务端通过回环地址和配置的端口连接数据服务，GPU 容器在 Compose 网络内连接 `mysql:3306`。部署完成后，在本机管理后台 `http://127.0.0.1:8001/` 进入“工作流模板”，直接发布内置的 H3 策略，或从自己的 ComfyUI API 工作流新增模板，然后在工作台 `http://127.0.0.1:8000/` 创建批次。[新增与导入步骤](web/admin/README.md#新增模板) · [配置模板](deploy.config.example.yaml) · [节点与模型示例](docs/engine-deployment.md#配置工作流依赖)
 
 **启用 AI 提示词扩写**时，在管理后台的“提示词服务商”添加兼容 OpenAI Chat Completions 的 API 基址、模型标识及可选 API 密钥，再点击“启用”。基址由业务端容器访问，例如填 `https://api.example.com/v1`，服务端会追加 `/chat/completions`。可以保存多套配置，切换后从下一次扩写开始生效。
 
 在“工作流模板”的“打开 JSON 文件”旁可查看、下载带逐字段中文注释的 H3 模板（JSONC），也可以下载标准 JSON。上传文件时可以省略 `prompt_assist`，先发布并正常生成视频。选中已发布模板后，在“AI 提示词辅助”里填写指令、勾选文本字段并单独保存。新设置从下一次扩写生效，无需重新上传文件、发布版本或重启服务。内置 H3 文生视频、图生视频预设和仓库的五图分段示例均附有各自的指令。工作台用户可以直接提交原文，也可以点击“扩写提示词”，预览并编辑建议后再采用。一次扩写仅将模板指令、当前字段及其草稿发给生效的服务。[完整注释示例](web/admin/presets/example-h3-text-to-video.strategy.jsonc) · [API 与字段说明](docs/web-api.md#策略与素材)
 
-**需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.json`。部署脚本优先使用已有的这份配置，Git 默认忽略该文件。
+**需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.yaml`。文件中的 `#` 注释说明了各项用途和填写方式。部署脚本优先读取这份配置，Git 默认忽略该文件。
 
 ```bash
 umask 077
-cp -n deploy.config.example.json deploy.config.json
+cp -n deploy.config.example.yaml deploy.config.yaml
 ```
 
-| JSON 字段 | 填写内容 |
+在副本中保存修改后，单机运行 `python3 scripts/deploy.py --single-host`。密码保留引号，例如 `password: "123456"`，端口用整数，例如 `api: 8000`。表中的点号表示 YAML 的嵌套分组。
+
+| 部署配置字段 | 填写内容 |
 | --- | --- |
 | `single_host` | 顶层布尔值。设置为 `true` 后，直接运行 `python3 scripts/deploy.py` 即可在这台 GPU 主机的 Docker 中部署全部服务。省略或设为 `false` 时，无参部署连接已就绪的数据服务。 |
 | `mysql.host`、`redis.host` | 业务端连接的主机名或 IP。模板都填 `127.0.0.1`，端口分别取 `ports.mysql`（默认 3306）和 `ports.redis`（默认 6379）。 |
@@ -91,19 +93,19 @@ cp -n deploy.config.example.json deploy.config.json
 | `engine.nodes`、`engine.models` | 默认 H3 工作流使用 ComfyUI 内置节点。五个模型文件均固定下载地址和 SHA-256。要让用户在工作台选择文生或图生视频，还需发布相应的业务策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
 
-**已有独立 MySQL 和 Redis** 时，保留模板的 `"single_host": false`，在 JSON 中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
+**已有独立 MySQL 和 Redis** 时，保留模板的 `single_host: false`，在配置中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
 
-**先体验网页**时，可直接使用模板的本机数据库参数。先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core` 和 `gateway`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `"single_host": true` 仍决定这些服务连接本机数据库。
+**先体验网页**时，可直接使用模板的本机数据库参数。先运行 `python3 scripts/deploy.py --db-only`。数据库就绪后运行 `python3 scripts/deploy.py --core-only`，脚本会执行迁移并启动 `core` 和 `gateway`。显式指定 `--db-only`、`--core-only`、`--gpu-only` 或 `--compose` 时，只执行所选操作。配置中的 `single_host: true` 仍决定这些服务连接本机数据库。
 
 | 服务 | 容器职责 |
 | --- | --- |
 | `mysql`、`redis`、`migrate` | 保存业务状态和限流规则、缓存会话及共享限流计数、在服务启动前迁移数据库。 |
 | `gateway` | Nginx 接收工作台和管理后台的 HTTP 流量，通过专用 Unix 套接字转发给 Core，按来源 IP 执行各 API 的入口限额。管理端口绑定回环地址。 |
-| `core` | 托管 API、工作台和本机管理后台，并在鉴权后执行用户限额。公网 HTTPS 代理可通过 JSON 的 `public.origin` 设置外部来源，并设置 `public.cookie_secure` 为 `true`。 |
+| `core` | 托管 API、工作台和本机管理后台，并在鉴权后执行用户限额。使用 HTTPS 反向代理时，在部署配置的 `public.origin` 填写工作台外部来源，并设置 `public.cookie_secure` 为 `true`。 |
 | `engine` | 唯一请求 GPU 的服务，执行 `runtime serve` 并启动、监护 ComfyUI 子进程。实例端口仅监听该容器网络命名空间内的回环地址。 |
 | `worker` | 通过 MySQL 领任务，使用 `network_mode: service:engine` 连接回环引擎。与 engine、core 以相同绝对路径挂载数据目录，交接输入与产物。镜像自带健康检查，在 `docker ps` 的 STATUS 列显示协调循环的状态。队列为空时，能正常完成轮询的 Worker 同样显示 `healthy`。 |
 
-每个失败任务默认可由用户手动重试 3 次。在 `deploy.config.json` 顶层设置 `"manual_retry_limit": 3` 可调整次数，设为 `0` 可关闭。重新部署业务端后生效。已有任务继续沿用已消耗的次数，模板内的自动重试单独计数。
+每个失败任务默认可由用户手动重试 3 次。在 `deploy.config.yaml` 顶层设置 `manual_retry_limit: 3` 可调整次数，设为 `0` 可关闭。重新部署业务端后生效。已有任务继续沿用已消耗的次数，模板内的自动重试单独计数。
 
 ### 优雅停机
 
@@ -121,19 +123,26 @@ Worker 先停止领新任务，等待在途执行到达可恢复的边界。脚�
 python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core gateway engine worker
 ```
 
-如果使用了自定义配置文件，沿用 `--config /路径/部署配置.json`。查看容器状态可执行 `python3 scripts/deploy.py --compose --profile database ps -a`。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
+如果使用了自定义配置文件，沿用 `--config /路径/部署配置.yaml`。查看容器状态可执行 `python3 scripts/deploy.py --compose --profile database ps -a`。[Compose 配置](compose.yaml) · [引擎运维](docs/engine-deployment.md#容器运行与验收)
 
 ### 已有部署与分机部署
 
-假设数据库机、业务机、GPU 机位于同一私网。MySQL 与 Redis 在 `10.20.0.10`，业务工作台在 `10.20.0.20:8000`，GPU 机是 `10.20.0.30`。三台主机可以使用相同的地址配置。下列字段合并到各自的 `deploy.config.json`，账号、密码和引擎配置沿用现场填写的值。
+假设数据库机、业务机、GPU 机位于同一私网。MySQL 与 Redis 在 `10.20.0.10`，业务工作台在 `10.20.0.20:8000`，GPU 机是 `10.20.0.30`。三台主机可以使用相同的地址配置。在各机 `deploy.config.yaml` 对应分组中更新下列字段，账号、密码和引擎配置沿用现场填写的值。
 
-```json
-{
-  "mysql": {"host": "10.20.0.10", "bind_host": "10.20.0.10"},
-  "redis": {"host": "10.20.0.10", "bind_host": "10.20.0.10"},
-  "public": {"host": "10.20.0.20", "origin": "http://10.20.0.20:8000"},
-  "ports": {"mysql": 3306, "redis": 6379, "api": 8000}
-}
+```yaml
+mysql:
+  host: "10.20.0.10"
+  bind_host: "10.20.0.10"
+redis:
+  host: "10.20.0.10"
+  bind_host: "10.20.0.10"
+public:
+  host: "10.20.0.20"
+  origin: "http://10.20.0.20:8000"
+ports:
+  mysql: 3306
+  redis: 6379
+  api: 8000
 ```
 
 业务机的 `gateway` 负责绑定 `public.host` 和 `ports.api`。GPU 机读取同一个 `public.origin`，部署完成时会显示打开工作台的地址。若用 HTTPS 反向代理，`public.origin` 填用户实际访问的 HTTPS 域名和对外端口，`ports.api` 仍填写代理转发到的本地 API 端口。
@@ -152,9 +161,15 @@ python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-
 
 #### 配置读取顺序
 
-1. 显式传入 `--config 文件路径` 时，使用指定文件。如果文件不存在，脚本直接读取仓库的 `deploy.config.example.json`，其中的相对路径均以仓库根目录为基准。
-2. 省略 `--config` 时，优先读取仓库根目录已有的 `deploy.config.json`。如果没有该文件，但存在旧版 `.env` 或部署目录已有 `deployment.json`，则沿用旧版部署流程。
-3. 仓库中只有模板时，直接使用模板。已有旧版配置的机器也可显式运行 `python3 scripts/deploy.py --config deploy.config.example.json --single-host` 选用模板。沿用现有 MySQL 数据卷时，配置中的凭据须与库内账号匹配。[旧版环境变量模板](.env.example) · [旧版安装清单](docs/engine-deployment.md#安装清单)
+不传 `--config` 时，脚本按以下顺序选择一份完整配置。
+
+1. 仓库根目录的 `deploy.config.yaml`。
+2. 仓库根目录的 `deploy.config.yml`。
+3. 仓库根目录已有的 `deploy.config.json`。
+4. 旧版部署使用的仓库 `.env` 或部署目录下的 `deployment.json`。
+5. 仓库自带的 [deploy.config.example.yaml](deploy.config.example.yaml)。
+
+显式传入 `--config /路径/部署配置.yaml` 会优先使用指定文件。`.yml` 和旧 JSON 同样可用，例如 `python3 scripts/deploy.py --config ./deploy.config.json --single-host`。指定的文件缺失时，脚本提示后改用仓库 YAML 模板。复用已有 MySQL 数据卷时，配置中的凭据须与库内账号匹配。[部署命令手册](docs/deploy-cli.md#配置文件与落盘位置) · [旧版安装清单](docs/engine-deployment.md#安装清单)
 
 ### 从 Python 环境启动
 

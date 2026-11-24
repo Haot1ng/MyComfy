@@ -1,0 +1,109 @@
+# 将本文件复制为 deploy.config.yaml 后编辑。单机部署建议先看 single_host、账号和磁盘路径。
+# 使用空格缩进。密码、版本号、模型摘要和 GPU 编号均为字符串，保留引号。端口、秒数和次数使用整数。
+# 修改后用相应部署命令应用，例如单机全栈运行 python3 scripts/deploy.py --single-host。
+
+# true 表示无参部署时先启动本项目的 MySQL、Redis，再部署业务端与 GPU 端。
+# false 表示连接已就绪的数据服务；本次执行加 --single-host 可临时启用单机模式。
+single_host: false
+# 每个失败任务允许用户手动重试的总次数。填非负整数，0 关闭手动重试；策略的自动重试单独计数。
+manual_retry_limit: 3
+
+mysql:
+  host: "127.0.0.1"     # 业务端连接 MySQL 的地址，填可达的 IP 或主机名；库名为 mycomfy。
+  user: "mycomfy"       # 业务库账号，最长 32 个字符；使用已有数据库时，该账号需有迁移和读写权限。
+  password: "123456"    # 账号的非空单行密码。首次初始化内置 MySQL 时，账号和密码都不能含单引号或反斜杠。
+  # 新建实例时可在此设置自己的密码；沿用已有库或数据卷时需填写数据库中现有的凭据。
+  # 分机时把下面的示例地址换成数据库机的私网地址。单机模式固定使用回环发布地址，GPU 走 mysql:3306。
+  # bind_host: "10.20.0.10"     # 内置 MySQL 在宿主机发布端口时绑定的 IP；省略时仅监听 127.0.0.1。
+  # engine_host: "10.20.0.10"   # GPU 容器连接 MySQL 的 IP 或主机名。省略时，回环 host 对应 Compose 服务 mysql，其他 host 沿用上值。
+  # engine_port: 3306           # GPU 容器实际连接的 MySQL 端口，1–65535；分机可覆盖 ports.mysql。
+
+redis:
+  host: "127.0.0.1"    # 业务端访问 Redis 的 IP 或主机名，用于登录态预检及跨进程限流。
+  user: "mycomfy_cache"  # Redis ACL 用户名，非空且不能含空白；使用已有 Redis 时填已授权的账号。
+  password: "123456"     # Redis ACL 账号的非空单行密码。仅部署 GPU 端时，部署器允许省略 Redis 凭据。
+  # bind_host: "10.20.0.10"     # 内置 Redis 在宿主机发布端口时绑定的 IP。默认仅监听 127.0.0.1；单机模式固定使用回环地址。
+
+# 显式填写的相对路径以本配置文件所在目录为基准，也可以填写绝对路径。配置文件须放在 data 和 deployment 之外。
+paths:
+  data: "var/data"               # 业务素材、生成结果、引擎模型及运行目录。分机时业务机和 GPU 机须用同一共享盘和相同绝对路径。
+  config: "var/config"           # 保存本机管理接口的 maintenance-token。部署器准备令牌后，Core 以只读方式挂载此目录。
+  deployment: "var/deployment"   # GPU 安装器的只读输入目录。在 engine 中引用本机 Git 仓库或模型源文件时，路径相对此目录。
+  gateway: "var/gateway"         # Core 与 Nginx 共享的规则快照、生效状态和按分钟汇总的流量统计。
+
+# TCP 端口均为 1–65535 的整数。单机全栈下四个端口各不相同；分机部署时 api 和 admin 仍须不同。
+ports:
+  mysql: 3306   # 业务端连接 MySQL 的端口，也是使用内置 MySQL 时发布到宿主机的端口。
+  redis: 6379   # 业务端连接 Redis 的端口，也是使用内置 Redis 时发布到宿主机的端口。
+  api: 8000     # 网关在 public.host 上监听的工作台和业务 API 端口。
+  admin: 8001   # 网关在业务机回环地址上监听的管理后台端口。
+
+# 例如工作台经 HTTPS 代理访问时可填 origin: "https://video.example.com"，后台可填 admin_origin: "https://admin.example.com"。
+# 两个 origin 用于请求来源校验；监听地址由 host 和 ports 指定。如果直接更改工作台端口，请同步更新 origin 中的端口。
+public:
+  host: "127.0.0.1"                 # 工作台网关监听的本机地址。回环仅供本机访问；局域网直连可填业务机的局域网地址。
+  origin: "http://127.0.0.1:8000"   # 用户浏览器实际访问工作台的来源，供写请求校验。填协议、主机和可选端口，省略页面路径。
+  admin_origin: null                # null 使用本机管理入口。如通过 HTTPS 代理访问后台，填后台的 HTTPS 来源；此时工作台也须为 HTTPS，且两者来源不同。
+  trusted_proxy_cidrs: []           # 可信上游代理的 IP 或 CIDR 字符串列表，如 ["10.20.0.5/32"]。空列表按直连对端 IP 限流；仅信任列表中代理转发的客户端地址。
+  # cookie_secure: true             # 是否给会话 Cookie 添加 Secure 标志。省略时随 origin 协议决定，HTTPS 为 true，HTTP 为 false。
+
+# 全栈或 GPU 端部署使用以下配置。默认下载 5 份 MiniMax H3 权重，共约 42 GB；另需预留引擎、依赖及视频磁盘空间。
+engine:
+  comfyui:
+    url: "https://github.com/Comfy-Org/ComfyUI.git"   # ComfyUI 源码仓库。可填 HTTPS 地址，或 paths.deployment 内的本地 Git 仓库路径。
+    version: "v0.33.0"                               # Git 标签或 40 位完整提交号。部署器固定实际提交，策略按该提交检查兼容性。
+
+  pytorch:
+    index_url: "https://download.pytorch.org/whl/cu130"   # GPU 轮子索引，支持无凭据的 HTTPS 地址或容器内绝对 file:/// 路径。本组 cu130 轮子需要支持 CUDA 13.0 的驱动。
+    torch: "2.11.0+cu130"         # 引擎使用的 PyTorch 精确版本，含 CUDA 构建后缀。
+    torchvision: "0.26.0+cu130"  # 图像处理轮子的精确版本，须与 torch 及所选索引匹配。
+    torchaudio: "2.11.0+cu130"    # 音频处理轮子的精确版本，须与 torch 及所选索引匹配。
+
+  nodes: {}   # 额外安装的第三方节点仓库，空映射表示不额外检出。键为节点包标识，url、version 的格式与 comfyui 相同。
+  # 使用额外节点时，可用下面的映射替换上面的 nodes: {}，填写实际仓库路径和版本。
+  # nodes:
+  #   MyNodes:
+  #     url: "custom-nodes/MyNodes"
+  #     version: "v1.0.0"
+
+  # 模型键供策略 requirements.models 引用；模型键和节点包标识以字母或数字开头，可含字母、数字、下划线和连字符，最长 48 字符。
+  models:
+    h3-fl2va:  # H3 主扩散模型，用于视频采样。
+      # source 是下载用的 HTTPS URL，或 paths.deployment 下的本地源文件，如 "model-import/minimax_h3_fl2va_pruned_int8_convrot.safetensors"。
+      source: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+      # path 是模型安装后的“分类/文件名”相对路径，需要与工作流加载的文件一致。每份模型须有独立目标路径。
+      path: "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+      # sha256 是文件内容的 SHA-256 摘要，用 64 个小写十六进制字符填写。远程下载必填；本地源可省略，由部署器计算。提供摘要时会校验。
+      sha256: "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a"
+    h3-text:   # H3 使用的 Qwen 文本编码器，将提示词编码成模型的条件输入。
+      source: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+      path: "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+      sha256: "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+    h3-video-vae:   # 视频 VAE，供工作流解码视频帧；图生视频时也用于编码参考图。
+      source: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/vae/minimax_h3_video_vae_int8_convrot.safetensors"
+      path: "vae/minimax_h3_video_vae_int8_convrot.safetensors"
+      sha256: "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+    h3-audio-vae:   # 音频 VAE，供带音轨的 H3 工作流从采样结果解码音频。
+      source: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/vae/minimax_h3_audio_vae_fp32.safetensors"
+      path: "vae/minimax_h3_audio_vae_fp32.safetensors"
+      sha256: "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    h3-turbo-8step:   # H3 的 8 步 Turbo LoRA。默认部署会下载；使用该 LoRA 的工作流还需显式加载它。
+      source: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+      path: "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+      sha256: "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
+
+  # 至少配置一个 ComfyUI 实例。多实例时复制列表项，使用不同的 id 和 port，并指定各自的 GPU。
+  instances:
+    - id: "gpu0"    # 调度、监控和运维命令使用的实例标识。字符规则与上面的模型键一致。
+      gpu: "0"      # 容器可见的 NVIDIA GPU 编号或 GPU UUID。数字编号也须写成字符串。
+      port: 8188    # 此 ComfyUI 实例在引擎网络内的回环端口，1–65535；Worker 通过该端口访问实例。
+      observation_seconds: 120   # 正整数秒。长时间无节点进度样本时，Worker 按此间隔补记查询到的队列状态。
+      timeout_seconds: 3600      # 正整数秒。执行从获准提交起计算的总时限；超时后进入停止与核对流程。
+      reconcile_seconds: 120     # 正整数秒。执行持续处于状态未确认时的核对期限，届满后停止对应引擎代次并核对结果。
+      # directed_interrupt: false  # true 允许取消时按 prompt_id 向运行中的引擎发定向中断。仅在该引擎版本已验证支持时启用。
+      # 可按策略系列标识或已发布版本 ID 覆盖三个时限。两者同时匹配时版本 ID 优先，每个覆盖项须填齐三个正整数。
+      # strategy_timeouts:
+      #   h3-five-image-20s-segmented-640:
+      #     observation_seconds: 180
+      #     timeout_seconds: 7200
+      #     reconcile_seconds: 180

@@ -21,7 +21,7 @@
 | --- | --- |
 | `-h`、`--help` | 打印当前检出版本的帮助并退出。 |
 | 无参数 | 按配置中的 `single_host` 决定是否先启动内置数据库。仓库模板为 `false`，此时要求 MySQL、Redis 已就绪，再部署业务端和 GPU 端。 |
-| `--config ./deploy.prod.json` | 指定 JSON，可与部署、停机或 Compose 操作组合。若显式指定的文件不存在，脚本会提示并使用仓库模板。 |
+| `--config ./deploy.prod.yaml` | 指定 YAML（`.yaml`、`.yml`）或已有 JSON 部署配置，可与部署、停机或 Compose 操作组合。若显式指定的文件不存在，脚本会提示并使用仓库模板。 |
 | `--single-host` | 本次启用单机连接配置，并在本机部署数据库、业务端和 GPU 端。 |
 | `--db-only` | 在数据机启动项目自带的 MySQL、Redis，等待两者健康。 |
 | `--core-only` | 在业务机构建 `migrate`、`core`、`gateway`，执行迁移并启动 API、工作台和管理后台。先准备好数据库。 |
@@ -38,7 +38,7 @@
 
 ```bash
 # 自定义配置时，把 --config 放在 --compose 前
-python3 scripts/deploy.py --config ./deploy.config.json --compose --profile database ps -a
+python3 scripts/deploy.py --config ./deploy.config.yaml --compose --profile database ps -a
 
 # 配置里声明的服务、镜像，以及已有项目容器实际使用的镜像
 python3 scripts/deploy.py --compose --profile database config --services
@@ -62,18 +62,22 @@ python3 scripts/deploy.py --compose --help
 
 ## 配置文件与落盘位置
 
-默认查找顺序是仓库根目录的 `deploy.config.json`、已有的旧版部署（`.env` 或预制的 `deployment.json`）、仓库的 `deploy.config.example.json`。首次自定义时可用 `cp -n deploy.config.example.json deploy.config.json` 复制模板。自定义 JSON 中显式填写的相对目录，以该 JSON 所在目录为基准。下表使用仓库模板的默认路径。[配置解析实现](../scripts/deployment_config.py)
+省略 `--config` 时，脚本从仓库根目录依次查找 `deploy.config.yaml`、`deploy.config.yml`、`deploy.config.json`，找到第一份即采用。三者均不存在时，若仓库有旧版 `.env` 或部署目录已有 `deployment.json`，沿用旧部署。其余情况使用 `deploy.config.example.yaml`。[配置选择实现](../scripts/deploy.py)
+
+首次自定义可运行 `cp -n deploy.config.example.yaml deploy.config.yaml`，在副本里按中文注释改值。用空格缩进，把字段写在所属分组下。同一分组只写一次。密码和 GPU 编号用字符串，例如 `password: "123456"`、`gpu: "0"`。端口和重试次数写整数，例如 `api: 8000`。开关用 `true`、`false`，未配置的管理来源可写 `admin_origin: null`。注册模型和节点时，沿用模板的映射结构。解析 YAML 所需的库已随仓库提供。[带注释的完整模板](../deploy.config.example.yaml)
+
+改完配置后，单机重新运行 `python3 scripts/deploy.py --single-host`。分机在受影响的主机运行 `--db-only`、`--core-only` 或 `--gpu-only`。自定义路径用 `python3 scripts/deploy.py --config ./deploy.prod.yaml --single-host`，以后启停和查询沿用该路径。已有自动化可继续指定 `--config ./deploy.prod.json`。配置中显式填写的相对目录以该配置文件所在目录为基准。下表列出仓库模板的默认位置。[配置解析实现](../scripts/deployment_config.py)
 
 | 文件或目录 | 谁读取、保存什么 |
 | --- | --- |
-| `deploy.config.json`、`deploy.config.example.json` | 前者由部署者填写，后者是可直接部署的模板。`deploy.py` 将连接地址、端口等转换为 Compose 进程的环境变量，只将 `engine` 分组传给 GPU 安装器。 |
-| `.env`、`.env.example` | 旧版部署的变量文件和模板。使用统一 JSON 时脚本向 Compose 传入 `--env-file /dev/null`，因此仓库的 `.env` 不参与这次变量解析。 |
+| `deploy.config.yaml`、`deploy.config.example.yaml` | 前者存放本机配置，后者提供带中文注释的默认值。`deploy.py` 将连接地址、端口等转换为 Compose 进程的环境变量，只将 `engine` 分组传给 GPU 安装器。 |
+| `.env`、`.env.example` | 旧版部署的变量文件和模板。读取 YAML 或 JSON 部署配置时，脚本向 Compose 传入 `--env-file /dev/null`，因此仓库的 `.env` 不参与这次变量解析。 |
 | `compose.yaml` | Compose 的服务定义，包括镜像或构建目标、启动命令、网络、依赖、挂载、GPU 和健康检查。 |
 | `Dockerfile`、`pyproject.toml`、`uv.lock` | 构建 MyComfy 应用镜像和镜像内的 Python 环境，`uv.lock` 固定应用依赖。 |
 | `var/gateway/` | 业务机的网关状态目录，可用 `paths.gateway` 指定。`rules.json` 保存 Core 发布的入口规则，`status.json` 是 Nginx 的实际应用回执，`edge.sqlite3` 保存按分钟汇总的流量。规则在管理页修改。[流量与限流说明](api-traffic.md) |
 | `var/config/maintenance-token` | 部署业务端时自动生成或复用，`core` 将其用于需要维护凭据的接口。 |
 | `var/deployment/` | 在 GPU 容器内只读挂载为 `/deployment`。可放本地模型和节点来源。旧版部署还在这里提供预制的 `deployment.json` 与依赖锁。 |
-| `var/data/engines/generated/` | 统一 JSON 安装器在此缓存固定版本源码，生成 `locks/<摘要>/requirements-gpu.lock` 和 `manifests/<摘要>/deployment.json`。这份锁固定 ComfyUI、节点和 PyTorch 的依赖。 |
+| `var/data/engines/generated/` | 引擎安装器在此缓存固定版本源码，生成 `locks/<摘要>/requirements-gpu.lock` 和 `manifests/<摘要>/deployment.json`。这份锁固定 ComfyUI、节点和 PyTorch 的依赖。 |
 | `var/data/engines/model-objects/`、`var/data/engines/releases/` | 前者按 SHA-256 缓存模型；后者按版本保存 ComfyUI 源码、自定义节点、独立的 `venv`，并用硬链接引用已校验的权重。 |
 | `var/data/engines/engines.json` | 安装器生成的实例配置。常驻引擎管理器据此找到各实例的 Python、ComfyUI 入口、GPU 和端口。 |
 | `var/data/engines/instances/gpu0/g*/` | 每个启动代次的运行目录。模型加载或生成失败时看 `engine.log`；进程身份和退出记录分别在 `identity.json`、`ended.json`。 |
@@ -93,7 +97,7 @@ python3 scripts/deploy.py --compose --help
 | 模型与实例 | 配置 5 份 MiniMax H3 权重，`nodes` 为空。实例 `gpu0` 使用第 `0` 张 GPU，ComfyUI 在容器网络中监听 `8188`。 |
 | 实例时间参数 | `observation_seconds: 120`，`reconcile_seconds: 120`，`timeout_seconds: 3600`。 |
 
-实际端口以本机部署为准。例如 `ps -a` 显示 `127.0.0.1:13306->3306/tcp` 时，宿主机客户端使用 `13306`，单机 GPU 容器仍通过 Compose 网络连接 `mysql:3306`。[完整配置模板](../deploy.config.example.json)
+实际端口以本机部署为准。例如 `ps -a` 显示 `127.0.0.1:13306->3306/tcp` 时，宿主机客户端使用 `13306`，单机 GPU 容器仍通过 Compose 网络连接 `mysql:3306`。[完整配置模板](../deploy.config.example.yaml)
 
 ## Docker 镜像和容器行为
 
@@ -116,7 +120,7 @@ python3 scripts/deploy.py --compose --help
 1. **读取配置并准备挂载。** 脚本解析 Compose，确定端口、目录和部署用户的 UID/GID，准备维护令牌。单机模式下，宿主网络中的业务端使用回环地址和发布端口连接数据库；GPU 端使用 Compose 内网地址。
 2. **启动数据服务。** Compose 执行 `up -d --wait mysql redis`，等 MySQL、Redis 都健康后才继续。
 3. **构建应用镜像。** Compose 执行 `build migrate core gateway engine worker`，从当前 Git 检出目录读取 Dockerfile、源码和依赖锁，可复用已有构建缓存。
-4. **安装引擎。** 脚本执行 `compose run --rm --no-deps -T`，用 `engine` 镜像启动一个临时容器，入口为 `mycomfy-deploy-engine`。统一 JSON 部署通过标准输入传入引擎配方。安装器准备源码和依赖锁、校验模型并验证 GPU，完成后删除临时容器，结果保存在宿主机挂载目录。
+4. **安装引擎。** 脚本执行 `compose run --rm --no-deps -T`，用 `engine` 镜像启动一个临时容器，入口为 `mycomfy-deploy-engine`。部署脚本从配置中提取 `engine`，以 JSON 通过标准输入传给安装器。安装器准备源码和依赖锁、校验模型并验证 GPU，完成后删除临时容器，结果保存在宿主机挂载目录。
 5. **迁移并启动常驻服务。** Compose 执行 `up -d --wait --no-build core gateway engine worker`。依赖要求 `migrate` 成功退出，然后启动常驻进程。引擎容器启动后 Worker 即可开始核对任务，脚本等服务就绪后打印工作台地址。
 
 优雅停机时，脚本先让 Worker 停止领新任务并排空在途执行，再核对引擎代次的 `ended.json`，随后关闭业务端与本项目的数据服务。若核验失败，脚本会中止，保留后续服务供检查；确认提示“所选服务已停止”后，即可在 Windows 终端执行 `wsl --shutdown`。[引擎部署与恢复](engine-deployment.md)

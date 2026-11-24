@@ -1,8 +1,11 @@
 """验证部署配置向 Docker 和应用传递相同的账号、地址与挂载目录。"""
 
+import hashlib
 import json
 import os
 import runpy
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,9 +14,8 @@ from sqlalchemy.engine import make_url
 
 from mycomfy.config import Settings
 
-read_config = runpy.run_path(
-    str(Path(__file__).resolve().parents[2] / "scripts" / "deployment_config.py")
-)["read_config"]
+REPO = Path(__file__).resolve().parents[2]
+read_config = runpy.run_path(str(REPO / "scripts/deployment_config.py"))["read_config"]
 
 
 def test_custom_accounts_and_paths(tmp_path):
@@ -69,6 +71,148 @@ def test_custom_accounts_and_paths(tmp_path):
     assert (values["MYCOMFY_UID"], values["MYCOMFY_GID"]) == (str(os.getuid()), str(os.getgid()))
 
 
+@pytest.mark.parametrize("extension", [".yaml", ".yml"])
+def test_yaml_values_reach_compose_and_gpu_recipe(tmp_path, monkeypatch, extension):
+    """核对凭据原文、YAML 标量类型、路径及嵌套的模型与 GPU 实例列表。"""
+    monkeypatch.setenv("BUILD_TOKEN", "must-not-be-expanded")
+    password = '001 $$ ${BUILD_TOKEN} # 缓存: [x] "带引号"'
+    path = tmp_path / ("deployment" + extension)
+    path.write_text(
+        """# 自定义配置可加入整行和行末注释。
+single_host: false
+manual_retry_limit: 0
+mysql:
+  user: studio
+  password: '00123'
+redis:
+  user: cache
+  password: '001 $$ ${BUILD_TOKEN} # 缓存: [x] "带引号"' # 留在引号外的说明
+ports: {api: 8031, admin: 8032}
+paths:
+  data: 'data #1'
+public:
+  origin: 'http://localhost:8031'
+  admin_origin: null
+  trusted_proxy_cidrs:
+    - 192.0.2.10
+    - '2001:db8::/48'
+engine:
+  comfyui: {url: 'https://example.invalid/ComfyUI.git', version: '1.0'}
+  pytorch: {torch: '2.11.0+cu130'}
+  nodes: {}
+  models:
+    demo:
+      path: 'vae/a #1.safetensors'
+  instances:
+    - id: left
+      gpu: '0'
+      port: 8188
+    - id: right
+      gpu: '1'
+      port: 8189
+""",
+        encoding="utf-8",
+    )
+    values, recipe, single_host = read_config(path, tmp_path, core_only=False)
+    assert single_host is False
+    assert values["MYSQL_PASSWORD"] == make_url(values["MYCOMFY_DATABASE_URL"]).password == "00123"
+    assert values["REDIS_PASSWORD"] == password
+    with Redis.from_url(values["MYCOMFY_REDIS_URL"]) as cache:
+        assert cache.connection_pool.connection_kwargs["password"] == password
+    assert values["MYCOMFY_MANUAL_RETRY_LIMIT"] == "0"
+    assert values["MYCOMFY_API_PORT"] == "8031" and values["MYCOMFY_LOCAL_PORT"] == "8032"
+    assert values["MYCOMFY_ADMIN_ORIGIN"] == ""
+    assert values["MYCOMFY_TRUSTED_PROXY_CIDRS"] == "192.0.2.10/32,2001:db8::/48"
+    assert values["MYCOMFY_DATA_ROOT"] == str(tmp_path / "data #1")
+    assert recipe == {
+        "comfyui": {"url": "https://example.invalid/ComfyUI.git", "version": "1.0"},
+        "pytorch": {"torch": "2.11.0+cu130"},
+        "nodes": {},
+        "models": {"demo": {"path": "vae/a #1.safetensors"}},
+        "instances": [
+            {"id": "left", "gpu": "0", "port": 8188},
+            {"id": "right", "gpu": "1", "port": 8189},
+        ],
+    }
+
+
+def test_commented_yaml_preserves_published_defaults(tmp_path):
+    """以发布过的 JSON 为基线，核对整份模板、Compose 参数和原样送往 GPU 的配方。"""
+    template = REPO / "deploy.config.example.yaml"
+    load_document = runpy.run_path(str(REPO / "scripts/config_document.py"))["load_document"]
+    data = load_document(template)
+    # c852c8cf562d 的 deploy.config.example.json，经下式排序及压缩后取得 SHA-256。
+    canonical = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode()).hexdigest() == (
+        "31dab648e3ca97d66eb759dbb7332aebe4a1a787431a56d5ac02e9c41e32493d"
+    )
+    assert data["manual_retry_limit"] == 3
+    # 在同一个目录读两种格式，使相对挂载路径可直接比较。
+    yaml_path, json_path = tmp_path / "settings.yaml", tmp_path / "old-settings.json"
+    yaml_path.write_bytes(template.read_bytes())
+    json_path.write_text(canonical)
+    result = read_config(yaml_path, tmp_path, core_only=False)
+    assert result == read_config(json_path, tmp_path, core_only=False)
+    assert result[1] == data["engine"]
+
+
+def test_host_yaml_needs_no_installed_packages(tmp_path):
+    """关闭 Python 的 site、用户环境和当前目录导入后，宿主仍可读取仓库携带的 YAML。"""
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            """import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from config_document import load_document
+assert load_document(Path(sys.argv[2]))['engine']['instances'][0]['gpu'] == '0'
+""",
+            str(REPO / "scripts"),
+            str(REPO / "deploy.config.example.yaml"),
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mysql:\n  password: private-test-credential\n  password: duplicate\n",
+        "mysql:\n  password: !unknown private-test-credential\n",
+        "mysql:\n  password: private-test-credential\n---\nsecond: document\n",
+        "mysql:\n  password: [private-test-credential\n",
+    ],
+)
+def test_yaml_parse_errors_hide_credentials(tmp_path, text):
+    """重复键、未知标签、多文档和语法错误均须在配置解析阶段失败且不回显行内凭据。"""
+    path = tmp_path / "broken.yaml"
+    path.write_text(text)
+    load_document = runpy.run_path(str(REPO / "scripts/config_document.py"))["load_document"]
+    with pytest.raises(ValueError) as error:
+        load_document(path)
+    assert "private-test-credential" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("extra", "field"),
+    [("single_host: 'false'", "single_host"), ("ports: {api: true}", r"ports\.api")],
+)
+def test_yaml_schema_rejects_wrong_scalar_types(tmp_path, extra, field):
+    """YAML 语法虽正确，带引号的布尔值和作为端口的布尔值仍应明确报字段类型错误。"""
+    path = tmp_path / "wrong.yaml"
+    path.write_text(
+        "mysql: {user: db, password: '0123456'}\nredis: {user: cache, password: '0123456'}\n"
+        + extra
+    )
+    with pytest.raises(ValueError, match=field):
+        read_config(path, tmp_path, core_only=True)
+
+
 def test_core_only_and_secret_errors(tmp_path):
     """业务端独立于 GPU 配置，错误反馈不会包含密码。"""
     path = tmp_path / "config.json"
@@ -96,9 +240,10 @@ def test_core_only_and_secret_errors(tmp_path):
 
 def test_old_json_admin_origin_is_mapped_only_when_new_key_is_absent(tmp_path):
     """读取旧 JSON 时映射旧键，显式配置的新值（包括关闭）始终优先。"""
-    config = json.loads(
-        (Path(__file__).resolve().parents[2] / "deploy.config.example.json").read_text()
-    )
+    config = {
+        "mysql": {"user": "db", "password": "example"},
+        "redis": {"user": "cache", "password": "example"},
+    }
     public = {"origin": "https://studio.example", "admin_test_origin": "https://old-admin.example"}
     config["public"] = public
     path = tmp_path / "deploy.json"
@@ -341,13 +486,12 @@ def test_credential_file_outside_engine_mounts(tmp_path):
 
 @pytest.mark.parametrize("limit", [0, 1, 5])
 def test_manual_retry_limit_reaches_core(tmp_path, monkeypatch, limit):
-    """验证部署 JSON 的手动重试次数经环境变量进入业务端，包括关闭重试。"""
-    template = Path(__file__).resolve().parents[2] / "deploy.config.example.json"
-    config = json.loads(template.read_text())
-    assert config["manual_retry_limit"] == 3
-    config["manual_retry_limit"] = limit
-    path = tmp_path / "deploy.json"
-    path.write_text(json.dumps(config))
+    """验证部署 YAML 的手动重试次数经环境变量进入业务端，包括关闭重试。"""
+    path = tmp_path / "deploy.yaml"
+    path.write_text(
+        f"manual_retry_limit: {limit}\nmysql: {{user: db, password: example}}\n"
+        "redis: {user: cache, password: example}\n"
+    )
     variables, _, _ = read_config(path, tmp_path, core_only=True)
     for name, value in variables.items():
         monkeypatch.setenv(name, value)

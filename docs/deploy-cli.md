@@ -7,12 +7,14 @@
 | 目的 | 在 WSL 中执行 |
 | --- | --- |
 | 首次安装或部署更新后的源码 | `python3 scripts/deploy.py --single-host` |
-| 正常停机后，用已有镜像和容器恢复服务 | `python3 scripts/deploy.py --compose --profile database up -d --no-recreate --no-build --wait mysql redis core gateway engine worker` |
+| 使用本机已有镜像和已安装的引擎启动全套服务 | `python3 scripts/deploy.py --single-host --no-build` |
 | 查看所有服务的状态，包括已经退出的迁移容器 | `python3 scripts/deploy.py --compose --profile database ps -a` |
 | 临时分享已运行业务的工作台和后台 | `python3 scripts/deploy.py --test`，前台保留，按 Ctrl+C 恢复 |
 | 关闭电脑或 WSL 前优雅停机 | `python3 scripts/deploy.py --stop` |
 
-日常开机用第二条命令，直接复用已有镜像和容器。更新运行中的单机部署时，先用当前检出版本运行 `python3 scripts/deploy.py --stop`，等在途任务排空并完成停机，再用 `git pull --ff-only origin main` 拉取源码，执行 `python3 scripts/deploy.py --single-host` 部署新版本。这样停机指令与现场镜像对应。首次用 YAML 接管已有部署时，先将现用数据库地址、账号、端口、目录和模型配置填入 `deploy.config.yaml`，再执行新版部署命令。
+日常启动使用 `--single-host --no-build`。脚本让 Compose 跳过镜像构建和拉取，等 MySQL、Redis 健康，再按迁移依赖启动 Core、网关、引擎和 Worker。引擎直接读取上次安装生成的 `<数据目录>/engines/engines.json`，复用持久目录中的 ComfyUI 和模型。若本地镜像标签已更新，Compose 可重建对应容器。服务就绪后，脚本打印工作台和管理后台的访问地址。自定义配置示例为 `python3 scripts/deploy.py --config ./deploy.prod.yaml --single-host --no-build`。
+
+更新运行中的单机部署时，先用当前检出版本运行 `python3 scripts/deploy.py --stop`，等在途任务排空并完成停机，再用 `git pull --ff-only origin main` 拉取源码，执行 `python3 scripts/deploy.py --single-host` 部署新版本。这样停机指令与现场镜像对应。首次用 YAML 接管已有部署时，先将现用数据库地址、账号、端口、目录和模型配置填入 `deploy.config.yaml`，再执行新版部署命令。
 
 ## 全部命令行参数
 
@@ -26,6 +28,7 @@
 | `--test` | 临时为已运行的 Core 和网关切换浏览器来源，开启两条 Funnel，打印工作台与后台链接。命令在前台运行，Ctrl+C 后关闭本次转发并恢复原业务入口。 |
 | `--test-config ./share.qa.yaml` | 与 `--test` 一起指定设备和外部 HTTPS 端口。默认读取仓库的 `deploy.test.yaml`。首次无此文件时采用示例，两条转发注册成功后将实际设备名和端口保存到本机 `deploy.test.yaml`。 |
 | `--single-host` | 本次启用单机连接配置，并在本机部署数据库、业务端和 GPU 端。 |
+| `--no-build` | 使用所选配置对应的本地镜像启动，可搭配 `--single-host` 或按角色启动。启动 GPU 端时需要已安装的引擎。单机首次安装或更新引擎配方请运行 `--single-host`。 |
 | `--db-only` | 在数据机启动项目自带的 MySQL、Redis，等待两者健康。 |
 | `--core-only` | 在业务机构建 `migrate`、`core`、`gateway`，执行迁移并启动 API、工作台和管理后台。先准备好数据库。 |
 | `--gpu-only` | 在 GPU 机构建 `engine`、`worker`，安装或校验引擎后启动两者。要求 MySQL 已完成迁移。 |

@@ -207,7 +207,12 @@ def main():
     parser.add_argument(
         "--stop", action="store_true", help="排空在途任务后停止本项目服务，可指定机器角色"
     )
+    parser.add_argument(
+        "--no-build", action="store_true", help="直接用本地镜像启动服务，复用已安装的引擎和模型"
+    )
     args = parser.parse_args()
+    if args.no_build and (args.stop or args.test or args.compose is not None):
+        parser.error("--no-build 用于启动服务，不能与 --stop、--test 或 --compose 一起使用")
     if args.stop and args.compose is not None:
         parser.error("--stop 不能与 --compose 一起使用")
     if args.stop and args.test:
@@ -232,6 +237,7 @@ def main():
             redis_optional=args.gpu_only or args.compose is not None,
             gateway_required=not (args.db_only or args.gpu_only),
             single_host=single_host,
+            load_recipe=not args.no_build,
         )
         process_env.update(settings)
     if single_host or args.db_only or (args.stop and not (args.core_only or args.gpu_only)):
@@ -259,9 +265,12 @@ def main():
         run_compose(*args.compose)
         return
 
+    # 两次 up 都指定本地镜像策略，数据库、应用及其迁移依赖共用同一约束。
+    local_images = ["--no-build", "--pull", "never"] if args.no_build else []
+
     def start_database():
         """等待两个内置数据服务均健康，失败时终止本次部署。"""
-        run_compose("up", "-d", "--wait", "mysql", "redis")
+        run_compose("up", "-d", "--wait", *local_images, "mysql", "redis")
         print("MySQL 和 Redis 已就绪。", flush=True)
 
     if args.db_only:
@@ -270,10 +279,17 @@ def main():
     config = run_compose("config", "--format", "json", stdout=subprocess.PIPE).stdout
     services = json.loads(config)["services"]
     deploy_local_stack = single_host and not (args.gpu_only or args.core_only)
-    if not args.gpu_only:
-        prepare_gateway(services, repo, config_path, deploy_local_stack)
     owner = services["engine" if args.gpu_only else "core"]
     data = bind_source(owner, owner["environment"]["MYCOMFY_DATA_ROOT"])
+    if args.no_build and not args.core_only:
+        # 安装器生成的实例清单是引擎启动所需的持久状态，在启动数据库前检查实际挂载。
+        instances = data / "engines" / "engines.json"
+        if not instances.is_file():
+            raise ValueError(
+                f"未找到引擎实例配置 {instances}。请核对 paths.data，或先执行一次完整部署。"
+            )
+    if not args.gpu_only:
+        prepare_gateway(services, repo, config_path, deploy_local_stack)
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     build = []
@@ -290,10 +306,11 @@ def main():
     if deploy_local_stack:
         # 单机全栈在配置检查完成后启动数据层。显式角色仍只操作各自的服务。
         start_database()
-    run_compose("build", *build)
+    if not args.no_build:
+        run_compose("build", *build)
 
     # 在具备 GPU 和持久卷的临时 engine 容器中安装，失败时保留已有服务和数据。
-    if not args.core_only:
+    if recipe is not None:
         run_compose(
             "run",
             "--rm",
@@ -309,8 +326,10 @@ def main():
             input=json.dumps(recipe).encode("utf-8"),
         )
     # 分机时业务机已完成迁移。GPU 机同时指定 engine 和 worker，只启动这两个服务。
-    options = ["--no-deps"] if args.gpu_only else []
-    run_compose("up", "-d", "--wait", "--no-build", *options, *start)
+    options = local_images or ["--no-build"]
+    if args.gpu_only:
+        options.append("--no-deps")
+    run_compose("up", "-d", "--wait", *options, *start)
     if args.gpu_only:
         print("GPU 引擎和 Worker 已启动。", flush=True)
     print("工作台地址", process_env["MYCOMFY_PUBLIC_ORIGIN"], flush=True)

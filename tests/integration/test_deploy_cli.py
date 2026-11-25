@@ -149,6 +149,59 @@ def test_full_deployment_order(launch, options, setting):
         assert not db
 
 
+def test_single_host_no_build_starts_from_existing_images(run_deploy, example_config, tmp_path):
+    """复用自定义数据目录中的引擎，等待内置数据库健康后，用本机镜像启动应用。"""
+    config_dir = tmp_path / "site"
+    data = config_dir / "existing-data"
+    instances = data / "engines" / "engines.json"
+    instances.parent.mkdir(parents=True)
+    existing = '{"instances": []}'
+    instances.write_text(existing)
+    example_config["single_host"] = False
+    # 已安装的 GPU 实例来自持久清单，启动时只需用镜像选择项定位本地标签。
+    example_config["engine"] = {"ref2va_in_image": True}
+    example_config["paths"]["data"] = "existing-data"
+    example_config["ports"].update(api=18000, admin=18001)
+    config = config_dir / "local.yaml"
+    config.write_text(json.dumps(example_config))
+    result, calls = run_deploy("--config", str(config), "--single-host", "--no-build")
+    assert result.returncode == 0, result.stderr
+
+    # 数据层先就绪；后续 Compose 依赖包含 migrate，更新过的本地镜像允许替换旧容器。
+    services = {"mysql", "redis", "migrate", "core", "gateway", "engine", "worker"}
+    starts = [call for call in calls if "up" in call]
+    assert [services.intersection(call) for call in starts] == [
+        {"mysql", "redis"},
+        {"core", "gateway", "engine", "worker"},
+    ]
+    for call in starts:
+        assert {"--no-build", "-d", "--wait"} <= set(call)
+        assert call[call.index("--pull") + 1] == "never"
+        assert call[call.index("--profile") + 1] == "database"
+        assert "--no-recreate" not in call
+    assert "--no-deps" not in starts[1]
+    assert not any({"build", "pull", "run"}.intersection(call) for call in calls)
+    assert instances.read_text() == existing
+    assert "工作台地址 http://127.0.0.1:18000" in result.stdout
+    assert "管理后台地址 http://127.0.0.1:18001" in result.stdout
+
+
+def test_single_host_no_build_requires_installed_engine(launch):
+    """缺少已安装的引擎清单时指出缺失文件，保持所有服务尚未启动。"""
+    result, calls = launch("--single-host", "--no-build")
+    assert result.returncode != 0
+    assert "engines.json" in result.stderr
+    assert not any({"up", "build", "pull", "run"}.intersection(call) for call in calls)
+
+
+@pytest.mark.parametrize("action", ["--stop", "--test"])
+def test_no_build_rejects_non_start_actions(run_deploy, action):
+    """停机和临时隧道都不启动镜像，参数冲突时不调用 Docker。"""
+    result, calls = run_deploy("--no-build", action)
+    assert result.returncode == 2 and "--no-build" in result.stderr
+    assert not calls
+
+
 @pytest.mark.parametrize(
     ("options", "targets", "install"),
     [
@@ -189,9 +242,14 @@ def test_gateway_deployment_rejects_port_and_mount_conflicts(
     assert not (checkout / "var").exists()
 
 
-def test_database_failure_blocks_application(launch):
+@pytest.mark.parametrize("options", [(), ("--no-build",)])
+def test_database_failure_blocks_application(launch, checkout, options):
     """Compose 无法等到数据服务健康时，返回失败状态并跳过后续引擎安装和业务启动。"""
-    result, calls = launch("--single-host", db_failure=True)
+    if options:
+        instances = checkout / "var/data/engines/engines.json"
+        instances.parent.mkdir(parents=True)
+        instances.write_text('{"instances": []}')
+    result, calls = launch("--single-host", *options, db_failure=True)
     assert result.returncode == 41
     up = [call for call in calls if "up" in call]
     assert len(up) == 1 and {"--wait", "mysql", "redis"} <= set(up[0])

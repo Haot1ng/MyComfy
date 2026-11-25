@@ -156,6 +156,7 @@ def read_config(
     redis_optional: bool = False,
     single_host: bool = False,
     gateway_required: bool = True,
+    load_recipe: bool = True,
 ) -> tuple[dict[str, str], dict | None, bool]:
     """读取部署 YAML，返回 Compose 变量、引擎配置和生效的单机标记。"""
     config = _object(
@@ -321,6 +322,10 @@ def read_config(
     for name in ("data", "deployment"):
         if Path(directories[name]) in config_path.parents:
             raise ValueError(f"请将包含数据库密码的配置文件移出 paths.{name} 挂载目录")
+
+    # 从本地镜像启动时仍需正确的挂载、凭据和引擎镜像名；安装配方仅交给安装器。
+    if not load_recipe:
+        return variables, None, single_host
 
     # 仅传递引擎分组。安装器在准备版本、模型和依赖锁前进一步校验其结构。
     engine = _object(engine, "engine", {"comfyui", "pytorch", "nodes", "models", "instances"})

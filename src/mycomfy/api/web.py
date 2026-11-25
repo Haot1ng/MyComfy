@@ -53,7 +53,10 @@ def install_web_routes(app, *, local):
     web = package / "web"
     if not web.is_dir():
         web = package.parents[1] / "web"
-    static = StaticFiles(directory=web / ("admin" if local else "client"))
+    # 两个入口共用随 Core 打包的网站图标，各自的页面和脚本仍只按下方清单注册。
+    static = StaticFiles(
+        directory=web / ("admin" if local else "client"), packages=[("mycomfy.api", "static")]
+    )
 
     async def web_file(request: Request):
         """根据已匹配的固定路由返回资源，支持条件请求和 HEAD。"""
@@ -62,5 +65,5 @@ def install_web_routes(app, *, local):
         request.state.web_asset = True
         return response
 
-    for name in ("", "index.html", *(ADMIN_FILES if local else CLIENT_FILES)):
+    for name in ("", "index.html", "favicon.ico", *(ADMIN_FILES if local else CLIENT_FILES)):
         app.add_api_route("/" + name, web_file, methods=["GET", "HEAD"], include_in_schema=False)

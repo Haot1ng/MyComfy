@@ -52,9 +52,10 @@ function element(tag, text, className) {
   return node;
 }
 
+/** 生成监控视图的哈希地址，在有筛选或分页参数时附上查询串。 */
 function url(view, id, query) {
   const path = "#/" + view + (id ? "/" + encodeURIComponent(id) : "");
-  const search = new URLSearchParams(query).toString();
+  const search = new URLSearchParams(query ?? "").toString();
   return path + (search ? "?" + search : "");
 }
 

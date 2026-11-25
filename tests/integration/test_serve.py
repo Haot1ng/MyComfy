@@ -8,12 +8,40 @@ from time import monotonic, sleep
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from mycomfy.api import app as api
 from mycomfy.api.server import api_server
 from mycomfy.config import Settings
-from mycomfy.database.models import Base
+from mycomfy.database.models import Audit, Base
 from mycomfy.database.session import make_sessions
+
+
+@pytest.mark.parametrize("local", [False, True], ids=["public", "admin"])
+def test_browser_favicon_is_static_and_unknown_paths_remain_audited(tmp_path, local):
+    """验证浏览器的默认图标请求按静态资源处理，真正未匹配的 404 仍可按请求 ID 追踪。"""
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'audit.sqlite'}", data_root=tmp_path)
+    sessions = make_sessions(settings.database_url)
+    Base.metadata.create_all(sessions.kw["bind"])
+    app = api.create_app(settings, local=local, sessions=sessions)
+    try:
+        with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 5000)) as client:
+            icon = client.get("/favicon.ico")
+            assert icon.status_code == 200 and icon.content.startswith(b"\x00\x00\x01\x00")
+            head = client.head("/favicon.ico")
+            cached = client.get("/favicon.ico", headers={"If-None-Match": icon.headers["etag"]})
+            assert head.status_code == 200 and head.content == b""
+            assert cached.status_code == 304
+            missing = client.get("/missing-page?private=test")
+            assert missing.status_code == 404
+
+            with sessions() as db:
+                for response in (icon, head, cached):
+                    assert db.get(Audit, response.headers["x-request-id"]) is None
+                row = db.get(Audit, missing.headers["x-request-id"])
+                assert (row.action, row.result) == ("GET <unmatched>", 404)
+    finally:
+        sessions.kw["bind"].dispose()
 
 
 def test_private_gateway_unix_sockets(tmp_path):

@@ -73,6 +73,27 @@ def submit_rule(page, button):
     return response.request.post_data_json
 
 
+def test_audit_detail_link_from_filtered_list(site):
+    """按请求 ID 筛选后打开该条审计，详情链接与请求都应只有资源 ID。"""
+    page, public = site
+    request_id = page.request.get(public + "/api/v1/me").headers["x-request-id"]
+    page.get_by_role("link", name="请求审计").click()
+    page.locator("details.query summary").click()
+    page.locator('input[name="request_id"]').fill(request_id)
+    page.get_by_role("button", name="应用筛选").click()
+    expect(page).to_have_url(f"{page.url.split('#')[0]}#/requests?request_id={request_id}")
+
+    # 列表的筛选条件用于查记录，详情只需一个稳定的资源地址。
+    link = page.get_by_role("link", name=request_id, exact=True)
+    expect(link).to_have_attribute("href", f"#/requests/{request_id}")
+    with page.expect_response(
+        lambda r: r.url.endswith(f"/monitor/requests/{request_id}")
+    ) as result:
+        link.click()
+    assert result.value.status == 200
+    assert result.value.json()["id"] == request_id
+
+
 def test_edit_and_reset_traffic_rules(site):
     """从真实管理目录编辑两层规则，写入失败时保留输入，刷新后仍可恢复原默认值。"""
     page, public = site

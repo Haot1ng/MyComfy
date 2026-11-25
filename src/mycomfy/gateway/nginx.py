@@ -172,9 +172,11 @@ worker_processes 2;
 worker_shutdown_timeout 1h;
 daemon off;
 pid {quote(work / "nginx.pid")};
-error_log /dev/null emerg;
+error_log stderr emerg;
 events {{ worker_connections 2048; }}
 http {{
+    # 请求阶段可能包含原始 URI 和来源地址；只为主进程的启动故障保留 stderr。
+    error_log /dev/null emerg;
     map_hash_bucket_size 256;
     root {quote(work)};
     client_body_temp_path {quote(work / "body")};

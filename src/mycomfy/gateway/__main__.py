@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,24 @@ def served_revision(work):
     return None
 
 
+def clear_stale_health_socket(path):
+    """冷启动持有网关独占锁时，仅清理已无监听进程的私有健康套接字。"""
+    try:
+        # 用 lstat 保留符号链接和普通文件，让异常的运行目录有明确的报错。
+        if not stat.S_ISSOCK(path.lstat().st_mode):
+            raise RuntimeError(f"Expected a Unix socket at {path}")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1)
+            probe.connect(str(path))
+    except FileNotFoundError:
+        return
+    except ConnectionRefusedError:
+        # 容器强停可能留下路径。只有内核明确拒绝连接时才允许释放它。
+        path.unlink(missing_ok=True)
+        return
+    raise RuntimeError(f"Gateway health socket already has a listener at {path}")
+
+
 def health():
     """验证运行心跳、服务中的规则版本，以及统计数据库能否读取。"""
     shared, work = paths()
@@ -77,6 +96,7 @@ class Gateway:
         self.shared = shared
         self.work = work
         self.work.mkdir(parents=True, exist_ok=True, mode=0o700)
+        clear_stale_health_socket(work / "health.sock")
         self.journal = shared / "journal"
         self.journal.mkdir(mode=0o700, exist_ok=True)
         self.proc = None
@@ -84,7 +104,7 @@ class Gateway:
         self.signature = None
         self.next_retry = 0
         self.error = None
-        self.command = ["nginx", "-e", "/dev/null", "-p", str(work), "-c", str(work / "nginx.conf")]
+        self.command = ["nginx", "-e", "stderr", "-p", str(work), "-c", str(work / "nginx.conf")]
 
     def apply(self, snapshot):
         """先测试完整配置，再启动或平滑重载，成功收到新版本的 HTTP 回执后才确认生效。"""
@@ -95,7 +115,6 @@ class Gateway:
             [*self.command[:-1], str(candidate), "-t", "-q"],
             check=True,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             timeout=8,
         )
         previous = config.read_bytes() if self.proc is not None else None
@@ -104,7 +123,6 @@ class Gateway:
             self.proc = subprocess.Popen(
                 self.command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
         else:
@@ -180,7 +198,7 @@ class Gateway:
             try:
                 while not stop.is_set():
                     if self.proc is not None and self.proc.poll() is not None:
-                        raise RuntimeError("Nginx exited")
+                        raise RuntimeError(f"Nginx exited with return code {self.proc.returncode}")
                     self.sync()
                     error, backlog = self.error, False
                     try:

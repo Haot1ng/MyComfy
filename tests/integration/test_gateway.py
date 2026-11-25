@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler
 
 import pytest
 
+from mycomfy.gateway.__main__ import Gateway
 from mycomfy.gateway.metrics import ingest, open_metrics
 from mycomfy.gateway.nginx import render
 
@@ -41,6 +42,37 @@ def test_admin_listener_is_loopback_outside_the_gateway_bridge(tmp_path, monkeyp
     bridged = render(snapshot([]), tmp_path, tmp_path)
     assert 'listen "0.0.0.0:8000";' in bridged
     assert 'listen "0.0.0.0:8001";' in bridged
+
+
+def test_cold_start_preserves_active_health_socket(tmp_path):
+    """冷启动发现已有监听者时，须保留它的套接字和接收连接的能力。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    path = work / "health.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
+        listener.listen()
+        with pytest.raises(RuntimeError, match="already has a listener"):
+            Gateway(tmp_path, work)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(str(path))
+
+
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular-file", "symlink"])
+def test_cold_start_preserves_unexpected_health_path(tmp_path, symlink):
+    """健康套接字的位置若已被普通文件或符号链接占用，保留原有目录项。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    path = work / "health.sock"
+    if symlink:
+        path.symlink_to(tmp_path / "absent")
+    else:
+        path.write_text("keep")
+    before = path.lstat()
+    with pytest.raises(RuntimeError, match="Expected a Unix socket"):
+        Gateway(tmp_path, work)
+    assert os.path.samestat(path.lstat(), before)
 
 
 def test_replay_commits_counts_and_offsets_together(tmp_path):
@@ -154,7 +186,7 @@ def upstream(directory):
 
 @pytest.mark.skipif(shutil.which("nginx") is None, reason="需要真实 Nginx")
 def test_live_edge_routes_reload_proxy_and_accounting(tmp_path, monkeypatch):
-    """覆盖真实 Nginx 限流、可信代理、流式转发，并区分上游 429 和网关 502。"""
+    """覆盖遗留套接字后的冷启动、Nginx 限流、流式转发及错误计量。"""
     public, local = unused_port(), unused_port()
     shared, work = tmp_path / "shared", tmp_path / "work"
     shared.mkdir()
@@ -210,6 +242,11 @@ def test_live_edge_routes_reload_proxy_and_accounting(tmp_path, monkeypatch):
         finally:
             conn.close()
 
+    # 模拟容器被强制结束：监听进程已消失，工作目录中的健康套接字仍占用原路径。
+    work.mkdir(mode=0o700)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as abandoned:
+        abandoned.bind(str(work / "health.sock"))
+        abandoned.listen()
     first = publish()
     with upstream(tmp_path) as (records, release):
         proc = subprocess.Popen([sys.executable, "-m", "mycomfy.gateway"])

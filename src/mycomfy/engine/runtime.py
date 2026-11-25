@@ -161,7 +161,7 @@ def owns_port(pid, port):
 
 
 def probe_generation(runtime):
-    """核对实际监护进程、该树持有的端口与引擎健康响应，供运行管理和就绪探测共用。"""
+    """核对监护进程、进程树的端口与 ComfyUI 队列摘要，供运行管理和就绪探测共用。"""
     identity = read_json(Path(runtime["run_dir"]) / "identity.json")
     alive = bool(identity and process_identity(identity["pid"]) == identity)
     reachable = False
@@ -170,9 +170,12 @@ def probe_generation(runtime):
         # 只访问通过进程树所有权核对的端口，避免把占用旧端口的其他服务当作新代次。
         try:
             with httpx.Client(trust_env=False, timeout=1) as client:
-                response = client.get(runtime["base_url"] + "/system_stats")
-                reachable = response.is_success and isinstance(response.json(), dict)
-        except (httpx.HTTPError, ValueError):
+                # GET /prompt 仅读取队列计数，避免频繁探活触发引擎 HTTP 线程同步查询显存。
+                response = client.get(runtime["base_url"] + "/prompt")
+                response.raise_for_status()
+                remaining = response.json()["exec_info"]["queue_remaining"]
+                reachable = type(remaining) is int and remaining >= 0
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
             pass
     return identity, alive, reachable
 

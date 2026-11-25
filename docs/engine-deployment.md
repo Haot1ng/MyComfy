@@ -66,7 +66,7 @@ python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime re
 python3 scripts/deploy.py --compose logs --tail 100 engine worker
 ~~~
 
-`ready` 在至少一个当前配置的代次有有效心跳、端口归属正确且 ComfyUI 响应时成功。要验证 H3 在目标显卡上能生成视频，分别用已发布的文生、图生策略提交一个短样本，图生样本上传首帧。核验两个视频均可下载、播放，并记录实际显存峰值与耗时。[目标机生成验收](gpu-acceptance.md)
+`ready` 在至少一个当前配置的代次可接单、心跳有效、端口归属正确且 ComfyUI 队列可读时成功。运行管理器和 Docker 就绪检查都用 1 秒超时请求 `GET /prompt`，验证 `exec_info.queue_remaining` 是非负整数。队列空闲和忙碌时都能通过探测。Worker 通过 `/queue` 和 `/history/{prompt_id}` 跟踪具体任务。要验证 H3 在目标显卡上能生成视频，分别用已发布的文生、图生策略提交一个短样本，图生样本上传首帧。核验两个视频均可下载、播放，并记录实际显存峰值与耗时。[目标机生成验收](gpu-acceptance.md)
 
 升级前逐实例排空，使用监控页上显示的实例 ID 和当前代次。下面的示例对应 gpu0 的第一代。待在途执行结算、原进程树退出后，更新部署配置中 `engine` 的相应版本并执行部署脚本。若控制台正在等待已暂停实例就绪，可在另一终端按当前代次恢复实例。
 

@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -175,6 +176,37 @@ def test_gpu_sample_retains_supported_wsl_metrics(monkeypatch):
     assert sample["gpu_memory_peak_mib"] == 45 and "gpu_utilization_percent" not in sample
 
 
+@pytest.mark.parametrize(
+    ("status", "payload", "reachable"),
+    [
+        (200, {"exec_info": {"queue_remaining": 0}}, True),
+        (200, {"exec_info": {"queue_remaining": 2}}, True),
+        (200, {}, False),
+        (200, {"exec_info": None}, False),
+        (200, {"exec_info": {"queue_remaining": False}}, False),
+        (200, {"exec_info": {"queue_remaining": -1}}, False),
+        (503, {"exec_info": {"queue_remaining": 0}}, False),
+    ],
+)
+def test_probe_generation_checks_comfy_queue_summary(
+    tmp_path, monkeypatch, status, payload, reachable
+):
+    """核对轻量探活只读取 /prompt，兼容空闲、忙碌，并识别异常响应。"""
+    identity = process_identity(os.getpid())
+    (tmp_path / "identity.json").write_text(json.dumps(identity))
+    monkeypatch.setattr(runtime, "owns_port", lambda pid, port: True)
+
+    def respond(request):
+        """检查两条 HTTP 路径不会混淆，记录队列信息时也不会向引擎提交任务。"""
+        assert request.method == "GET" and request.url.path == "/prompt"
+        return httpx.Response(status, json=payload)
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(runtime.httpx, "Client", partial(httpx.Client, transport=transport))
+    instance = {"run_dir": str(tmp_path), "base_url": "http://127.0.0.1:8188"}
+    assert runtime.probe_generation(instance) == (identity, True, reachable)
+
+
 def test_manager_adopts_generation_and_stops_detached_descendant(tmp_path):
     """验证管理程序重建、旧代次迟到停机、脱离会话的后代退出和日志脱敏。"""
     sessions = sessionmaker(create_engine("sqlite://"), expire_on_commit=False)
@@ -193,10 +225,13 @@ child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"], 
 print("Cookie: highly-private-value", flush=True)
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        """返回用于测试的引擎健康快照。"""
+        """模拟 ComfyUI 的轻量队列摘要接口。"""
+        if self.path != "/prompt":
+            self.send_error(404)
+            return
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"{}")
+        self.wfile.write(b'{"exec_info": {"queue_remaining": 2}}')
 http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 ''')
     cfg = EngineConfig(

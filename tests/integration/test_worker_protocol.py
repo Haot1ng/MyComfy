@@ -548,6 +548,92 @@ def test_resolved_quarantine_recovers_completed_output(setup_worker):
 
 
 @pytest.mark.mysql
+@pytest.mark.parametrize("completed", [True, False], ids=["complete-output", "missing-output"])
+def test_host_reboot_keeps_authorized_slot_until_worker_reconciles(
+    setup_worker, monkeypatch, completed
+):
+    """旧系统重启后，管理器只证明进程已退出；原提交须先按落盘产物结算一次。"""
+    from unittest.mock import Mock
+    from uuid import uuid4
+
+    from mycomfy.engine.runtime import EngineConfig, Manager, config_hash, stop_generation
+
+    worker, engine = setup_worker
+    root = worker.settings.data_root / "gpu0"
+    directory = root / f"g7-{uuid4().hex}"
+    for name in ("input", "output"):
+        (directory / name).mkdir(parents=True)
+    config = EngineConfig(
+        id="engine",
+        gpu="0",
+        port=8188,
+        root=str(root),
+        python="/usr/bin/python3",
+        entrypoint=str(root / "main.py"),
+        manifest={},
+        observation_seconds=10,
+        timeout_seconds=120,
+        reconcile_seconds=30,
+    )
+    (directory / "launch.json").write_text(json.dumps({"generation": 7}))
+    (directory / "identity.json").write_text(
+        json.dumps({"pid": 41, "ticks": 42, "boot": str(uuid4())})
+    )
+    with worker.sessions.begin() as db:
+        row = db.get(EngineInstance, "engine")
+        row.runtime = {
+            **row.runtime,
+            "run_dir": str(directory),
+            "config_hash": config_hash(config),
+            "input_dir": str(directory / "input"),
+            "output_dir": str(directory / "output"),
+            "launched_at": 1,
+        }
+
+    # 只发送一次真实协议 POST；模拟掉电后引擎内存中的队列和历史全部消失。
+    worker.tick()
+    execution_id = engine.posts[0]["extra_data"]["mycomfy_execution_id"]
+    if completed:
+        engine.complete(directory / "output")
+    engine.running.clear()
+    engine.history.clear()
+    with worker.sessions.begin() as db:
+        row = db.get(EngineInstance, "engine")
+        row.accepting = False
+        row.quarantine_reason = "PROCESS_IDENTITY_UNCONFIRMED"
+
+    manager = Manager(worker.sessions)
+    launch = Mock()
+    monkeypatch.setattr(manager, "launch", launch)
+    configs = {config.id: config}
+    manager.tick(configs)
+    manager.tick(configs)
+    launch.assert_not_called()
+    evidence = json.loads((directory / "ended.json").read_text())
+    assert (evidence["generation"], evidence["reason"]) == (7, "HOST_REBOOT_CONFIRMED")
+    with worker.sessions() as db:
+        row = db.get(EngineInstance, "engine")
+        assert not row.accepting and row.quarantine_reason is None
+        assert (row.generation, row.active_execution_id) == (7, execution_id)
+
+    # 用正式的退出凭据检查恢复。即使 Worker 再轮询一遍，也不会再次提交旧执行。
+    worker.stop_generation = stop_generation
+    worker.tick(claim=False)
+    worker.tick(claim=False)
+    with worker.sessions() as db:
+        execution = db.get(Execution, execution_id)
+        assert execution.phase == ("SUCCEEDED" if completed else "LOST")
+        assert execution.result["reconciliation_trigger"]["reason"] == "GENERATION_ALREADY_ENDED"
+        assert db.get(EngineInstance, "engine").active_execution_id is None
+        assert db.get(Job, "job").budget_used == 1
+        if completed:
+            assert db.scalars(select(Asset)).one().complete
+    assert len(engine.posts) == 1
+    manager.tick(configs)
+    launch.assert_called_once_with(config, 7)
+
+
+@pytest.mark.mysql
 def test_stale_generation_cannot_release_slot(setup_worker):
     """R03 延迟的旧执行结果无法推进任务或释放新代次的占用。"""
     worker, _ = setup_worker

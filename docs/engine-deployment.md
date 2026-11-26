@@ -76,7 +76,13 @@ python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime dr
 python3 scripts/deploy.py --compose exec engine python -m mycomfy.cli runtime resume --instance gpu0 --generation 1
 ~~~
 
-Compose 正常停止 engine 时会请求各代次退出并等待落盘凭据。强制终止或掉电后，缺失退出凭据的实例可能进入隔离。核对实际执行、进程与文件后，再在原 engine 服务内执行 `runtime resolve`。[运维说明](operations.md)
+Compose 正常停止 engine 时会请求各代次退出并等待监护程序写入 `ended.json`。
+
+### 掉电后的代次恢复
+
+原 GPU 主机掉电或 WSL 内核重启后，管理器会核对本机实例目录、`launch.json` 中的代次和 `identity.json` 中的内核启动标识。若有 `child.json`，子进程也须属于同一旧内核。确认内核已经更换后，管理器补写原因是 `HOST_REBOOT_CONFIRMED` 的 `ended.json`，记录新旧启动标识和确认时间，并解除该代次因进程退出无法确认而产生的隔离。升级前已进入这种隔离的实例同样适用。
+
+若旧代次仍占用任务槽位，Worker 先按原执行记录核对产物。已获准提交的执行若留下完整输出，会进入校验与发布。缺少必需输出时，该次执行记为 `LOST`。释放槽位后，已配置且未暂停的实例会启动下一代。同一内核中仅重建容器、身份记录冲突或从备份恢复到其他机器，都不能据此确认原进程树已退出。遇到这类隔离，请按运维流程核实后再执行 `runtime resolve`。[运维说明](operations.md)
 
 ## 隔离和验收
 

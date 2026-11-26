@@ -47,6 +47,8 @@ uv run mycomfy runtime drain --instance "$INSTANCE_ID" --generation "$GENERATION
 
 等待执行提交回执、任务发布及进程树状态达到可核对边界。发现超时或无法确认旧进程退出时，保留工作目录、占用、代次、进程身份和日志。查明提交路径、确认旧进程及其子进程已退出并核对输出后，使用 `runtime resolve --instance ... --generation ... --reason ...` 记录解除隔离依据。计划恢复领取使用 `runtime resume` 并传入当前实例及代次。正常取消由用户任务接口提交。
 
+原 GPU 主机意外重启后，可查看旧代次目录的 `ended.json`。其中 `reason` 为 `HOST_REBOOT_CONFIRMED` 表示管理器已核实旧内核退出。若实例仍有占用，可从管理后台打开该次执行，查看 Worker 对原输出目录的核对结果。[掉电后的代次恢复](engine-deployment.md#掉电后的代次恢复)
+
 ## 容量设置
 
 `MYCOMFY_CAPACITY_CONFIG` 指向部署的 JSON 文件。各项容量单位为字节，卷路径须指向已挂载的实际文件系统。下例数值仅展示配置结构，目标机需按实测峰值填写。数据库卷路径选择在业务主机上可见、与数据库文件位于同一文件系统的目录。实例工作卷使用实际工作路径测量。API 进程的临时目录应与 spool 对应。

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import signal
 import subprocess
 import sys
@@ -28,6 +29,13 @@ from mycomfy.database.session import db_now, make_sessions, new_id
 
 from .deploy import InstanceSpec, Record, write_json
 from .supervisor import descendants, process_identity
+
+# 只有由进程树是否退出引起的隔离，才能用内核重启凭据解除。
+EXIT_QUARANTINES = {
+    "PROCESS_IDENTITY_UNCONFIRMED",
+    "PROCESS_TREE_EXIT_UNCONFIRMED",
+    "PROCESS_EXIT_UNCONFIRMED",
+}
 
 
 class EngineConfig(InstanceSpec):
@@ -71,12 +79,39 @@ def read_json(path):
         return None
 
 
+def read_identity(path):
+    """读取本机生成的进程身份，仅接受具有有效 PID、启动时刻和内核 UUID 的记录。"""
+    try:
+        if path.is_symlink():
+            return None
+        identity = read_json(path)
+        if not isinstance(identity, dict):
+            return None
+        pid, ticks = identity.get("pid"), identity.get("ticks")
+        if type(pid) is not int or pid <= 0 or type(ticks) is not int or ticks < 0:
+            return None
+        boot = identity.get("boot")
+        parsed = uuid.UUID(boot) if isinstance(boot, str) else None
+        if parsed and parsed.int and str(parsed) == boot:
+            return identity
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def ended(runtime, generation):
     """检查退出凭据是否属于当前已持久化的实例代次。"""
     if not runtime.get("run_dir"):
         return False
-    evidence = read_json(Path(runtime["run_dir"]) / "ended.json")
-    return bool(evidence and evidence["generation"] == generation)
+    marker = Path(runtime["run_dir"]) / "ended.json"
+    if marker.is_symlink():
+        raise ValueError("退出凭据必须是本代次目录内的文件")
+    evidence = read_json(marker)
+    if evidence is None:
+        return False
+    if not isinstance(evidence, dict) or type(evidence.get("generation")) is not int:
+        raise ValueError("退出凭据缺少有效的代次")
+    return evidence["generation"] == generation
 
 
 def stop_snapshot(sessions, instances):
@@ -132,13 +167,18 @@ def _stop_generations(sessions, targets, timeout=12, *, allow_empty=False):
             break
         time.sleep(0.1)
     # 保留尚未证实已退出的执行和槽位，交给后续恢复与人工核对。
+    all_confirmed = True
     with sessions.begin() as db:
-        for instance_id, generation in pending:
+        for (instance_id, generation), state in pending.items():
             row = db.get(EngineInstance, instance_id, with_for_update=True)
-            if row and row.generation == generation:
+            # 等待行锁时管理器可能刚写入掉电凭据，再查一次以免重新隔离已恢复的实例。
+            if ended(state, generation):
+                continue
+            all_confirmed = False
+            if row and row.generation == generation and not row.quarantine_reason:
                 row.quarantine_reason = "PROCESS_TREE_EXIT_UNCONFIRMED"
                 row.accepting = False
-    return False
+    return all_confirmed
 
 
 def owns_port(pid, port):
@@ -162,7 +202,7 @@ def owns_port(pid, port):
 
 def probe_generation(runtime):
     """核对监护进程、进程树的端口与 ComfyUI 队列摘要，供运行管理和就绪探测共用。"""
-    identity = read_json(Path(runtime["run_dir"]) / "identity.json")
+    identity = read_identity(Path(runtime["run_dir"]) / "identity.json")
     alive = bool(identity and process_identity(identity["pid"]) == identity)
     reachable = False
     port = int(runtime["base_url"].rsplit(":", 1)[-1])
@@ -396,6 +436,86 @@ class Manager:
         for row in instances:
             self.inspect(row, configs.get(row.id))
 
+    def recover_after_reboot(self, snapshot, config, directory):
+        """用原 GPU 机的本地代次记录核实旧内核已退出，保留槽位给 Worker 核对。"""
+        generation = snapshot.generation
+        if (
+            directory.parent.resolve() != Path(config.root).resolve()
+            or directory.is_symlink()
+            or not re.fullmatch(rf"g{generation}-[0-9a-f]{{32}}", directory.name)
+        ):
+            return False
+        identity = read_identity(directory / "identity.json")
+        if identity is None:
+            return False
+        previous = identity["boot"]
+        try:
+            current_boot = uuid.UUID(Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+            if str(current_boot) == previous or not current_boot.int:
+                return False
+            # 核对该目录的启动代次。若另有子进程身份，两份身份须来自同一内核。
+            launch_path = directory / "launch.json"
+            if launch_path.is_symlink():
+                return False
+            launch = read_json(launch_path)
+            if (
+                not isinstance(launch, dict)
+                or type(launch.get("generation")) is not int
+                or launch.get("generation") != generation
+            ):
+                return False
+            child = directory / "child.json"
+            if child.is_symlink() or (
+                child.exists() and (read_identity(child) or {}).get("boot") != previous
+            ):
+                return False
+        except (OSError, ValueError):
+            return False
+
+        with self.sessions.begin() as db:
+            row = db.get(EngineInstance, snapshot.id, with_for_update=True)
+            if (
+                not row
+                or row.generation != generation
+                or row.runtime.get("run_dir") != str(directory)
+                or (row.quarantine_reason and row.quarantine_reason not in EXIT_QUARANTINES)
+            ):
+                return False
+            marker = directory / "ended.json"
+            if marker.is_symlink():
+                return False
+            if marker.exists():
+                # 文件先于数据库提交。若进程在两者之间中断，重用本代原凭据，保留首次观察时间。
+                receipt = read_json(marker)
+                if not (
+                    isinstance(receipt, dict)
+                    and receipt.get("generation") == generation
+                    and receipt.get("reason") == "HOST_REBOOT_CONFIRMED"
+                    and receipt.get("previous_boot_id") == previous
+                ):
+                    return False
+            else:
+                write_json(
+                    marker,
+                    {
+                        "generation": generation,
+                        "reason": "HOST_REBOOT_CONFIRMED",
+                        "previous_boot_id": previous,
+                        "current_boot_id": str(current_boot),
+                        "observed_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+            row.quarantine_reason = None
+            row.accepting = False
+            row.heartbeat_at = db_now(db)
+            row.runtime = {
+                **row.runtime,
+                "pid": None,
+                "process_alive": False,
+                "api_reachable": False,
+            }
+        return True
+
     def inspect(self, snapshot, config):
         """核对一个代次的进程身份、端口和 HTTP 接单健康状况。"""
         state = snapshot.runtime
@@ -403,6 +523,21 @@ class Manager:
         directory = Path(state["run_dir"]) if state.get("run_dir") else None
         finished = ended(state, generation)
         paused = state.get("paused", False)
+        identity, alive, reachable = None, False, False
+        if directory and not finished:
+            identity, alive, reachable = probe_generation(state)
+        # 既要处理首次发现的掉电，也要修复先前版本留下的退出类隔离。
+        needs_exit_proof = snapshot.quarantine_reason in EXIT_QUARANTINES or (
+            not finished and snapshot.quarantine_reason is None
+        )
+        if (
+            directory
+            and config
+            and not alive
+            and needs_exit_proof
+            and self.recover_after_reboot(snapshot, config, directory)
+        ):
+            return
         if not directory or finished:
             if (
                 config
@@ -412,13 +547,10 @@ class Manager:
             ):
                 self.launch(config, generation)
                 return
-            alive = reachable = False
-            identity = None
-        else:
-            if (
-                not config or paused or config_hash(config) != state["config_hash"]
-            ) and not snapshot.active_execution_id:
-                stop_generation(self.sessions, snapshot.id, generation)
+        elif (
+            not config or paused or config_hash(config) != state["config_hash"]
+        ) and not snapshot.active_execution_id:
+            stop_generation(self.sessions, snapshot.id, generation)
             identity, alive, reachable = probe_generation(state)
         metrics = state.get("metrics", {})
         if config and time.time() - state.get("metrics_checked", 0) >= 15:
@@ -442,6 +574,7 @@ class Manager:
                 directory
                 and not finished
                 and not alive
+                and not row.quarantine_reason
                 and time.time() - state["launched_at"] > 15
                 and not ended(state, generation)
             ):

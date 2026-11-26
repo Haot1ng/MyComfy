@@ -12,10 +12,11 @@ from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from mycomfy.database.models import Base, EngineInstance
@@ -319,6 +320,175 @@ def test_stop_unknown_tree_requires_evidence(tmp_path):
         {"generation": 9, "run_dir": str(tmp_path)}
     ]
     assert stop_generation(sessions, "lost", 9, timeout=0)
+
+
+@pytest.fixture
+def power_loss(tmp_path):
+    """重建旧版本在 GPU 主机掉电后留下的 4071 代数据库行和进程控制文件。"""
+    script = tmp_path / "engine.py"
+    script.write_text("pass\n")
+    cfg = EngineConfig(
+        id="gpu0",
+        gpu="0",
+        port=8188,
+        root=str(tmp_path / "instance"),
+        python=sys.executable,
+        entrypoint=str(script),
+        manifest={},
+        observation_seconds=2,
+        timeout_seconds=10,
+        reconcile_seconds=3,
+    )
+    directory = Path(cfg.root) / f"g4071-{uuid4().hex}"
+    directory.mkdir(parents=True)
+    old_boot = str(uuid4())
+    previous_identity = {"pid": 2147483647, "ticks": 17, "boot": old_boot}
+    (directory / "identity.json").write_text(json.dumps(previous_identity))
+    (directory / "launch.json").write_text(json.dumps({"generation": 4071}))
+    (directory / "child.json").write_text(json.dumps({**previous_identity, "pid": 2147483646}))
+
+    sessions = sessionmaker(create_engine("sqlite://"), expire_on_commit=False)
+    Base.metadata.create_all(sessions.kw["bind"])
+    with sessions.begin() as db:
+        db.add(
+            EngineInstance(
+                id=cfg.id,
+                generation=4071,
+                manifest={},
+                accepting=False,
+                quarantine_reason="PROCESS_IDENTITY_UNCONFIRMED",
+                runtime={
+                    "run_dir": str(directory),
+                    "base_url": f"http://127.0.0.1:{cfg.port}",
+                    "config_hash": runtime.config_hash(cfg),
+                    "launched_at": time.time() - 86400,
+                },
+            )
+        )
+    try:
+        yield sessions, cfg, directory, old_boot
+    finally:
+        sessions.kw["bind"].dispose()
+
+
+@pytest.mark.parametrize("already_quarantined", [False, True])
+def test_power_loss_restarts_idle_instance(power_loss, already_quarantined):
+    """旧版未写退出凭据时，首次发现掉电和升级前已隔离的代次都可自动重启。"""
+    sessions, cfg, directory, old_boot = power_loss
+    if not already_quarantined:
+        with sessions.begin() as db:
+            db.get(EngineInstance, cfg.id).quarantine_reason = None
+    # 监护程序写身份后、启动 ComfyUI 前同样可能掉电。
+    (directory / "child.json").unlink()
+    manager = Manager(sessions)
+    for _ in range(3):
+        manager.tick({cfg.id: cfg})
+        if cfg.id in manager.children:
+            break
+    receipt = json.loads((directory / "ended.json").read_text())
+    assert receipt["reason"] == "HOST_REBOOT_CONFIRMED" and receipt["generation"] == 4071
+    assert receipt["previous_boot_id"] == old_boot
+    assert receipt["current_boot_id"] == process_identity(os.getpid())["boot"]
+    assert manager.children[cfg.id].wait(timeout=10) == 0
+    with sessions() as db:
+        row = db.get(EngineInstance, cfg.id)
+        assert row.generation == 4072 and row.quarantine_reason is None
+        assert not row.accepting
+
+
+def test_power_loss_replays_exit_receipt_while_paused(power_loss):
+    """退出凭据已发布但数据库更新未提交时，重试能修复隔离且尊重暂停。"""
+    sessions, cfg, directory, _ = power_loss
+    with sessions.begin() as db:
+        row = db.get(EngineInstance, cfg.id)
+        row.runtime = {**row.runtime, "paused": True}
+    receipt_file = directory / "ended.json"
+
+    def fail_after_receipt(_db):
+        """仅中断已写入退出凭据的事务，保留文件并回滚数据库变更。"""
+        if receipt_file.exists():
+            raise RuntimeError("模拟数据库提交前中断")
+
+    event.listen(sessions, "before_commit", fail_after_receipt)
+    try:
+        with pytest.raises(RuntimeError, match="模拟数据库提交前中断"):
+            Manager(sessions).tick({cfg.id: cfg})
+    finally:
+        event.remove(sessions, "before_commit", fail_after_receipt)
+    receipt = receipt_file.read_bytes()
+    with sessions() as db:
+        assert db.get(EngineInstance, cfg.id).quarantine_reason == "PROCESS_IDENTITY_UNCONFIRMED"
+    # 新管理器看到的是旧数据库行和上次发布的退出凭据。
+    Manager(sessions).tick({cfg.id: cfg})
+    with sessions() as db:
+        row = db.get(EngineInstance, cfg.id)
+        assert row.quarantine_reason is None and row.generation == 4071
+        assert row.runtime["paused"] and not row.accepting
+    assert receipt_file.read_bytes() == receipt
+
+
+@pytest.mark.parametrize(
+    ("filename", "update"),
+    [
+        ("identity.json", None),
+        ("identity.json", {"boot": "malformed"}),
+        ("launch.json", None),
+        ("launch.json", {"generation": 4070}),
+        ("identity.json", {"boot": "current"}),
+        ("child.json", {"boot": "current"}),
+    ],
+)
+def test_inconclusive_power_loss_preserves_quarantine(power_loss, filename, update):
+    """证据缺失、代次不符、同内核丢进程、父子身份冲突时均不能启动新代次。"""
+    sessions, cfg, directory, _ = power_loss
+    path = directory / filename
+    if update is None:
+        path.unlink()
+    else:
+        if update.get("boot") == "current":
+            update = {"boot": process_identity(os.getpid())["boot"]}
+            if filename == "identity.json":
+                child_file = directory / "child.json"
+                child_file.write_text(json.dumps({**json.loads(child_file.read_text()), **update}))
+        path.write_text(json.dumps({**json.loads(path.read_text()), **update}))
+    Manager(sessions).tick({cfg.id: cfg})
+    with sessions() as db:
+        row = db.get(EngineInstance, cfg.id)
+        assert row.quarantine_reason == "PROCESS_IDENTITY_UNCONFIRMED"
+        assert row.generation == 4071 and not row.accepting
+    assert not (directory / "ended.json").exists()
+
+
+def test_power_loss_does_not_confirm_another_instance_directory(power_loss):
+    """同一数据库中的其他 GPU 主机可能有不同的 boot ID，目录归属须与配置相符。"""
+    sessions, cfg, directory, _ = power_loss
+    # 配置未改动，但数据库中的 run_dir 引用了另一实例的代次目录。
+    other_root = directory.parent.parent / "other-instance"
+    other_root.mkdir()
+    other_directory = directory.rename(other_root / directory.name)
+    with sessions.begin() as db:
+        row = db.get(EngineInstance, cfg.id)
+        row.runtime = {**row.runtime, "run_dir": str(other_directory)}
+    Manager(sessions).tick({cfg.id: cfg})
+    with sessions() as db:
+        row = db.get(EngineInstance, cfg.id)
+        assert row.quarantine_reason == "PROCESS_IDENTITY_UNCONFIRMED"
+        assert row.generation == 4071 and not row.accepting
+    assert not (other_directory / "ended.json").exists()
+
+
+def test_power_loss_preserves_unrelated_quarantine(power_loss):
+    """主机重启不能解除等待核实工作目录等独立问题引发的隔离。"""
+    sessions, cfg, _, _ = power_loss
+    with sessions.begin() as db:
+        db.get(EngineInstance, cfg.id).quarantine_reason = "STOPPED_SOURCE_UNAVAILABLE"
+    manager = Manager(sessions)
+    for _ in range(2):
+        manager.tick({cfg.id: cfg})
+    with sessions() as db:
+        row = db.get(EngineInstance, cfg.id)
+        assert row.quarantine_reason == "STOPPED_SOURCE_UNAVAILABLE"
+        assert row.generation == 4071 and not row.accepting
 
 
 def test_deployment_change_preserves_active_generation_manifest(tmp_path):

@@ -43,6 +43,8 @@ ADMIN_FILES = (
     "workflow-node-check.js",
     "graph.css",
     "presets/example-h3-text-to-video.strategy.jsonc",
+    "presets/example-video-copy.canvas.json",
+    "presets/example-video-copy.api.json",
     "presets/h3-t2v.strategy.json",
     "presets/h3-i2v.strategy.json",
 )

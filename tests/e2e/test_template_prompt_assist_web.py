@@ -310,8 +310,98 @@ def read_example_download(page, link, directory, expected_name):
     return file
 
 
+def test_canvas_and_api_downloads_import_the_same_workflow(admin_origin, tmp_path):
+    """在导入位置辨认两种格式，下载后核对节点图，并用 API 文件绑定素材、发布模板。"""
+    playwright = pytest.importorskip("playwright.sync_api")
+    expect = playwright.expect
+    with playwright.sync_playwright() as engine:
+        executable = which("chromium") or which("google-chrome") or engine.chromium.executable_path
+        if not Path(executable).is_file():
+            pytest.skip("未安装 Chromium")
+        with engine.chromium.launch(executable_path=executable) as browser:
+            page = browser.new_page()
+            page.goto(admin_origin + "/templates.html")
+            picker = page.locator("#template-file")
+            hint = page.locator("#workflow-format-help")
+            expect(hint).to_be_visible()
+            expect(hint).to_contain_text("画布 JSON")
+            expect(hint).to_contain_text("API 格式 JSON")
+            assert "workflow-format-help" in picker.get_attribute("aria-describedby").split()
+
+            open_examples = page.get_by_role("button", name="查看 JSON 示例")
+            dialog = page.get_by_role("dialog", name="模板 JSON 示例")
+            formats = dialog.locator("#example-format")
+            guidance = page.locator("#publish-description")
+
+            def download_and_import(filename, inline_label):
+                link = dialog.locator("#example-download-json")
+                expect(link).to_be_visible()
+                expect(link).to_have_attribute("download", filename)
+                file = read_example_download(page, link, tmp_path, filename)
+                body = json.loads(file.read_bytes())
+                assert body == json.loads(dialog.locator("#example-json").input_value())
+                dialog.get_by_role("button", name="关闭").click()
+                file = read_example_download(
+                    page, hint.get_by_role("link", name=inline_label), tmp_path, filename
+                )
+                assert json.loads(file.read_bytes()) == body
+                picker.set_input_files(file)
+                expect(page.locator("#preview-source")).to_have_text(filename)
+                expect(page.locator("#workflow-preview")).to_contain_text("2 个节点 · 1 条连线")
+                expect(page.locator("#publish-template")).to_be_disabled()
+                return body
+
+            open_examples.click()
+            expect(formats).to_have_value("canvas")
+            canvas = download_and_import("example-video-copy.canvas.json", "下载画布模板")
+            expect(guidance).to_contain_text("从 ComfyUI 导出 API 格式")
+            nodes = {node["type"]: str(node["id"]) for node in canvas["nodes"]}
+            load, save = nodes["LoadVideo"], nodes["SaveVideo"]
+            page.get_by_label("定位节点").select_option(load)
+            outgoing = page.locator(".wg-details").get_by_role("button")
+            expect(outgoing).to_contain_text(f"#{save} ·")
+            expect(outgoing).to_contain_text("/ video")
+
+            open_examples.click()
+            formats.select_option("api")
+            api = download_and_import("example-video-copy.api.json", "下载 API 模板")
+            expect(guidance).to_contain_text("从这份 API 工作流创建")
+            assert api[load]["class_type"] == "LoadVideo" and api[save]["class_type"] == "SaveVideo"
+            assert api[save]["inputs"]["video"] == [load, 0]
+            api_href = hint.get_by_role("link", name="下载 API 模板").get_attribute("href")
+
+            page.get_by_role("button", name="新增模板").click()
+            expect(page.locator("#new-template-source")).to_have_value("api")
+            editor = page.locator("#new-template-editor")
+            api_link = editor.get_by_role("link", name="下载 API 模板")
+            expect(api_link).to_be_visible()
+            expect(api_link).to_have_attribute("href", api_href)
+            page.locator("#new-template-name").fill("视频另存")
+            page.locator("#new-template-key").fill("video-copy")
+            page.get_by_role("button", name="添加输入").click()
+            page.get_by_label("参数名", exact=True).fill("source_video")
+            page.get_by_label("输入类型").select_option("asset")
+            page.get_by_label("绑定到节点输入").select_option(label=f"#{load} · file")
+            page.get_by_label("保存节点的路径输入").select_option(
+                label=f"#{save} · filename_prefix"
+            )
+            page.get_by_role("button", name="预览新模板").click()
+            version, stored = publish_template(page, admin_origin, create=True)
+            assert version == 1 and stored["workflow"] == api
+            assert stored["bindings"] == [
+                {"input": "source_video", "kind": "asset", "node_id": load, "node_input": "file"}
+            ]
+            (output,) = stored["output_contract"]
+            assert (output["role"], output["node_id"], output["path_input"]) == (
+                "video",
+                save,
+                "filename_prefix",
+            )
+            assert output["media_types"] == ["video/mp4"]
+
+
 def test_download_example_matches_display_and_imports(admin_origin, tmp_path):
-    """核对带注释的默认示例与标准 JSON，实际从 JSONC 文件和粘贴框各发布一次。"""
+    """核对完整策略示例的注释与标准 JSON，实际从 JSONC 文件和粘贴框各发布一次。"""
     playwright = pytest.importorskip("playwright.sync_api")
     with playwright.sync_playwright() as engine:
         executable = which("chromium") or which("google-chrome") or engine.chromium.executable_path
@@ -324,6 +414,7 @@ def test_download_example_matches_display_and_imports(admin_origin, tmp_path):
             page.goto(admin_origin + "/templates.html")
             page.get_by_role("button", name="查看 JSON 示例").click()
             dialog = page.get_by_role("dialog", name="模板 JSON 示例")
+            dialog.locator("#example-format").select_option("strategy")
             download = dialog.locator("#example-download")
             playwright.expect(download).to_be_visible()
             displayed = dialog.locator("#example-json").input_value()

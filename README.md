@@ -164,6 +164,8 @@ MyComfy/
 │       ├── workflow-node-check.js                             # 展示引擎缺失节点与工作流位置
 │       └── presets/                                           # 内置工作流模板
 │           ├── example-h3-text-to-video.strategy.jsonc        # 逐字段注释的 H3 文生视频示例
+│           ├── example-video-copy.canvas.json                 # 视频读写示例的 ComfyUI 画布格式
+│           ├── example-video-copy.api.json                    # 同一工作流的 ComfyUI API 格式
 │           ├── h3-i2v.strategy.json                           # H3 图生视频预设
 │           └── h3-t2v.strategy.json                           # H3 文生视频预设
 ├── migrations/                                                # 数据库结构迁移
@@ -312,7 +314,7 @@ python3 scripts/deploy.py --test
 
 **启用 AI 提示词扩写**时，在管理后台的“提示词服务商”添加兼容 OpenAI Chat Completions 的 API 基址、模型标识及可选 API 密钥，再点击“启用”。基址由业务端容器访问，例如填 `https://api.example.com/v1`，服务端会追加 `/chat/completions`。可以保存多套配置，切换后从下一次扩写开始生效。
 
-在“工作流模板”的“打开 JSON 文件”旁可查看、下载带逐字段中文注释的 H3 模板（JSONC），也可以下载标准 JSON。上传文件时可以省略 `prompt_assist`，先发布并正常生成视频。选中已发布模板后，在“AI 提示词辅助”里填写指令、勾选文本字段并单独保存。新设置从下一次扩写生效，无需重新上传文件、发布版本或重启服务。内置 H3 文生视频、图生视频预设和仓库的五图分段示例均附有各自的指令。工作台用户可以直接提交原文，也可以点击“扩写提示词”，预览并编辑建议后再采用。一次扩写仅将模板指令、当前字段及其草稿发给生效的服务。[完整注释示例](web/admin/presets/example-h3-text-to-video.strategy.jsonc) · [API 与字段说明](docs/web-api.md#策略与素材)
+在管理后台「工作流模板」的导入入口可下载画布 JSON 和 API 格式 JSON 示例，两种格式展示同一组视频读写节点。「查看 JSON 示例」还提供带逐字段注释的 H3 完整策略（JSONC）及其标准 JSON。上传文件时可以省略 `prompt_assist`，先发布并正常生成视频。选中已发布模板后，在“AI 提示词辅助”里填写指令、勾选文本字段并单独保存。新设置从下一次扩写生效，无需重新上传文件、发布版本或重启服务。内置 H3 文生视频、图生视频预设和仓库的五图分段示例均附有各自的指令。工作台用户可以直接提交原文，也可以点击“扩写提示词”，预览并编辑建议后再采用。一次扩写仅将模板指令、当前字段及其草稿发给生效的服务。[完整注释示例](web/admin/presets/example-h3-text-to-video.strategy.jsonc) · [API 与字段说明](docs/web-api.md#策略与素材)
 
 **需要自定义密码、模型或端口时**，在首次部署前复制模板，再编辑仓库根目录的 `deploy.config.yaml`。文件中的 `#` 注释说明了各项用途和填写方式。部署脚本优先读取这份配置，Git 默认忽略该文件。
 

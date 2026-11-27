@@ -27,7 +27,9 @@
 
 ## 导入模板
 
-在“打开 JSON 文件”旁点击“查看 JSON 示例”可以预览、复制或下载带逐字段中文注释的 H3 文生视频模板（JSONC），也可下载标准 JSON。两份文件都能直接导入。后台支持源码字符串外的 `//` 行注释和 `/* … */` 块注释，发布时去除注释。示例中的扩写配置默认注释掉，可在发布后随时开启。[查看完整示例](presets/example-h3-text-to-video.strategy.jsonc)
+“打开 JSON 文件”旁提供两份可下载的 ComfyUI 工作流模板，使用同一组节点读取并保存视频。画布 JSON 适合预览连线和检查节点。API 格式 JSON 还可在「新增模板」里把上传素材绑定到 `LoadVideo.file`，把视频输出绑定到 `SaveVideo.filename_prefix`。在 ComfyUI 中运行示例时，请先选择自己的源视频。[画布 JSON 模板](presets/example-video-copy.canvas.json) · [API 格式 JSON 模板](presets/example-video-copy.api.json)
+
+点击「查看 JSON 示例」可切换格式、查看和复制原文。选择「MyComfy 完整策略（带注释）」还可下载带逐字段注释的 H3 文生视频策略或其标准 JSON。后台支持字符串外的 `//` 行注释和 `/* … */` 块注释，发布时去除注释。示例中的扩写配置默认注释掉，可在发布后开启。[H3 完整策略示例](presets/example-h3-text-to-video.strategy.jsonc)
 
 已有完整 MyComfy 策略 JSON 时，打开文件或粘贴 JSON，预览后点击“发布新版本”。内置的 H3 文生视频和图生视频也可直接发布。同一标识每次执行“发布新版本”都会递增版本号。
 

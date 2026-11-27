@@ -143,6 +143,7 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
       </select></label>
       <fieldset class="editor-custom" hidden disabled>
         <legend>自定义工作流</legend>
+        <p class="template-hint">此处使用 API 格式 JSON。已有画布文件时，请先在 ComfyUI 中导出 API 格式。<a href="./presets/example-video-copy.api.json" download>下载 API 模板</a></p>
         <label>选择 API 工作流文件<input id="new-workflow-file" type="file" accept=".json,.jsonc,application/json"></label>
         <label>工作流 JSON<textarea id="new-template-workflow" rows="5" spellcheck="false" placeholder="粘贴 ComfyUI API 格式的 JSON 或带注释的 JSONC"></textarea></label>
         <button type="button" data-read>读取节点</button>

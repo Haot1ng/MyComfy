@@ -30,30 +30,40 @@
             <h2 id="source-title">选择模板</h2>
             <div class="template-actions">
               <button type="button" id="refresh-published">刷新列表</button>
-              <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,.jsonc,application/json"></label>
+              <label class="action template-file">打开 JSON 文件<input id="template-file" type="file" accept=".json,.jsonc,application/json" aria-describedby="workflow-format-help"></label>
               <button id="open-template-example" type="button" aria-haspopup="dialog" aria-controls="template-example">查看 JSON 示例</button>
               <button id="paste-toggle" type="button" aria-expanded="false" aria-controls="paste-editor">粘贴 JSON</button>
             </div>
           </div>
+          <p id="workflow-format-help" class="template-hint">
+            支持两种 ComfyUI 工作流文件。<strong>画布 JSON</strong> 可预览连线、检查节点（<a href="./presets/example-video-copy.canvas.json" download>下载画布模板</a>）。
+            <strong>API 格式 JSON</strong> 还可用于「新增模板」，绑定输入和输出后发布（<a href="./presets/example-video-copy.api.json" download>下载 API 模板</a>）。
+          </p>
           <dialog id="template-example" aria-labelledby="example-title">
             <div class="template-bar">
               <h2 id="example-title">模板 JSON 示例</h2>
-              <form method="dialog"><button type="submit" autofocus>关闭</button></form>
+              <form method="dialog"><button type="submit">关闭</button></form>
             </div>
-            <p>这份 H3 文生视频模板带有逐字段注释，可以直接导入。文件中注释掉的 <code>prompt_assist</code> 段演示了如何给“提示词”输入框启用扩写，也可以在发布后到后台勾选。</p>
+            <label for="example-format">示例格式</label>
+            <select id="example-format" aria-describedby="example-description" autofocus>
+              <option value="canvas" data-file="example-video-copy.canvas.json">ComfyUI 画布 JSON</option>
+              <option value="api" data-file="example-video-copy.api.json">ComfyUI API 格式 JSON</option>
+              <option value="strategy" data-file="example-h3-text-to-video.strategy.jsonc">MyComfy 完整策略（带注释）</option>
+            </select>
+            <p id="example-description" class="template-hint"></p>
             <textarea id="example-json" aria-label="示例 JSON 原文" rows="14" wrap="off" readonly spellcheck="false" hidden></textarea>
             <p id="example-status" class="template-message" role="status"></p>
             <div id="example-actions" class="template-actions" hidden>
-              <a id="example-download" class="action" download="example-h3-text-to-video.strategy.jsonc">下载带注释的 JSONC</a>
-              <a id="example-download-json" class="action" download="example-h3-text-to-video.strategy.json">下载标准 JSON</a>
-              <button type="button" id="example-copy">复制带注释的示例</button>
+              <a id="example-download-json" class="action" download>下载标准 JSON</a>
+              <a id="example-download" class="action" download hidden>下载带注释的 JSONC</a>
+              <button type="button" id="example-copy">复制示例</button>
             </div>
           </dialog>
           <p id="catalog-message" class="template-message" role="status"></p>
           <div id="template-choices" class="template-presets" role="group" aria-labelledby="source-title"></div>
           <div id="paste-editor" hidden>
             <label for="json-text">模板或工作流 JSON</label>
-            <textarea id="json-text" rows="6" spellcheck="false" autocomplete="off"></textarea>
+            <textarea id="json-text" rows="6" spellcheck="false" autocomplete="off" aria-describedby="workflow-format-help"></textarea>
             <button id="preview-paste" type="button">预览 JSON</button>
           </div>
         </section>

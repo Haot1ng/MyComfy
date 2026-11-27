@@ -10,11 +10,18 @@ from referencing.jsonschema import DRAFT202012
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from mycomfy.database.models import EngineInstance, Incompatibility, StrategySeries, StrategyVersion
+from mycomfy.database.models import (
+    EngineInstance,
+    EngineNodeCatalog,
+    Incompatibility,
+    StrategySeries,
+    StrategyVersion,
+)
 from mycomfy.database.prompt_models import TemplatePromptSettings
 from mycomfy.database.session import db_now, new_id
 from mycomfy.errors import ApiError
 
+from .node_check import matches_environment, require_workflow_nodes
 from .state import canonical_digest
 
 Key = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]*$", max_length=64)]
@@ -297,6 +304,7 @@ def validate_strategy(raw):
 def sql_publish(db, raw, request_id, *, create_only=False):
     """原子创建策略系列或发布其下一版本，保存不可变内容、摘要及请求关联。"""
     content = validate_strategy(raw)
+    require_workflow_nodes(db, content)
     key = content["strategy_key"]
     if create_only:
         # 数据库主键裁决并发创建；重复标识不会悄悄变成已有系列的新版本。
@@ -333,18 +341,6 @@ def sql_publish(db, raw, request_id, *, create_only=False):
     return version
 
 
-def matches_environment(requirements, manifest):
-    """比对策略声明的引擎、节点、模型版本与实例清单。"""
-    required_commit = requirements.get("comfyui")
-    if required_commit and required_commit != manifest.get("comfyui"):
-        return False
-    for group in ("nodes", "models"):
-        actual = manifest.get(group, {})
-        if any(actual.get(k) != version for k, version in requirements.get(group, {}).items()):
-            return False
-    return True
-
-
 def allows_manifest(db, strategy, manifest):
     """检查一份环境清单是否满足固定版本且未经相同环境明确拒收。"""
     return (
@@ -353,50 +349,82 @@ def allows_manifest(db, strategy, manifest):
     )
 
 
-def compatible(db, strategy, instance):
+def instance_catalogs(db, instance_ids):
+    """批量读取实例实测的节点类型，用代次隔开上次运行的记录。"""
+    catalogs = {}
+    for ids in batched(instance_ids, 400):
+        for item in db.scalars(
+            select(EngineNodeCatalog).where(EngineNodeCatalog.instance_id.in_(ids))
+        ):
+            catalogs[item.instance_id, item.generation] = frozenset(item.nodes)
+    return catalogs
+
+
+def _workflow_classes(strategy):
+    """从已发布的 API 工作流中提取本次调度必须由同一实例提供的执行节点。"""
+    return {node["class_type"] for node in strategy.content["workflow"].values()}
+
+
+def compatible(db, strategy, instance, *, catalogs=None):
     """领取时以运行代次的实际环境判断能否执行此版本。"""
-    return instance.configured and allows_manifest(db, strategy, instance.manifest)
-
-
-def _configured_manifests(instances):
-    """逐个取出已配置实例下一次启动使用的环境清单。"""
-    for instance in instances:
-        if instance.configured:
-            # 排空期间实际运行的环境与下一次启动配置的环境可能不同。
-            yield (instance.runtime or {}).get("configured_manifest", instance.manifest)
+    if not instance.configured:
+        return False
+    if catalogs is None:
+        catalogs = instance_catalogs(db, [instance.id])
+    catalog = catalogs.get((instance.id, instance.generation))
+    return (catalog is None or _workflow_classes(strategy) <= catalog) and allows_manifest(
+        db, strategy, instance.manifest
+    )
 
 
 def configured_for(db, strategy, instances=None):
     """判断是否仍存在兼容的部署配置，供新任务受理使用。"""
-    if instances is None:
-        instances = db.scalars(select(EngineInstance).where(EngineInstance.configured)).all()
-    return any(
-        allows_manifest(db, strategy, manifest) for manifest in _configured_manifests(instances)
-    )
+    return strategy.id in configured_strategy_ids(db, [strategy], instances)
 
 
-def configured_strategy_ids(db, strategies, instances):
+def configured_strategy_ids(db, strategies, instances=None):
     """批量读取本批版本的环境拒收记录，返回至少有一份兼容部署清单的版本 ID。"""
-    requirements = {strategy.id: strategy.content["requirements"] for strategy in strategies}
-    manifests = {canonical_digest(m): m for m in _configured_manifests(instances)}
+    required = {
+        strategy.id: (strategy.content["requirements"], _workflow_classes(strategy))
+        for strategy in strategies
+    }
+    if not required:
+        return set()
+    if instances is None:
+        instances = db.scalars(select(EngineInstance).where(EngineInstance.configured))
+    instances = [instance for instance in instances if instance.configured]
+    catalogs = instance_catalogs(db, (instance.id for instance in instances))
+    environments = []
+    for instance in instances:
+        # 配置已换版时，旧代次的缺失节点不能否决下一次启动后的受理。
+        manifest = (instance.runtime or {}).get("configured_manifest", instance.manifest)
+        catalog = (
+            catalogs.get((instance.id, instance.generation))
+            if manifest == instance.manifest
+            else None
+        )
+        environments.append((canonical_digest(manifest), manifest, catalog))
+    digests = {digest for digest, _, _ in environments}
     blocked = set()
     # 两个 IN 按版本和环境分别分块，避免把所有版本与环境的组合展开为 SQL 参数。
-    for version_ids in batched(requirements, 400):
-        for digests in batched(manifests, 400):
+    for version_ids in batched(required, 400):
+        for chunk in batched(digests, 400):
             blocked.update(
                 db.execute(
                     select(Incompatibility.strategy_version_id, Incompatibility.environment_digest)
                     .where(Incompatibility.strategy_version_id.in_(version_ids))
-                    .where(Incompatibility.environment_digest.in_(digests))
+                    .where(Incompatibility.environment_digest.in_(chunk))
                 )
             )
 
     return {
         version_id
-        for version_id, required in requirements.items()
+        for version_id, (requirements, classes) in required.items()
         if any(
-            (version_id, digest) not in blocked and matches_environment(required, manifest)
-            for digest, manifest in manifests.items()
+            (version_id, digest) not in blocked
+            and matches_environment(requirements, manifest)
+            and (catalog is None or classes <= catalog)
+            for digest, manifest, catalog in environments
         )
     }
 
@@ -433,9 +461,9 @@ def input_labels(schema, names):
     return labels
 
 
-def strategy_payload(db, version, settings_by_key=None):
+def strategy_payload(db, version, settings_by_key=None, *, accepted_ids=None):
     """构造策略版本摘要、表单及可受理性等用户可见字段。"""
-    accepted = configured_for(db, version)
+    accepted = configured_for(db, version) if accepted_ids is None else version.id in accepted_ids
     assist = effective_prompt_assist(db, version, settings_by_key)
     return {
         "strategy_version_id": version.id,

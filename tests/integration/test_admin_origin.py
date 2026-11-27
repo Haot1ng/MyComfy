@@ -7,13 +7,14 @@ from fastapi.testclient import TestClient
 
 from mycomfy.api.app import create_app
 from mycomfy.config import Settings
-from mycomfy.database.models import Audit, Base, User
-from mycomfy.database.session import make_sessions
+from mycomfy.database.models import Audit, Base, EngineInstance, EngineNodeCatalog, User
+from mycomfy.database.session import db_now, make_sessions
 from mycomfy.generation.state import canonical_digest
 
 HOST = "admin.example:8443"
 ORIGIN = f"https://{HOST}"
 PUBLISH = "/local/v1/strategy-versions"
+NODE_CHECK = "/local/v1/workflow-node-check"
 PROXY = {"Host": HOST}
 PAGE = {**PROXY, "Origin": ORIGIN, "X-MyComfy-Admin": "templates"}
 BEARER = {"Authorization": "Bearer fixture-maintenance"}
@@ -228,8 +229,9 @@ def test_same_user_management_and_maintenance_policy(backend, entry, origin, act
         assert admin.put(memberships, headers=write, json={"group_keys": []}).json() == empty
 
 
-def test_browser_publication_requires_same_origin_json_and_page_header(backend):
-    """外网模板发布要求明确的浏览器来源、专用请求头以及 JSON 载荷。"""
+@pytest.mark.parametrize("path", [PUBLISH, NODE_CHECK])
+def test_browser_publication_requires_same_origin_json_and_page_header(backend, path):
+    """外网模板预检与发布要求明确的浏览器来源、专用请求头以及 JSON 载荷。"""
     with listener(*backend) as admin:
         for headers in (
             PROXY,
@@ -242,11 +244,194 @@ def test_browser_publication_requires_same_origin_json_and_page_header(backend):
             {**PAGE, "Sec-Fetch-Site": "cross-site"},
             {**PAGE, "Authorization": "Bearer incorrect"},
         ):
-            assert admin.post(PUBLISH, headers=headers, json={}).status_code == 403
-        assert admin.post(PUBLISH, headers=PAGE, content=b"{}").status_code == 415
-        assert (
-            admin.post(PUBLISH, headers={**PAGE, "Content-Type": "text/plain"}).status_code == 415
+            assert admin.post(path, headers=headers, json={}).status_code == 403
+        assert admin.post(path, headers=PAGE, content=b"{}").status_code == 415
+        assert admin.post(path, headers={**PAGE, "Content-Type": "text/plain"}).status_code == 415
+
+
+def register_engine(db, instance_id, nodes=None, *, configured=True, catalog_generation=5):
+    """登记测试引擎及其真实节点清单，可模拟升级后新代次尚未采集清单。"""
+    db.add(
+        EngineInstance(
+            id=instance_id,
+            generation=5,
+            manifest={},
+            configured=configured,
+            heartbeat_at=db_now(db),
         )
+    )
+    db.flush()
+    if nodes is not None:
+        db.add(
+            EngineNodeCatalog(instance_id=instance_id, generation=catalog_generation, nodes=nodes)
+        )
+
+
+def director_strategy():
+    """构造由导演台规划、采样、官方节点写出视频组成的最小可发布策略。"""
+    return {
+        "strategy_key": "director",
+        "name": "人物替换导演台",
+        "workflow": {
+            "7": {"class_type": "DirectorPlan", "inputs": {}},
+            "40": {"class_type": "DirectorSample", "inputs": {"plan": ["7", 0]}},
+            "10": {
+                "class_type": "SaveVideo",
+                "inputs": {"video": ["40", 0], "filename_prefix": "v"},
+            },
+        },
+        "input_schema": {"type": "object", "properties": {}},
+        "bindings": [],
+        "requirements": {},
+        "progress_mapping": [],
+        "output_contract": [{"role": "main", "node_id": "10", "media_types": ["video/mp4"]}],
+        "scheduling": {},
+        "retry": {},
+        "artifacts": {},
+    }
+
+
+def test_node_check_requires_one_engine_to_support_all_nodes(backend):
+    """预检检查每台已配置引擎，发布会重验，不能拼凑两台机器的插件清单。"""
+    settings, factory = backend
+    plan = {"DirectorPlan": "custom_nodes.Director"}
+    sampler = {"DirectorSample": "custom_nodes.Director"}
+    base = {"SaveVideo": "comfy_extras.nodes_video"}
+    strategy = director_strategy()
+    with factory.begin() as db:
+        register_engine(db, "gpu0", base | plan | sampler)
+        register_engine(db, "gpu1", base | sampler)
+        register_engine(db, "removed", base | plan | sampler, configured=False)
+
+    with listener(settings, factory) as admin:
+        preview = admin.post(NODE_CHECK, headers=PAGE, json=strategy["workflow"])
+        assert preview.status_code == 200, preview.text
+        report = preview.json()
+        assert report["status"] == "ok"
+        sources = {item["class_type"]: item["source"] for item in report["nodes"]}
+        assert sources == {
+            "DirectorPlan": "custom",
+            "DirectorSample": "custom",
+            "SaveVideo": "official",
+        }
+
+        # 预览后第一台引擎的版本变化。另一台有采样器，但缺导演台，停用的引擎不参与。
+        with factory.begin() as db:
+            db.get(EngineInstance, "gpu0").generation = 6
+            catalog = db.get(EngineNodeCatalog, "gpu0")
+            catalog.generation, catalog.nodes = 6, base | plan
+        rejected = admin.post(PUBLISH, headers=PAGE, json=strategy)
+        assert rejected.status_code == 422, rejected.text
+        error = rejected.json()["error"]
+        assert error["code"] == "WORKFLOW_NODES_MISSING"
+        assert "DirectorPlan" in str(error["details"]) and "DirectorSample" in str(error["details"])
+        assert admin.get("/local/v1/strategies", headers=PROXY).json()["items"] == []
+
+        # 完整策略上传与直接 API 发布共用相同的代次检查结果。
+        report = admin.post(NODE_CHECK, headers=PAGE, json=strategy).raise_for_status().json()
+        assert report["status"] == "missing"
+        assert {item["id"]: item["missing"] for item in report["instances"]} == {
+            "gpu0": ["DirectorSample"],
+            "gpu1": ["DirectorPlan"],
+        }
+
+
+def test_canvas_node_check_ignores_claimed_official_origin_when_class_is_absent(backend):
+    """画布自称官方的节点也需匹配注册表，报错能定位同类节点的所有 ID。"""
+    settings, factory = backend
+    with factory.begin() as db:
+        register_engine(db, "gpu0", {"SaveVideo": "comfy_extras.nodes_video"})
+    nodes = [
+        {"id": node_id, "type": "UnregisteredNode", "properties": {"cnr_id": "comfy-core"}}
+        for node_id in (40, 42)
+    ]
+    with listener(settings, factory) as admin:
+        report = (
+            admin.post(NODE_CHECK, headers=PAGE, json={"nodes": nodes, "links": [], "version": 0.4})
+            .raise_for_status()
+            .json()
+        )
+        assert report["status"] == "missing"
+        assert report["instances"][0]["missing"] == ["UnregisteredNode"]
+        assert set(report["nodes"][0]["node_ids"]) == {"40", "42"}
+
+
+@pytest.mark.parametrize("catalog_generation", [None, 4])
+def test_unknown_node_catalog_allows_offline_publication(backend, catalog_generation):
+    """离线预配和旧代次清单不能证明当前缺少节点，保留离线发布能力。"""
+    settings, factory = backend
+    base = {"SaveVideo": "comfy_extras.nodes_video"}
+    with factory.begin() as db:
+        register_engine(db, "known", base)
+        if catalog_generation is None:
+            register_engine(db, "upgrading")
+        else:
+            register_engine(db, "upgrading", base, catalog_generation=catalog_generation)
+    with listener(settings, factory) as admin:
+        strategy = director_strategy()
+        report = admin.post(NODE_CHECK, headers=PAGE, json=strategy).raise_for_status().json()
+        assert report["status"] == "unknown"
+        assert {item["id"]: item["status"] for item in report["instances"]} == {
+            "known": "missing",
+            "upgrading": "unknown",
+        }
+        published = admin.post(PUBLISH, headers=PAGE, json=strategy)
+        assert published.status_code == 201, published.text
+
+
+def test_node_check_matches_pinned_and_pending_deployment(backend):
+    """策略只检查满足版本要求的部署，切换期间保留未知直到新环境上报。"""
+    settings, factory = backend
+    base = {"SaveVideo": "comfy_extras.nodes_video"}
+    installed = {**base, "DirectorPlan": "custom_nodes.director", "DirectorSample": None}
+    strategy = director_strategy()
+    strategy["requirements"] = {"comfyui": "pinned"}
+    with factory.begin() as db:
+        register_engine(db, "older", installed)
+        register_engine(db, "pinned", base)
+        db.get(EngineInstance, "pinned").manifest = {"comfyui": "pinned"}
+    with listener(settings, factory) as admin:
+        report = admin.post(NODE_CHECK, headers=PAGE, json=strategy).raise_for_status().json()
+        assert report["status"] == "missing"
+        assert [item["id"] for item in report["instances"]] == ["pinned"]
+        # 另一台配置已切换，但其旧代次支持全部节点不能作为新环境就绪的依据。
+        with factory.begin() as db:
+            db.get(EngineInstance, "older").runtime = {"configured_manifest": {"comfyui": "pinned"}}
+        report = admin.post(NODE_CHECK, headers=PAGE, json=strategy).raise_for_status().json()
+        assert report["status"] == "unknown"
+        assert {item["id"]: item["status"] for item in report["instances"]} == {
+            "older": "unknown",
+            "pinned": "missing",
+        }
+
+
+def test_pinned_package_absent_distinguishes_missing_class_and_version(backend):
+    """版本要求排除全部实例时，所有现有引擎均缺节点才能得出缺少节点类型的结论。"""
+    settings, factory = backend
+    strategy = director_strategy()
+    strategy["requirements"] = {"nodes": {"director": "new-revision"}}
+    with factory.begin() as db:
+        register_engine(db, "upgrading", {"SaveVideo": "nodes"})
+        db.get(EngineInstance, "upgrading").manifest = {"nodes": {"director": "old-revision"}}
+    with listener(settings, factory) as admin:
+        report = admin.post(NODE_CHECK, headers=PAGE, json=strategy).raise_for_status().json()
+        assert report["status"] == "missing"
+        rejected = admin.post(PUBLISH, headers=PAGE, json=strategy)
+        assert (
+            rejected.status_code == 422
+            and rejected.json()["error"]["code"] == "WORKFLOW_NODES_MISSING"
+        )
+        # 已加载所有类型，但安装的并非模板锁定版本，不能断言缺插件或伪报兼容。
+        with factory.begin() as db:
+            catalog = db.get(EngineNodeCatalog, "upgrading")
+            catalog.nodes = {
+                **catalog.nodes,
+                "DirectorPlan": "custom_nodes.director",
+                "DirectorSample": "custom_nodes.director",
+            }
+        report = admin.post(NODE_CHECK, headers=PAGE, json=strategy).raise_for_status().json()
+        assert report["status"] == "unknown"
+        assert admin.post(PUBLISH, headers=PAGE, json=strategy).status_code == 201
 
 
 def test_admin_requires_configured_host_and_physical_loopback(backend):

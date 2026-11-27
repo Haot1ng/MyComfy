@@ -75,16 +75,19 @@ MyComfy/
 │       ├── generation/                                        # 任务受理、调度与状态
 │       │   ├── __init__.py                                    # 任务生成包说明
 │       │   ├── jobs.py                                        # 受理批次、查询任务、取消与重试
+│       │   ├── node_check.py                                  # 检查模板的节点依赖并报告缺项
 │       │   ├── state.py                                       # 管理任务状态迁移、预算和重试结算
 │       │   ├── strategy.py                                    # 校验、发布策略版本并匹配引擎
 │       │   ├── worker.py                                      # 调度任务、核对引擎执行并恢复中断
-│       │   └── worker_health.py                               # 用协调器心跳判断 Worker 健康
+│       │   ├── worker_health.py                               # 用协调器心跳判断 Worker 健康
+│       │   └── workflow_nodes.py                              # 提取 API 工作流、画布与子图中的节点类型
 │       ├── engine/                                            # ComfyUI 安装、通信与进程管理
 │       │   ├── __init__.py                                    # ComfyUI 引擎包说明
 │       │   ├── adapter.py                                     # 提交工作流、核对队列及提取输出
 │       │   ├── bundled.py                                     # 校验并安装内置 H3 节点
 │       │   ├── deploy.py                                      # 按固定清单安装引擎、节点和模型
 │       │   ├── lockfile.py                                    # 生成 GPU 依赖及其哈希锁
+│       │   ├── node_catalog.py                                # 采集引擎当前代次注册的节点
 │       │   ├── progress.py                                    # 通过 WebSocket 采集节点进度
 │       │   ├── recipe.py                                      # 将引擎配方解析为固定安装清单
 │       │   ├── runtime.py                                     # 管理引擎实例、运行代次及优雅停机
@@ -158,6 +161,7 @@ MyComfy/
 │       ├── users.html                                         # 用户与分组管理页
 │       ├── users.js                                           # 分页查看用户并修改分组
 │       ├── workflow-graph.js                                  # 解析工作流并绘制交互式节点图
+│       ├── workflow-node-check.js                             # 展示引擎缺失节点与工作流位置
 │       └── presets/                                           # 内置工作流模板
 │           ├── example-h3-text-to-video.strategy.jsonc        # 逐字段注释的 H3 文生视频示例
 │           ├── h3-i2v.strategy.json                           # H3 图生视频预设
@@ -172,7 +176,8 @@ MyComfy/
 │       ├── 0004_user_groups.py                                # 新增用户组、成员及权限
 │       ├── 0005_manual_retry_count.py                         # 记录任务手动重试次数
 │       ├── 0006_prompt_providers.py                           # 新增扩写服务商和模板配置表
-│       └── 0007_traffic_rules.py                              # 新增限流规则表及审计字段
+│       ├── 0007_traffic_rules.py                              # 新增限流规则表及审计字段
+│       └── 0008_engine_node_catalogs.py                       # 保存引擎注册的节点清单
 ├── examples/                                                  # 可导入示例
 │   ├── deployment/
 │   │   └── h3-ref2va.models.yaml                              # 角色参考主模型的锁定来源和校验值
@@ -220,13 +225,15 @@ MyComfy/
 │   │   ├── test_contracts.py                                  # 核对批次摘要、策略约束与函数注释
 │   │   ├── test_deployment_config.py                          # 验证部署 YAML 解析与参数传递
 │   │   ├── test_engine_observation.py                         # 验证历史与队列查询、错误和任务匹配
+│   │   ├── test_engine_node_catalog.py                        # 验证节点清单采集、重试和换代
 │   │   ├── test_funnel_client.py                              # 验证双端口 Funnel 转发与清理
 │   │   ├── test_optional_image_bindings.py                    # 验证可选图片缺省时的节点与连线裁剪
 │   │   ├── test_segment_video.py                              # 验证 FFmpeg 分段编码、拼接与清理
 │   │   ├── test_segmented_templates.py                        # 核对 H3 分段模板与已部署节点
 │   │   ├── test_strategy_prompt_assist.py                     # 验证策略发布时的扩写字段约束
 │   │   ├── test_tunnel_settings.py                            # 验证测试隧道配置、设备名与端口
-│   │   └── test_worker_health.py                              # 验证 Worker 心跳与健康探针
+│   │   ├── test_worker_health.py                              # 验证 Worker 心跳与健康探针
+│   │   └── test_workflow_nodes.py                             # 验证画布及 API 工作流的节点提取
 │   └── web/                                                   # 前端 JavaScript 测试
 │       ├── session.test.mjs                                   # 验证前台会话、事件重连与原始参数显示
 │       ├── template-catalog.test.mjs                          # 验证模板分页与已发布版本优先显示

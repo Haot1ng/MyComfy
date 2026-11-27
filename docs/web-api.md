@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 用户前台 | `/api/v1` | 网页和 API 使用同源 HTTPS。公开写请求校验 `Origin`。注册和登录以外的接口需要有效会话，任务、素材、产物和通知均按当前用户授权。 |
 | 后台监控 | `/local/v1/monitor` | 免账号登录，只读查询。 |
-| 后台模板页 | `/local/v1/strategies`、`/local/v1/strategy-versions` | 查看已发布模板，或用同源 JSON 请求发布模板。 |
+| 后台模板页 | `/local/v1/strategies`、`/local/v1/workflow-node-check`、`/local/v1/strategy-versions` | 查看已发布模板、检查工作流节点和发布模板。 |
 | 后台用户管理页 | `/local/v1/users`、`/local/v1/groups`、`/local/v1/users/{user_id}/groups` | 查看全部账号、分组和权限，保存所选用户的新分组。 |
 | 后台 API 流量页 | `GET /local/v1/traffic`、`PUT /local/v1/traffic/rules` | 列出各入口、统计和同步状态，保存或恢复两层限流配置。[接口与示例](api-traffic.md) |
 | 后台提示词服务商页 | `/local/v1/prompt-providers` | 同源浏览器可管理模型配置、启用或停用服务。 |
@@ -221,8 +221,9 @@ API 默认业务端口为 `8000`，管理监听器绑定 `127.0.0.1:8001`。两�
 | --- | --- | --- |
 | `GET /local/v1/strategies` | 分页。 | `200 {items, next_cursor}`。每个系列返回最新版本的 `strategy_key, name, version, strategy_version_id`。 |
 | `GET /local/v1/strategy-versions/{version_id}` | 列表返回的不可变版本 ID。 | `200`，返回该版本的完整策略对象，包含工作流、参数绑定及输出契约；未知版本返回 `404`。 |
+| `POST /local/v1/workflow-node-check` | ComfyUI 画布、API 工作流或完整策略 JSON。 | `200 {status, nodes, instances}`。状态为 `ok`、`missing` 或 `unknown`。节点带类型、工作流 ID 和可识别的来源，各实例单独列出缺失类型。 |
 | `POST /local/v1/strategy-versions?create_only=true` | 完整策略对象，使用新的 `strategy_key`。 | 新建时返回 `201` 和版本 `1`。标识已存在时返回 `409 STRATEGY_ALREADY_EXISTS`。 |
-| `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。首次发布为 `1`，后续按同一标识递增，已发布的内容不可变。 |
+| `POST /local/v1/strategy-versions` | 完整策略对象。包含 `strategy_key, name, workflow, input_schema, bindings, requirements, progress_mapping, output_contract, scheduling, retry, artifacts`。 | `201 {strategy_version_id, strategy_key, version, content_digest}`。首次发布为 `1`，后续按同一标识递增。创建和发布时都重新检查节点，确认缺失时返回 `422 WORKFLOW_NODES_MISSING` 和节点位置。 |
 | `GET /local/v1/strategy-versions/{version_id}/prompt-assist-settings` | 选中的已发布版本。 | `200 {prompt_assist}`，返回当前有效的完整设置或 `null`。 |
 | `PUT /local/v1/strategy-versions/{version_id}/prompt-assist-settings` | `{"prompt_assist":{"instructions":"…","fields":["prompt"]}}`，或用 `{"prompt_assist":null}` 关闭。 | `200 {prompt_assist}`。保存系列设置后，下次扩写直接生效，工作流版本及摘要保持原值。 |
 | `GET /local/v1/prompt-providers` | 无。 | `200 {items}`，含 `id, name, base_url, model, active, has_api_key`。 |

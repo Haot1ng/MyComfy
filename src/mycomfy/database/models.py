@@ -115,6 +115,18 @@ class EngineInstance(Base):
     runtime: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class EngineNodeCatalog(Base):
+    """保存某一代 ComfyUI 实际报告的节点类型和来源模块。"""
+
+    __tablename__ = "engine_node_catalogs"
+
+    instance_id: Mapped[str] = mapped_column(
+        ForeignKey("engine_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(BigInteger)
+    nodes: Mapped[dict[str, str | None]] = mapped_column(JSON)
+
+
 class Incompatibility(Base):
     __tablename__ = "incompatibilities"
 

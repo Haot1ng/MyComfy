@@ -1,4 +1,4 @@
-"""在独立 SQLite 数据库和 Chromium 中核对模板辅助配置的创建和版本发布。"""
+"""在独立 SQLite 数据库和 Chromium 中核对模板导入、节点检查和版本发布。"""
 
 import json
 from pathlib import Path
@@ -10,7 +10,9 @@ import pytest
 
 from mycomfy.api.server import api_server
 from mycomfy.config import Settings
+from mycomfy.database.models import EngineInstance, EngineNodeCatalog
 from mycomfy.database.schema import migrate
+from mycomfy.database.session import make_sessions
 
 
 @pytest.fixture
@@ -46,6 +48,95 @@ def publish_template(page, origin, *, create=False):
     version = page.request.get(endpoint + "/" + receipt["strategy_version_id"])
     assert version.ok
     return receipt["version"], version.json()
+
+
+def test_import_reports_missing_nodes_and_rechecks_after_engine_upgrade(admin_origin, tmp_path):
+    """上传画布与粘贴完整策略均显示实际缺项，更新引擎后在原预览中重新检查再发布。"""
+    playwright = pytest.importorskip("playwright.sync_api")
+    with playwright.sync_playwright() as engine:
+        executable = which("chromium") or which("google-chrome") or engine.chromium.executable_path
+        if not Path(executable).is_file():
+            pytest.skip("未安装 Chromium")
+        with engine.chromium.launch(executable_path=executable) as browser:
+            page = browser.new_page()
+            source = page.request.get(admin_origin + "/presets/h3-t2v.strategy.json").json()
+            sessions = make_sessions(f"sqlite:///{tmp_path / 'templates.db'}")
+            catalog = {node["class_type"]: "nodes" for node in source["workflow"].values()}
+            with sessions.begin() as db:
+                db.add(EngineInstance(id="gpu0", generation=1, manifest=source["requirements"]))
+                db.flush()
+                db.add(EngineNodeCatalog(instance_id="gpu0", generation=1, nodes=catalog))
+            page.goto(admin_origin + "/templates.html")
+            canvas = {
+                "nodes": [
+                    {
+                        "id": 40,
+                        "type": "TimelineSampler",
+                        "properties": {"aux_id": "Studio/TimelineDirector"},
+                    }
+                ],
+                "links": [],
+            }
+            page.locator("#template-file").set_input_files(
+                {
+                    "name": "timeline.json",
+                    "mimeType": "application/json",
+                    "buffer": json.dumps(canvas).encode(),
+                }
+            )
+            check = page.locator("#workflow-node-check")
+            expect = playwright.expect
+            expect(check).to_contain_text("gpu0 缺少")
+            expect(check).to_contain_text("TimelineSampler · #40 · Studio/TimelineDirector")
+            expect(page.locator("#workflow-preview")).to_contain_text("TimelineSampler")
+
+            # 新增模板表单中选择 API 文件时也要立即提示，不必等到填写完名称、绑定再发布。
+            page.get_by_role("button", name="新增模板").click()
+            page.locator("#new-template-source").select_option("api")
+            page.locator("#new-workflow-file").set_input_files(
+                {
+                    "name": "workflow.json",
+                    "mimeType": "application/json",
+                    "buffer": b'{"replacement":{"class_type":"TimelineSampler","inputs":{}}}',
+                }
+            )
+            expect(page.locator("[data-node-check]")).to_contain_text(
+                "TimelineSampler · #replacement"
+            )
+            page.get_by_role("button", name="返回模板选择").click()
+            expect(check).to_contain_text("节点检查通过")
+
+            # API 图不携带节点包提示，仍按 class_type 检查并阻止已确认缺失的模板发布。
+            source["strategy_key"] = "replacement-sampler"
+            source["workflow"]["replacement"] = {"class_type": "TimelineSampler", "inputs": {}}
+            page.locator("#paste-toggle").click()
+            page.locator("#json-text").fill(json.dumps(source))
+            # 接口临时不可用时，草稿和预览均保留，在原页面重试即可取得真正的缺项。
+            page.route(
+                "**/local/v1/workflow-node-check", lambda route: route.fulfill(status=503), times=1
+            )
+            page.locator("#preview-paste").click()
+            expect(check).to_contain_text("HTTP 503")
+            expect(page.locator("#workflow-preview")).to_contain_text("TimelineSampler")
+            expect(page.locator("#publish-template")).to_be_disabled()
+            check.get_by_role("button", name="重新检查节点").click()
+            expect(check).to_contain_text("TimelineSampler · #replacement")
+            expect(page.locator("#publish-template")).to_be_disabled()
+
+            # 新代次真实登记了完整类型，刷新后继续发布原来的 JSON，保留用户的草稿。
+            with sessions.begin() as db:
+                db.get(EngineInstance, "gpu0").generation = 2
+                db.get(EngineNodeCatalog, "gpu0").generation = 2
+                db.get(EngineNodeCatalog, "gpu0").nodes = {
+                    **catalog,
+                    "TimelineSampler": "custom_nodes.TimelineDirector",
+                }
+            check.get_by_role("button", name="重新检查节点").click()
+            expect(check).to_contain_text("节点检查通过")
+            expect(check).to_contain_text("TimelineSampler · #replacement · TimelineDirector")
+            _, saved = publish_template(page, admin_origin)
+            assert saved["workflow"] == source["workflow"]
+            sessions.kw["bind"].dispose()
 
 
 def save_assist(page):

@@ -16,6 +16,7 @@ from mycomfy.database.models import (
     Asset,
     Batch,
     EngineInstance,
+    EngineNodeCatalog,
     Execution,
     Incompatibility,
     Job,
@@ -200,6 +201,39 @@ def setup_worker(mysql_sessions, tmp_path):
             )
         )
     return worker, engine
+
+
+@pytest.mark.mysql
+def test_claim_uses_catalog_of_one_engine(setup_worker):
+    """相同清单的两台引擎各自按实际注册节点领取，另一实例缺节点不会占用任务。"""
+    worker, _ = setup_worker
+    with worker.sessions.begin() as db:
+        first = db.get(EngineInstance, "engine")
+        second = EngineInstance(
+            id="gpu1",
+            generation=7,
+            manifest=first.manifest,
+            runtime=first.runtime,
+            accepting=True,
+            heartbeat_at=first.heartbeat_at,
+        )
+        db.add(second)
+        db.flush()
+        db.add_all(
+            [
+                EngineNodeCatalog(instance_id=first.id, generation=7, nodes={"LoadImage": "nodes"}),
+                EngineNodeCatalog(
+                    instance_id=second.id, generation=7, nodes={"SaveVideo": "nodes"}
+                ),
+            ]
+        )
+
+    worker.refresh_queue()
+    assert worker.claim("engine") is None
+    with worker.sessions() as db:
+        job = db.get(Job, "job")
+        assert job.attempt_count == 0 and job.blocked_reason is None
+    assert worker.claim("gpu1")
 
 
 @pytest.mark.mysql

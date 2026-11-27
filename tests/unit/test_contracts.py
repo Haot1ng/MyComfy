@@ -32,15 +32,53 @@ def test_draining_generation_uses_separate_admission_manifest():
     """部署换版时，新受理与旧执行分别使用配置清单和实际运行清单。"""
     db = Mock()
     db.get.return_value = None
+    db.execute.return_value = []
+    db.scalars.return_value = []
     instance = SimpleNamespace(
+        id="gpu0",
+        generation=1,
         configured=True,
         manifest={"comfyui": "old"},
         runtime={"configured_manifest": {"comfyui": "new"}},
     )
     for version, expected_admission in (("new", True), ("old", False)):
-        strategy = SimpleNamespace(id=version, content={"requirements": {"comfyui": version}})
+        strategy = SimpleNamespace(
+            id=version,
+            content={
+                "requirements": {"comfyui": version},
+                "workflow": {"1": {"class_type": "SaveVideo", "inputs": {}}},
+            },
+        )
         assert configured_for(db, strategy, [instance]) is expected_admission
         assert compatible(db, strategy, instance) is not expected_admission
+
+
+@pytest.mark.parametrize(
+    ("catalog_generation", "new_manifest", "can_admit", "can_claim"),
+    [(6, False, True, True), (7, False, False, False), (7, True, True, False)],
+)
+def test_node_catalog_only_applies_to_its_generation(
+    catalog_generation, new_manifest, can_admit, can_claim
+):
+    """切代或换配置时只按目标环境的清单判断缺失，保留未采集新环境时的离线受理。"""
+    db = Mock()
+    db.get.return_value = None
+    db.execute.return_value = []
+    db.scalars.return_value = [
+        SimpleNamespace(instance_id="gpu0", generation=catalog_generation, nodes={"Other": "nodes"})
+    ]
+    instance = SimpleNamespace(
+        id="gpu0",
+        generation=7,
+        configured=True,
+        manifest={"comfyui": "current"},
+        runtime={"configured_manifest": {"comfyui": "next"}} if new_manifest else {},
+    )
+    strategy = SimpleNamespace(
+        id="v", content={"requirements": {}, "workflow": {"1": {"class_type": "Required"}}}
+    )
+    assert compatible(db, strategy, instance) is can_claim
+    assert configured_for(db, strategy, [instance]) is can_admit
 
 
 def test_python_functions_have_documentation():

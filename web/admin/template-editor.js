@@ -1,4 +1,5 @@
-import { buildTemplateDraft, promptTextFields, readApiInputs, writePromptAssist } from "./template-draft.js";
+import { buildTemplateDraft, promptTextFields, readApiInputs, stripJsonComments, writePromptAssist } from "./template-draft.js";
+import { mountNodeCheck } from "./workflow-node-check.js";
 
 const presetPaths = new Map([
   ["h3-t2v", "./presets/h3-t2v.strategy.json"],
@@ -145,6 +146,7 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
         <label>选择 API 工作流文件<input id="new-workflow-file" type="file" accept=".json,.jsonc,application/json"></label>
         <label>工作流 JSON<textarea id="new-template-workflow" rows="5" spellcheck="false" placeholder="粘贴 ComfyUI API 格式的 JSON 或带注释的 JSONC"></textarea></label>
         <button type="button" data-read>读取节点</button>
+        <div class="node-check" data-node-check hidden></div>
         <div data-config hidden>
           <div class="editor-binding-head"><h3>工作台输入</h3><button type="button" data-add>添加输入</button></div>
           <p class="template-hint">仅添加用户需要填写的参数。其他参数沿用工作流里的值。</p>
@@ -172,6 +174,7 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
   const output = form.elements.outputTarget;
   const status = form.querySelector("[data-status]");
   const readButton = form.querySelector("[data-read]");
+  const nodeCheck = mountNodeCheck(form.querySelector("[data-node-check]"));
   let targets = [];
   let revision = 0;
   let fileRead = 0;
@@ -187,6 +190,7 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
 
   /** 清空失效的节点定位和绑定，避免在替换工作流后沿用旧 ID。 */
   function clearTargets() {
+    nodeCheck.clear();
     config.hidden = true;
     readButton.disabled = false;
     output.disabled = true;
@@ -201,6 +205,7 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
     clearTargets();
     try {
       const nodes = readApiInputs(workflow.value);
+      void nodeCheck.check(stripJsonComments(workflow.value));
       targets = nodes.flatMap(node => node.fields.map(field => ({
         id: node.id, nodeType: node.type, name: field.name, type: field.type,
       })));
@@ -244,7 +249,10 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
         draft.presetText = await response.text();
       }
       if (revision !== snapshot) return;
-      await onDraft(buildTemplateDraft(draft));
+      const text = buildTemplateDraft(draft);
+      // 完整模板还会带部署要求。预览展示这次核对结果，避免与单独读取工作流的结果混淆。
+      nodeCheck.clear();
+      await onDraft(text);
     } catch (error) {
       if (revision !== snapshot) return;
       status.textContent = error.message || "无法生成模板。";
@@ -259,6 +267,8 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
     invalidate();
     custom.hidden = source.value !== "api";
     custom.disabled = custom.hidden;
+    if (custom.hidden) nodeCheck.clear();
+    else if (!config.hidden) void nodeCheck.check(stripJsonComments(workflow.value));
   });
   workflow.addEventListener("input", () => {
     fileRead++;
@@ -318,6 +328,7 @@ export function mountTemplateEditor(container, {onDraft, onDirty}) {
     close() {
       fileRead++;
       revision++;
+      nodeCheck.clear();
       container.hidden = true;
     },
     /** 发布期间锁定表单，确保发布正文与用户核对的预览一致。 */

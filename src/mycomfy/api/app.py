@@ -43,7 +43,13 @@ from mycomfy.database.prompt_models import TemplatePromptSettings
 from mycomfy.database.session import db_now, make_sessions, new_id
 from mycomfy.errors import ApiError, InvalidSession, not_found
 from mycomfy.generation import jobs
-from mycomfy.generation.strategy import json_pointer, sql_publish, strategy_payload
+from mycomfy.generation.node_check import check_workflow_nodes
+from mycomfy.generation.strategy import (
+    configured_strategy_ids,
+    json_pointer,
+    sql_publish,
+    strategy_payload,
+)
 from mycomfy.ops.capacity import Capacity
 
 from . import auth
@@ -177,7 +183,11 @@ def _maintenance(request, settings, media_type, admin_origin):
     page = request.headers.getlist("x-mycomfy-admin")
     area = None
     if page == ["templates"] and (
-        (request.method == "POST" and request.scope["path"] == "/local/v1/strategy-versions")
+        (
+            request.method == "POST"
+            and request.scope["path"]
+            in {"/local/v1/strategy-versions", "/local/v1/workflow-node-check"}
+        )
         or is_template_prompt_settings_operation(request)
     ):
         area = "template"
@@ -504,7 +514,10 @@ def _public_strategy_page(db, query, limit, scope, position):
         if keys
         else {}
     )
-    result["items"] = [strategy_payload(db, version, settings) for version in versions]
+    accepted_ids = configured_strategy_ids(db, versions)
+    result["items"] = [
+        strategy_payload(db, version, settings, accepted_ids=accepted_ids) for version in versions
+    ]
     return result
 
 
@@ -520,6 +533,12 @@ def _latest_strategies():
 def _local_routes(settings, sessions, cache):
     """构造本机策略发布与维护重置密码路由。"""
     router = APIRouter(prefix="/local/v1")
+
+    @router.post("/workflow-node-check")
+    def workflow_node_check(body: dict):
+        """只读核对待导入文件中的节点，返回每台适用引擎的缺失项。"""
+        with sessions() as db:
+            return check_workflow_nodes(db, body)
 
     @router.post("/strategy-versions", status_code=201)
     def publish(request: Request, body: dict, create_only: bool = False):

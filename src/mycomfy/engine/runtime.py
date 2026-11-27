@@ -28,6 +28,7 @@ from mycomfy.database.schema import require_current_schema
 from mycomfy.database.session import db_now, make_sessions, new_id
 
 from .deploy import InstanceSpec, Record, write_json
+from .node_catalog import NodeCatalogCollector
 from .supervisor import descendants, process_identity
 
 # 只有由进程树是否退出引起的隔离，才能用内核重启凭据解除。
@@ -289,6 +290,7 @@ class Manager:
         """保存数据库会话工厂及本进程发起的子进程回收句柄。"""
         self.sessions = sessions
         self.children = {}
+        self.node_catalog = NodeCatalogCollector(sessions)
 
     def configure(self, configs):
         """登记部署能力，并立即停止向已移除或需升级的实例派单。"""
@@ -589,6 +591,9 @@ class Manager:
                 and not row.runtime.get("paused")
                 and not row.runtime.get("stop_requested")
             )
+        if reachable and config and config_hash(config) == state["config_hash"]:
+            # 只有本代进程树和监听端口通过探测后，才读取这个引擎的节点清单。
+            self.node_catalog.observe(snapshot.id, generation, state["base_url"])
 
 
 def administrative_action(sessions, name, instance_id, generation, reason):
@@ -690,6 +695,8 @@ def main(argv=None):
                 stopping.wait(2)
         finally:
             try:
+                # 多卡部署可能还有排队采集，不让这些请求延长容器停机。
+                manager.node_catalog.close()
                 # 容器主进程退出将终止 PID 命名空间，先等所有受管代次落盘退出凭据。
                 if args.stop_engines_on_exit and not _stop_generations(
                     sessions, select(EngineInstance), allow_empty=True

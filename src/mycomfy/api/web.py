@@ -40,6 +40,7 @@ ADMIN_FILES = (
     "template-example.js",
     "template-editor.css",
     "workflow-graph.js",
+    "workflow-node-check.js",
     "graph.css",
     "presets/example-h3-text-to-video.strategy.jsonc",
     "presets/h3-t2v.strategy.json",

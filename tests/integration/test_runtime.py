@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
-from mycomfy.database.models import Base, EngineInstance
+from mycomfy.database.models import Base, EngineInstance, EngineNodeCatalog
 from mycomfy.database.schema import migrate
 from mycomfy.engine import runtime
 from mycomfy.engine.runtime import (
@@ -226,13 +226,18 @@ child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"], 
 print("Cookie: highly-private-value", flush=True)
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        """模拟 ComfyUI 的轻量队列摘要接口。"""
-        if self.path != "/prompt":
+        """模拟轻量探活与真实注册节点两个独立接口。"""
+        if self.path == "/prompt":
+            data = b'{"exec_info": {"queue_remaining": 2}}'
+        elif self.path == "/object_info":
+            (state / "catalog-read").touch()
+            data = b'{"SaveVideo":{"input":{},"python_module":"nodes"},"Director":{"input":{},"python_module":"custom_nodes.Director"},"Legacy":{"input":{}}}'
+        else:
             self.send_error(404)
             return
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'{"exec_info": {"queue_remaining": 2}}')
+        self.wfile.write(data)
 http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 ''')
     cfg = EngineConfig(
@@ -256,12 +261,26 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             manager.tick(configs)
             with sessions.begin() as db:
                 row = db.get(EngineInstance, "local")
-                if row.accepting:
+                catalog = db.get(EngineNodeCatalog, "local")
+                if row.accepting and catalog:
                     break
             time.sleep(0.05)
         assert row.accepting and row.generation == 1
+        assert catalog.generation == row.generation
+        assert catalog.nodes == {
+            "SaveVideo": "nodes",
+            "Director": "custom_nodes.Director",
+            "Legacy": None,
+        }
+        # 管理器重启后复用同代清单，Docker 健康探测也独立于 /object_info。
+        marker = Path(row.runtime["state_dir"]) / "catalog-read"
+        marker.unlink()
+        manager = Manager(sessions)
+        manager.tick(configs)
+        assert not manager.node_catalog.pending
         assert row.runtime["pid"] == original.children["local"].pid
         assert runtime_ready(sessions, configs)
+        assert not marker.exists()
         assert not runtime_ready(sessions, {})
         assert not stop_generation(sessions, "local", 0)
         descendant = int((Path(row.runtime["state_dir"]) / "child-pid").read_text())

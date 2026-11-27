@@ -20,6 +20,8 @@
 .template-message:empty {margin:0}
 .template-message[data-tone="error"] {color:var(--red)}
 .template-message[data-tone="success"] {color:var(--accent)}
+.template-message[data-tone="warning"] {color:var(--amber)}
+.node-check button {margin-top:8px}
 #workflow-preview:not(:empty) {margin-top:14px;min-width:0}
 #paste-editor {margin-top:15px;display:grid;gap:8px;justify-items:start}
 #json-text {width:100%;resize:vertical;background:var(--base);border:1px solid var(--line);border-radius:7px;padding:10px;color:var(--text);font:13px/1.55 var(--mono)}

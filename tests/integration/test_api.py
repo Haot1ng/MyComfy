@@ -428,7 +428,13 @@ def test_batch_validation_reads_each_metadata_table_once(clients, mysql_sessions
             admit_batch(db, db.get(User, user_id), request, 20, store)
         readable.assert_called_once()
 
-    for table in ("strategy_versions", "engine_instances", "incompatibilities", "assets"):
+    for table in (
+        "strategy_versions",
+        "engine_instances",
+        "engine_node_catalogs",
+        "incompatibilities",
+        "assets",
+    ):
         assert counts[table] == 1, counts
     assert caught.value.status == 422
     assert [(e["index"], e["path"], e["code"]) for e in caught.value.details] == [

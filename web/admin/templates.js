@@ -1,4 +1,5 @@
 import { renderWorkflowPreview } from "./workflow-graph.js";
+import { mountNodeCheck } from "./workflow-node-check.js";
 import { renderAdminNav } from "./navigation.js";
 import { stripJsonComments } from "./template-draft.js";
 import { mountPromptAssist, mountTemplateEditor } from "./template-editor.js";
@@ -31,6 +32,7 @@ let creating = false;
 let catalog = builtins;
 let selectedUrl = null;
 let catalogRequest = null;
+const nodeCheck = mountNodeCheck(byId("workflow-node-check"), updateControls);
 const editor = mountTemplateEditor(byId("new-template-editor"), {
   onDirty: resetPreview,
   onDraft: text => loadPreview("新增模板", () => text),
@@ -66,6 +68,7 @@ function updateControls() {
     button.setAttribute("aria-pressed", String(button.dataset.url === selectedUrl));
   }
   editor.setBusy(busy);
+  nodeCheck.setBusy(busy);
   assistPanel.disabled = busy || publishText === null || (liveSettings !== null && !liveSettings.loaded);
   byId("assist-live-actions").hidden = liveSettings === null;
   byId("discard-assist").hidden = !dirty;
@@ -81,7 +84,7 @@ function updateControls() {
   saveAssistButton.disabled = busy || !liveSettings?.loaded || !dirty || review || !assist.valid() || publishText === null;
   saveAssistButton.textContent = savingAssist ? "正在保存…" : "保存扩写设置";
   // 发布始终针对图本身；先处理本地扩写草稿，以免误将“发布”当作“保存”。
-  publishButton.disabled = busy || publishText === null || (liveSettings ? dirty : !assist.valid());
+  publishButton.disabled = busy || publishText === null || !nodeCheck.allowsPublish() || (liveSettings ? dirty : !assist.valid());
   publishButton.textContent = publishing ? "正在发布…" : creating ? "创建并发布" : "发布新版本";
 }
 
@@ -92,6 +95,7 @@ function resetPreview() {
   previewedApi = null;
   selectedUrl = null;
   liveSettings = null;
+  nodeCheck.clear();
   byId("assist-section").hidden = true;
   assistPanel.hidden = true;
   message("assist-save-status", "");
@@ -131,6 +135,8 @@ async function loadPreview(label, read, sourceUrl = null, publishedTemplate = nu
     }
     const kind = renderWorkflowPreview(graph, raw);
     message("preview-message", "");
+    // 先显示连线图，独立检查已部署的节点。缺失提示保留在预览旁，便于按 ID 查找。
+    void nodeCheck.check(text);
     if (kind !== "strategy") {
       // 从当前预览继续创建模板时，维护者仍可在编辑区看到原来的注释。
       if (kind === "api") previewedApi = original;
@@ -329,6 +335,8 @@ async function publish() {
     const data = await response.json().catch(() => null);
     if (response.status >= 400 && response.status < 500) {
       message("publish-result", rejection(response.status, data), "error");
+      // 导入之后引擎可能换代。按发布时发现的变化重新读取可用节点，保留草稿与诊断。
+      if (data?.error?.code === "WORKFLOW_NODES_MISSING") void nodeCheck.check(publishText);
       return;
     }
     if (response.status !== 201 || !data?.strategy_version_id || !Number.isInteger(data.version)) {

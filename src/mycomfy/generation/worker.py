@@ -51,7 +51,7 @@ from .state import (
     set_blocked,
     settle_failure,
 )
-from .strategy import compatible, configured_for
+from .strategy import compatible, configured_strategy_ids, instance_catalogs
 from .worker_health import FILE_GRACE, POLL_GRACE, ignore_progress, report_health
 
 log = logging.getLogger(__name__)
@@ -164,14 +164,12 @@ class Worker:
                 # 重试只从本次可运行时间累计等待分。
                 job.enqueued_at = job.retry_at
                 advance(db, job, "QUEUED", now)
-            instances = db.scalars(select(EngineInstance).where(EngineInstance.configured)).all()
             versions = db.scalars(
                 select(StrategyVersion).join(Job).where(Job.state == "QUEUED").distinct()
             ).all()
+            accepted_ids = configured_strategy_ids(db, versions)
             for version in versions:
-                reason = (
-                    None if configured_for(db, version, instances) else "NO_COMPATIBLE_DEPLOYMENT"
-                )
+                reason = None if version.id in accepted_ids else "NO_COMPATIBLE_DEPLOYMENT"
                 query = select(Job).where(
                     Job.state == "QUEUED", Job.strategy_version_id == version.id
                 )
@@ -210,9 +208,11 @@ class Worker:
                     r.id,
                 ),
             )
+            # 同一代次只读取一份节点清单，避免逐任务重复传输完整清单。
+            catalogs = instance_catalogs(db, [instance.id]) if rankings else {}
             for row in rankings:
                 version = db.get(StrategyVersion, row.strategy_version_id)
-                if not compatible(db, version, instance):
+                if not compatible(db, version, instance, catalogs=catalogs):
                     continue
                 job = db.get(Job, row.id, with_for_update=True, populate_existing=True)
                 if job.state != "QUEUED":

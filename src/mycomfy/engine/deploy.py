@@ -88,6 +88,7 @@ class Deployment(EngineLayout):
     python: str = sys.executable
     requirements_lock: str
     requirements_sha256: Sha256
+    verify_sageattention: bool = False
 
 
 def file_digest(path):
@@ -229,6 +230,18 @@ def probe_gpu(gpu):
     return {"uuid": gpu_id, "name": name, "driver": driver, "memory_mib": int(memory)}
 
 
+def probe_environment(python, gpu, *, verify_sageattention):
+    """在选定 GPU 和已安装的虚拟环境内执行算子检查并读取成功回执。"""
+    with tempfile.TemporaryDirectory() as directory:
+        receipt = Path(directory) / "result.json"
+        command = [python, Path(__file__).with_name("gpu_probe.py"), receipt]
+        if verify_sageattention:
+            command.append("--sageattention")
+            print(f"正在验证 GPU {gpu} 的 SageAttention 算子。", flush=True)
+        subprocess.run(command, env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu}, check=True)
+        return json.loads(receipt.read_bytes())
+
+
 def provision(manifest_path, root, *, refresh_weights=False, prepared_weight=None):
     """安装不可变版本，生成经过 GPU 探测的实例配置。"""
     manifest_path, root = Path(manifest_path).resolve(), Path(root).resolve()
@@ -250,6 +263,9 @@ def provision(manifest_path, root, *, refresh_weights=False, prepared_weight=Non
         # 安装环境路径固定，避免移动虚拟环境后破坏其可执行文件内的绝对路径。
         # 纯 Python 内置节点按摘要独立安装，保持原有模型、ComfyUI 和 GPU 虚拟环境可复用。
         description = spec.model_dump(exclude={"instances", "bundled_nodes"})
+        # 未启用时保持已有发布目录的标识，继续使用已安装的虚拟环境。
+        if not spec.verify_sageattention:
+            description.pop("verify_sageattention")
         release_id = hashlib.sha256(json.dumps(description, sort_keys=True).encode()).hexdigest()
         release = root / "releases" / release_id
         release.mkdir(parents=True, exist_ok=True)
@@ -304,13 +320,8 @@ def provision(manifest_path, root, *, refresh_weights=False, prepared_weight=Non
                     raise ValueError(f"锁定环境缺少组件依赖 {reqs}")
         subprocess.run([python, "-m", "pip", "check"], check=True)
         for gpu, details in hardware.items():
-            env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu)
-            probe = (
-                "import json,torch; assert torch.cuda.is_available(), 'CUDA unavailable'; "
-                "print(json.dumps({'torch':torch.__version__, 'cuda':torch.version.cuda}))"
-            )
             details.update(
-                json.loads(subprocess.check_output([python, "-c", probe], env=env, text=True))
+                probe_environment(python, gpu, verify_sageattention=spec.verify_sageattention)
             )
         model_paths = {Path(model.path).parts[0] for model in spec.models.values()}
         extra = release / "model-paths.yaml"

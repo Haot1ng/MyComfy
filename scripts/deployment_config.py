@@ -335,7 +335,9 @@ def read_config(
         return variables, None, single_host
 
     # 仅传递引擎分组。安装器在准备版本、模型和依赖锁前进一步校验其结构。
-    engine = _object(engine, "engine", {"comfyui", "pytorch", "nodes", "models", "instances"})
+    engine = _object(
+        engine, "engine", {"comfyui", "pytorch", "sageattention", "nodes", "models", "instances"}
+    )
     for required in ("comfyui", "pytorch"):
         if required not in engine:
             raise ValueError(f"engine.{required} 为全栈部署必填项")

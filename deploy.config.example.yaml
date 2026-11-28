@@ -66,6 +66,15 @@ engine:
     torchvision: "0.26.0+cu130"  # 图像处理轮子的精确版本，须与 torch 及所选索引匹配。
     torchaudio: "2.11.0+cu130"    # 音频处理轮子的精确版本，须与 torch 及所选索引匹配。
 
+  # KJNodes 的 SageAttention 模式需要额外的 Python 包。省略或填 null 时不额外安装或探测。
+  # 如需从 PyPI 安装，取消下方两行注释。1.0.6 是供 RTX 30/40 系列尝试的 Triton 版本。
+  # sageattention:
+  #   version: "1.0.6"  # 精确版本；与节点和 PyTorch 一起锁定，安装后在每张配置的 GPU 上试算。
+  # 自备 wheel 时用下面两项代替 version。文件应匹配容器的 Python、Linux、PyTorch、CUDA 和 GPU。
+  # sageattention:
+  #   wheel: "wheels/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"  # 相对于 paths.deployment，使用实际文件名。
+  #   sha256: "<该 wheel 的 64 位小写 SHA-256>"  # 例如通过 sha256sum 读取。
+
   nodes: {}   # 额外安装的第三方节点仓库，空映射表示不额外检出。键为节点包标识，url、version 的格式与 comfyui 相同。
   # 使用额外节点时，可用下面的映射替换上面的 nodes: {}，填写实际仓库路径和版本。
   # nodes:

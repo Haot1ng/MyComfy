@@ -29,6 +29,22 @@ engine:
 
 权重按 SHA-256 存在 `<paths.data>/engines/model-objects/`。普通部署只获取当前配置中本机缺失的权重。缓存校验失败时会报告具体文件，可在 GPU 端运行 `python3 scripts/deploy.py --gpu-only --refresh-weights`，从配置的来源重新获取本次部署的权重。单机使用 `--single-host --refresh-weights`。本地文件来源从磁盘读取，HTTPS 来源会产生相应的下载流量。
 
+### 为节点启用 SageAttention
+
+部署器会读取 ComfyUI 和每个第三方节点仓库根目录的 `requirements.txt`。KJNodes 的 `PathchSageAttentionKJ` 在选择 `auto` 时才导入 `sageattention`，下列配置适用于其依赖文件中未声明该包的情况。[KJNodes 依赖清单](https://github.com/kijai/ComfyUI-KJNodes/blob/3f20054214fec9f9234fd3841ae6f1e4287948f6/requirements.txt) · [节点实现](https://github.com/kijai/ComfyUI-KJNodes/blob/3f20054214fec9f9234fd3841ae6f1e4287948f6/nodes/model_optimization_nodes.py#L30)
+
+在已有 YAML 的 `engine` 下加入 `sageattention`。例如，RTX 30/40 系列可尝试 PyPI 的 Triton 版本。
+
+```yaml
+engine:
+  sageattention:
+    version: "1.0.6"
+```
+
+对于需要原生 CUDA 扩展的版本，可以把适配目标 GPU、Linux、Python、PyTorch 和 CUDA 版本的 SageAttention wheel 放到 `paths.deployment` 下，将 `version` 换成 `wheel` 和 `sha256`。相对路径和文件摘要的示例见部署模板。省略 `sageattention` 时沿用原引擎配置。[部署模板](../deploy.config.example.yaml)
+
+运行 `python3 scripts/deploy.py --single-host`，分机部署在 GPU 机使用 `--gpu-only`。安装器将包和节点的依赖写入同一份哈希锁，在引擎虚拟环境安装，并在每张配置的 GPU 上实际执行一次 H3 使用的 128 维 BF16 注意力计算。全部通过后才发布新的实例清单。日常用 `--no-build` 启动会复用上一次部署的环境。
+
 ## 五图 H3 分段编码模板
 
 需要用五张图生成 20 秒视频时，可导入 [384×384 模板](../examples/strategies/h3-five-image-20s-segmented-384.strategy.json) 或 [640×640 模板](../examples/strategies/h3-five-image-20s-segmented-640.strategy.json)。内存紧张的机器可先使用 384 版。两版均保留全片风格提示和四段可分别编辑的运镜。

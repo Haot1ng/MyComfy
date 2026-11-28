@@ -161,7 +161,10 @@ def test_single_host_no_build_starts_from_existing_images(run_deploy, example_co
     instances.write_text(existing)
     example_config["single_host"] = False
     # 已安装的 GPU 实例来自持久清单，启动时只需用镜像选择项定位本地标签。
-    example_config["engine"] = {"ref2va_in_image": True}
+    example_config["engine"] = {
+        "ref2va_in_image": True,
+        "sageattention": {"wheel": "wheels/moved.whl", "sha256": "0" * 64},
+    }
     example_config["paths"]["data"] = "existing-data"
     example_config["ports"].update(api=18000, admin=18001)
     config = config_dir / "local.yaml"
@@ -194,6 +197,25 @@ def test_single_host_no_build_requires_installed_engine(launch):
     assert result.returncode != 0
     assert "engines.json" in result.stderr
     assert not any({"up", "build", "pull", "run"}.intersection(call) for call in calls)
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"version": "1.0.6"},
+        {"wheel": "wheels/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl", "sha256": "1" * 64},
+    ],
+)
+def test_gpu_deployment_forwards_optional_sageattention(
+    checkout, run_deploy, example_config, tmp_path, option
+):
+    """GPU 部署将附加依赖随配方提交给安装器，安装器在目标容器中解析与验证。"""
+    example_config["engine"]["sageattention"] = option
+    (checkout / "deploy.config.yaml").write_text(json.dumps(example_config))
+    result, _ = run_deploy("--gpu-only")
+    assert result.returncode == 0, result.stderr
+    submitted = json.loads((tmp_path / "submitted-recipe.json").read_text())
+    assert submitted["sageattention"] == option
 
 
 @pytest.mark.parametrize("action", ["--stop", "--test"])

@@ -9,11 +9,12 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from mycomfy.cli import main
-from mycomfy.engine import bundled, deploy
+from mycomfy.engine import bundled, deploy, gpu_probe
 from mycomfy.engine.runtime import load_config
 
 
@@ -58,6 +59,7 @@ def make_local_wheel(path):
             "torch.py",
             '''
 from types import SimpleNamespace
+print("GPU extension diagnostic")
 __version__ = "test"
 version = SimpleNamespace(cuda="test")
 def available():
@@ -118,6 +120,13 @@ def test_verified_deploy_twice_offline(tmp_path, monkeypatch):
     assert cfg.manifest["comfyui"] == engine["commit"]
     assert cfg.manifest["nodes"]["Example"] == node["commit"]
     assert cfg.manifest["hardware"]["torch"] == "test"
+    legacy = deploy.Deployment.model_validate(spec).model_dump(
+        exclude={"instances", "bundled_nodes", "verify_sageattention"}
+    )
+    assert (
+        Path(cfg.python).parents[2].name
+        == hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
+    )
     expected = cfg_path.read_bytes()
     model.unlink()
     deploy.provision(manifest, root)
@@ -145,6 +154,82 @@ def test_verified_deploy_twice_offline(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="摘要不符"):
         deploy.provision(manifest, root)
     assert cfg_path.read_bytes() == expected
+
+
+def test_sageattention_probes_each_gpu_before_publishing(tmp_path, monkeypatch):
+    """旧清单在任一张卡验收失败时保留，成功重试后每个实例都有自己的回执。"""
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
+    monkeypatch.setattr(deploy, "probe_gpu", lambda gpu: {"uuid": gpu})
+    engine = create_repository(tmp_path / "source", {"main.py": ""})
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("")
+    spec = {
+        "comfyui": engine,
+        "models": {},
+        "requirements_lock": str(lock),
+        "requirements_sha256": deploy.file_digest(lock),
+        "verify_sageattention": True,
+        "instances": [
+            {
+                "id": f"gpu{i}",
+                "gpu": str(i),
+                "port": 8188 + i,
+                "timeout_seconds": 10,
+                "observation_seconds": 10,
+                "reconcile_seconds": 10,
+            }
+            for i in range(2)
+        ],
+    }
+    manifest = tmp_path / "deployment.json"
+    manifest.write_text(json.dumps(spec))
+    root = tmp_path / "install"
+    root.mkdir()
+    config = root / "engines.json"
+    config.write_text("previous")
+    checked = []
+
+    def probe(python, gpu, *, verify_sageattention):
+        """在首次部署的第二张卡上模拟算子不兼容，第二次部署正常。"""
+        assert verify_sageattention and Path(python).is_relative_to(root / "releases")
+        checked.append(gpu)
+        if len(checked) == 2:
+            raise subprocess.CalledProcessError(1, "GPU probe")
+        return {"torch": "test", "cuda": "test", "sageattention": "1.0.6"}
+
+    monkeypatch.setattr(deploy, "probe_environment", probe)
+    with pytest.raises(subprocess.CalledProcessError):
+        deploy.provision(manifest, root)
+    assert config.read_text() == "previous" and set(checked) == {"0", "1"}
+
+    published = load_config(deploy.provision(manifest, root))
+    assert sorted(checked) == ["0", "0", "1", "1"]
+    assert all(c.manifest["hardware"]["sageattention"] == "1.0.6" for c in published.values())
+
+
+def test_sageattention_h3_gpu_check(monkeypatch):
+    """核对真实探针调用的布局、形状和类型，算子结果不合格时拒绝通过。"""
+    torch, sage = MagicMock(), MagicMock()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "sageattention", sage)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setattr(gpu_probe, "version", lambda name: "1.0.6")
+    torch.__version__ = "test"
+    torch.version.cuda = "test"
+    torch.cuda.get_device_name.return_value = "Test GPU"
+    torch.cuda.get_device_capability.return_value = (8, 9)
+    q, k, v = sage.sageattn.return_value, object(), object()
+    torch.randn.return_value.unbind.return_value = q, k, v
+    assert gpu_probe.verify_gpu(True)["compute_capability"] == "8.9"
+    torch.randn.assert_called_once_with(3, 1, 2, 128, 128, device="cuda", dtype=torch.bfloat16)
+    sage.sageattn.assert_called_once_with(
+        q, k, v, tensor_layout="HND", is_causal=False, attn_mask=None
+    )
+    torch.cuda.synchronize.assert_called_once_with()
+
+    torch.isfinite.return_value.all.return_value.item.return_value = False
+    with pytest.raises(RuntimeError, match=r"SageAttention 验证失败：GPU=1"):
+        gpu_probe.verify_gpu(True)
 
 
 def test_partial_model_never_becomes_visible(tmp_path):

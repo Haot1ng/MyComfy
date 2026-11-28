@@ -29,7 +29,7 @@ from .deploy import (
     provision,
     write_json,
 )
-from .lockfile import generate_lock, validate_pytorch
+from .lockfile import EXACT_VERSION, generate_lock, validate_pytorch
 from .model_objects import reuse_model_object
 
 
@@ -54,6 +54,19 @@ class InputInstance(InstanceSpec):
     reconcile_seconds: int = Field(default=120, gt=0)
 
 
+class SageAttentionVersion(Record):
+    """从 Python 包索引解析指定版本的 SageAttention wheel。"""
+
+    version: str = Field(pattern=f"^{EXACT_VERSION.pattern}$")
+
+
+class SageAttentionWheel(Record):
+    """从部署输入目录读取与 GPU、Torch、CUDA 匹配的已知 wheel。"""
+
+    wheel: str = Field(min_length=1)
+    sha256: Sha256
+
+
 class Recipe(EngineLayout):
     """引擎容器收到的配置，只包含引擎部署所需参数。"""
 
@@ -61,6 +74,7 @@ class Recipe(EngineLayout):
     nodes: dict[Name, VersionedRepo] = Field(default_factory=dict)
     models: dict[Name, InputModel] = Field(default_factory=dict)
     pytorch: dict[str, str]
+    sageattention: SageAttentionVersion | SageAttentionWheel | None = None
     instances: list[InputInstance] = Field(
         min_length=1, default_factory=lambda: [InputInstance(id="gpu0", gpu="0", port=8188)]
     )
@@ -138,7 +152,25 @@ def pin_repo(repo, source_dir, base):
     return Repo(url=str(directory / "repo"), commit=resolved.commit)
 
 
-def resolve_lock(locked_repos, pytorch, directory):
+def sageattention_requirement(spec, base):
+    """生成解析器的受限输入；本地 wheel 即使复用旧锁也要核对配置摘要。"""
+    if spec is None:
+        return None
+    if isinstance(spec, SageAttentionVersion):
+        return f"sageattention=={spec.version}", None
+    if Path(spec.wheel).is_absolute() or urlsplit(spec.wheel).scheme:
+        raise ValueError("sageattention.wheel 请填写部署目录内的相对路径")
+    wheel = (base / spec.wheel).resolve()
+    if not wheel.is_relative_to(base):
+        raise ValueError("sageattention.wheel 超出部署目录")
+    if wheel.suffix != ".whl" or wheel.name.partition("-")[0].lower() != "sageattention":
+        raise ValueError("sageattention.wheel 需要 sageattention 包的 .whl 文件")
+    if not wheel.is_file() or file_digest(wheel) != spec.sha256:
+        raise ValueError(f"SageAttention wheel 缺失或 SHA-256 不匹配：{wheel.name}")
+    return f"sageattention @ {wheel.as_uri()}", spec.sha256
+
+
+def resolve_lock(locked_repos, pytorch, directory, *, sageattention=None):
     """为固定源码和当前 Python 平台生成一次带哈希锁，重试时核验已有结果。"""
     identity = {
         "repos": [repo.model_dump() for repo in locked_repos],
@@ -146,6 +178,9 @@ def resolve_lock(locked_repos, pytorch, directory):
         "python": list(sys.version_info[:3]),
         "platform": sysconfig.get_platform(),
     }
+    if sageattention is not None:
+        # 未启用时原样复用历史锁；启用或切换 wheel 时生成独立快照。
+        identity["sageattention"] = sageattention
     target = directory / fingerprint(identity)
     lock = target / "requirements-gpu.lock"
     if not target.exists():
@@ -155,8 +190,18 @@ def resolve_lock(locked_repos, pytorch, directory):
             bundle = Path(stage) / "bundle"
             bundle.mkdir()
             reqs = [Path(repo.url) / "requirements.txt" for repo in locked_repos]
+            if sageattention is not None:
+                requirement, pinned_hash = sageattention
+                extra = Path(stage) / "sageattention.txt"
+                extra.write_text(f"--only-binary sageattention\n{requirement}\n", encoding="utf-8")
+                reqs.append(extra)
             generated = bundle / lock.name
             generate_lock(pytorch, [req for req in reqs if req.is_file()], generated)
+            if sageattention is not None and pinned_hash is not None:
+                # uv 将实际解析到的 URL 和摘要写进锁，二次比对后再发布给 pip --require-hashes。
+                expected_line = f"{requirement} --hash=sha256:{pinned_hash}"
+                if expected_line not in generated.read_text(encoding="utf-8").splitlines():
+                    raise ValueError("解析到的 SageAttention wheel 与配置的文件或摘要不符")
             (bundle / "sha256").write_text(file_digest(generated), encoding="ascii")
             bundle.rename(target)
     expected = (target / "sha256").read_text(encoding="ascii")
@@ -170,6 +215,7 @@ def materialize(recipe, root, base):
     validate_pytorch(recipe.pytorch)
     base = Path(base).resolve()
     root = Path(root).resolve()
+    sageattention = sageattention_requirement(recipe.sageattention, base)
     models = {
         name: pin_model(model, base, root / "model-objects")
         for name, model in recipe.models.items()
@@ -182,7 +228,12 @@ def materialize(recipe, root, base):
         sources = generated / "sources"
         comfyui = pin_repo(recipe.comfyui, sources, base)
         nodes = {name: pin_repo(recipe.nodes[name], sources, base) for name in sorted(recipe.nodes)}
-        lock, sha = resolve_lock([comfyui, *nodes.values()], recipe.pytorch, generated / "locks")
+        lock, sha = resolve_lock(
+            [comfyui, *nodes.values()],
+            recipe.pytorch,
+            generated / "locks",
+            sageattention=sageattention,
+        )
         spec = Deployment(
             comfyui=comfyui,
             nodes=nodes,
@@ -191,7 +242,8 @@ def materialize(recipe, root, base):
             instances=recipe.instances,
             requirements_lock=str(lock),
             requirements_sha256=sha,
-        ).model_dump()
+            verify_sageattention=sageattention is not None,
+        ).model_dump(exclude={"verify_sageattention"} if sageattention is None else set())
         manifest = generated / "manifests" / fingerprint(spec) / "deployment.json"
         write_json(manifest, spec)
     return manifest

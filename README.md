@@ -87,6 +87,7 @@ MyComfy/
 │       │   ├── adapter.py                                     # 提交工作流、核对队列及提取输出
 │       │   ├── bundled.py                                     # 校验并安装内置 H3 节点
 │       │   ├── deploy.py                                      # 按固定清单安装引擎、节点和模型
+│       │   ├── gpu_probe.py                                   # 在引擎虚拟环境验证 CUDA 和可选的 SageAttention
 │       │   ├── lockfile.py                                    # 生成 GPU 依赖及其哈希锁
 │       │   ├── model_objects.py                               # 校验、缓存和刷新模型权重
 │       │   ├── node_catalog.py                                # 采集引擎当前代次注册的节点
@@ -340,6 +341,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | `redis.user`、`redis.password` | Redis 缓存账号和密码。两个服务的密码均填原值，由脚本编码连接串。 |
 | `engine.comfyui` | ComfyUI 仓库地址与发布标签或 40 位 Git 提交号。 |
 | `engine.pytorch` | 模板在 Linux x86_64、Python 3.12 下使用 PyTorch `2.11.0+cu130`，目标机需要支持 CUDA 13.0 的 NVIDIA 驱动。 |
+| `engine.sageattention` | 为使用 SageAttention 的工作流指定 Python 包版本或本地 wheel，随引擎安装并在目标 GPU 上验证。默认关闭。[部署示例](docs/engine-deployment.md#为节点启用-sageattention) |
 | `engine.nodes`、`engine.models` | 默认 H3 工作流使用 ComfyUI 内置节点。五个模型文件均固定下载地址和 SHA-256。要让用户在工作台选择文生或图生视频，还需发布相应的业务策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
 | `engine.ref2va_in_image` | 设为 `true` 时，部署脚本准备 H3 Ref2VA 权重，再将本地文件打入引擎镜像，供「角色参考与动作」模板使用。默认关闭。[配置及导入步骤](docs/deploy-cli.md#部署角色参考视频模型) |

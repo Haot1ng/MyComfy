@@ -46,9 +46,9 @@ USER mycomfy
 CMD ["runtime", "serve", "--stop-engines-on-exit"]
 
 FROM engine AS engine-ref2va
-# 单独缓存权重层并校验官方摘要。X 允许非 root 用户进入父目录，权重文件本身只读。
-ADD --link --chmod=a=rX --checksum=sha256:9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779 \
-    https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/4b53a35191437de05370da548e59aeabe2a5a09a/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors \
+# 部署器先校验本机对象。BuildKit 从独立上下文复制这个文件，冷构建也直接复用本机权重。
+COPY --from=ref2va_weights --link --chmod=a=rX \
+    /9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779 \
     /opt/mycomfy/model-objects/9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779
 
 FROM ${PYTHON_IMAGE} AS gateway

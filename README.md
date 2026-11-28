@@ -37,6 +37,7 @@ MyComfy/
 │   ├── deploy.py                                              # 宿主机一键部署、停机及测试入口
 │   ├── deploy_tunnel.py                                       # 切换测试入口，退出时恢复
 │   ├── deployment_config.py                                   # 将 YAML 转为容器变量和引擎配方
+│   ├── deployment_weights.py                                  # 为镜像构建准备已校验的 Ref2VA 权重
 │   ├── funnel_client.py                                       # 启动并回收 Tailscale Funnel 转发
 │   ├── test_mysql.py                                          # 启动临时 MySQL 并运行测试
 │   ├── tunnel_settings.py                                     # 校验并保存隧道设备名和端口
@@ -87,6 +88,7 @@ MyComfy/
 │       │   ├── bundled.py                                     # 校验并安装内置 H3 节点
 │       │   ├── deploy.py                                      # 按固定清单安装引擎、节点和模型
 │       │   ├── lockfile.py                                    # 生成 GPU 依赖及其哈希锁
+│       │   ├── model_objects.py                               # 校验、缓存和刷新模型权重
 │       │   ├── node_catalog.py                                # 采集引擎当前代次注册的节点
 │       │   ├── progress.py                                    # 通过 WebSocket 采集节点进度
 │       │   ├── recipe.py                                      # 将引擎配方解析为固定安装清单
@@ -226,6 +228,7 @@ MyComfy/
 │   ├── unit/                                                  # 单元测试
 │   │   ├── test_contracts.py                                  # 核对批次摘要、策略约束与函数注释
 │   │   ├── test_deployment_config.py                          # 验证部署 YAML 解析与参数传递
+│   │   ├── test_deployment_weights.py                         # 验证 Ref2VA 本地复用及显式刷新
 │   │   ├── test_engine_observation.py                         # 验证历史与队列查询、错误和任务匹配
 │   │   ├── test_engine_node_catalog.py                        # 验证节点清单采集、重试和换代
 │   │   ├── test_funnel_client.py                              # 验证双端口 Funnel 转发与清理
@@ -296,7 +299,7 @@ uv run --locked python scripts/test_mysql.py -q tests/e2e/test_cloud_delivery.py
 
 **在同一台 GPU 机器上部署**，需要 Python 3、Docker Compose 2.30.0 或更新版本，以及可在容器中使用的 NVIDIA GPU。Linux 使用 NVIDIA 驱动和 NVIDIA Container Toolkit。Windows 下建议在 WSL 的 Linux 文件系统（如 `~/MyComfy`）中检出项目，使用支持 WSL 的 NVIDIA 驱动和 Docker Desktop 4.34 或更新版本的 WSL 2 后端，并启用 **Settings → Resources → Network → Enable host networking**，供 Core 和数据库迁移进程连接数据服务。网页入口通过 Docker 端口映射发布到 Windows。[Docker GPU 支持](https://docs.docker.com/desktop/features/gpu/) · [宿主网络](https://docs.docker.com/engine/network/drivers/host/#docker-desktop)
 
-**首次部署**可在新检出的仓库根目录直接运行以下命令。脚本读取仓库自带的中文注释模板 `deploy.config.example.yaml`，MySQL 和 Redis 的默认密码都是字符串 `123456`，数据库和网页端口仅绑定本机 `127.0.0.1`。模板预置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。首次部署 GPU 端会下载约 42 GB 模型，镜像、Python 环境和生成的视频还需额外磁盘空间。
+**首次部署**可在新检出的仓库根目录直接运行以下命令。脚本读取仓库自带的中文注释模板 `deploy.config.example.yaml`，MySQL 和 Redis 的默认密码都是字符串 `123456`，数据库和网页端口仅绑定本机 `127.0.0.1`。模板预置 ComfyUI v0.33.0 和 MiniMax H3 文生视频、图生视频共用的五个权重文件。GPU 端首次下载这五个文件约需 42 GB，镜像、Python 环境和生成的视频还需额外磁盘空间。后续完整部署按 SHA-256 复用已有权重，只获取本地缺失的模型。要从配置的来源重新获取全部权重，单机可运行 `python3 scripts/deploy.py --single-host --refresh-weights`。
 
 ```bash
 python3 scripts/deploy.py --single-host
@@ -339,7 +342,7 @@ cp -n deploy.config.example.yaml deploy.config.yaml
 | `engine.pytorch` | 模板在 Linux x86_64、Python 3.12 下使用 PyTorch `2.11.0+cu130`，目标机需要支持 CUDA 13.0 的 NVIDIA 驱动。 |
 | `engine.nodes`、`engine.models` | 默认 H3 工作流使用 ComfyUI 内置节点。五个模型文件均固定下载地址和 SHA-256。要让用户在工作台选择文生或图生视频，还需发布相应的业务策略。 |
 | `engine.instances`、`paths`、`ports` | 模板使用一张 GPU、本地数据目录和默认端口。按需调整 GPU 编号、目录或端口。`paths` 中填写的相对路径以本配置文件所在目录为基准。 |
-| `engine.ref2va_in_image` | 设为 `true` 时，Docker 在构建引擎镜像时下载 H3 Ref2VA 权重，供「角色参考与动作」模板使用。默认关闭。[配置及导入步骤](docs/deploy-cli.md#部署角色参考视频模型) |
+| `engine.ref2va_in_image` | 设为 `true` 时，部署脚本准备 H3 Ref2VA 权重，再将本地文件打入引擎镜像，供「角色参考与动作」模板使用。默认关闭。[配置及导入步骤](docs/deploy-cli.md#部署角色参考视频模型) |
 
 **已有独立 MySQL 和 Redis** 时，保留模板的 `single_host: false`，在配置中填写已有服务的地址与凭据，并运行 `python3 scripts/deploy.py`。先在 MySQL 准备好 `mycomfy` 库并授予应用账号迁移和读写权限。[部署脚本](scripts/deploy.py)
 

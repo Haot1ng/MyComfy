@@ -1,5 +1,6 @@
 """从部署脚本入口验证角色选择、单机启动顺序和数据服务失败时的行为。"""
 
+import hashlib
 import json
 import os
 import runpy
@@ -25,6 +26,7 @@ def checkout(tmp_path):
     )
     for resource in (
         Path("src/mycomfy/origins.py"),
+        Path("src/mycomfy/engine/model_objects.py"),
         Path("examples/deployment/h3-ref2va.models.yaml"),
     ):
         (repo / resource.parent).mkdir(parents=True)
@@ -199,6 +201,16 @@ def test_no_build_rejects_non_start_actions(run_deploy, action):
     """停机和临时隧道都不启动镜像，参数冲突时不调用 Docker。"""
     result, calls = run_deploy("--no-build", action)
     assert result.returncode == 2 and "--no-build" in result.stderr
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "action", ["--no-build", "--core-only", "--db-only", "--test", "--stop", "--compose"]
+)
+def test_refresh_weights_requires_engine_install(run_deploy, action):
+    """复用镜像、只操作业务服务或数据库时拒绝强制刷新，且不接触 Docker。"""
+    result, calls = run_deploy("--refresh-weights", action)
+    assert result.returncode == 2 and "--refresh-weights" in result.stderr
     assert not calls
 
 
@@ -496,6 +508,16 @@ def test_ref2va_build_and_gpu_install_use_one_config(
     checkout, run_deploy, example_config, tmp_path
 ):
     """从相同配置渲染 Compose 和 GPU 安装清单，核对角色模型和原有首帧模型同时注册。"""
+    # 使用带真实摘要的小文件贯通构建和安装入口，测试机不下载生产模型。
+    preset_file = checkout / "examples/deployment/h3-ref2va.models.yaml"
+    load_document = runpy.run_path(str(checkout / "scripts/config_document.py"))["load_document"]
+    preset = load_document(preset_file)
+    model = preset["engine"]["models"]["h3-ref2va"]
+    source = checkout / "var/deployment/test.safetensors"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"small test weight")
+    model.update(source=source.name, sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    preset_file.write_text(json.dumps(preset))
     example_config["engine"]["ref2va_in_image"] = True
     (checkout / "deploy.config.yaml").write_text(json.dumps(example_config))
     services = compose_services(run_deploy)
@@ -503,15 +525,27 @@ def test_ref2va_build_and_gpu_install_use_one_config(
     assert services["engine"]["image"] == "mycomfy-engine-ref2va:local"
     assert services["worker"]["build"]["target"] == "worker"
 
-    result, _ = run_deploy("--gpu-only")
+    # 只构建业务镜像不应准备 GPU 权重。单独构建 engine 时先准备本地命名上下文。
+    context = checkout / "var/data/engines/build-contexts/ref2va"
+    for args in (("build", "core"), ("build", "worker"), ("build", "--print", "engine")):
+        result, _ = run_deploy("--compose", *args)
+        assert result.returncode == 0 and not context.exists(), result.stderr
+    result, _ = run_deploy("--compose", "--profile", "database", "build", "engine")
     assert result.returncode == 0, result.stderr
+    assert (context / model["sha256"]).read_bytes() == source.read_bytes()
+    result, calls = run_deploy("--gpu-only", "--refresh-weights")
+    assert result.returncode == 0, result.stderr
+    install = next(call for call in calls if "deploy" in call)
+    assert "--refresh-weights" in install
+    assert install[install.index("--prepared-weight") + 1] == model["sha256"]
+    # 删除本地来源，验证下次部署复用同摘要的缓存，无需再次打开来源文件。
+    source.unlink()
+    result, calls = run_deploy("--gpu-only")
+    assert result.returncode == 0, result.stderr
+    assert all("--refresh-weights" not in call for call in calls)
     recipe = json.loads((tmp_path / "submitted-recipe.json").read_text())
     assert "ref2va_in_image" not in recipe
-    load_document = runpy.run_path(str(checkout / "scripts/config_document.py"))["load_document"]
-    preset = load_document(checkout / "examples/deployment/h3-ref2va.models.yaml")["engine"][
-        "models"
-    ]
-    assert recipe["models"] == {**example_config["engine"]["models"], **preset}
+    assert recipe["models"] == {**example_config["engine"]["models"], "h3-ref2va": model}
 
 
 @pytest.mark.parametrize(

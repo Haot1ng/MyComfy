@@ -27,6 +27,8 @@ engine:
 
 安装引擎时，临时容器会检出 ComfyUI 和节点，读取各自的 `requirements.txt`，生成带哈希的依赖锁并安装。脚本打印本次使用的锁和清单路径。两者存放在数据目录的 `engines/generated/` 下，实际运行配置为 `engines/engines.json`。相同输入重复部署时复用已解析的版本和依赖锁。
 
+权重按 SHA-256 存在 `<paths.data>/engines/model-objects/`。普通部署只获取当前配置中本机缺失的权重。缓存校验失败时会报告具体文件，可在 GPU 端运行 `python3 scripts/deploy.py --gpu-only --refresh-weights`，从配置的来源重新获取本次部署的权重。单机使用 `--single-host --refresh-weights`。本地文件来源从磁盘读取，HTTPS 来源会产生相应的下载流量。
+
 ## 五图 H3 分段编码模板
 
 需要用五张图生成 20 秒视频时，可导入 [384×384 模板](../examples/strategies/h3-five-image-20s-segmented-384.strategy.json) 或 [640×640 模板](../examples/strategies/h3-five-image-20s-segmented-640.strategy.json)。内存紧张的机器可先使用 384 版。两版均保留全片风格提示和四段可分别编辑的运镜。

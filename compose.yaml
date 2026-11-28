@@ -167,6 +167,8 @@ services:
     build:
       context: .
       target: "${MYCOMFY_ENGINE_BUILD_TARGET:-engine}"
+      additional_contexts:
+        ref2va_weights: "${MYCOMFY_REF2VA_CONTEXT:-./examples/deployment}"
     image: mycomfy-${MYCOMFY_ENGINE_BUILD_TARGET:-engine}:local
     gpus: all
     init: true

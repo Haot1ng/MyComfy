@@ -48,10 +48,11 @@ public:
   trusted_proxy_cidrs: []           # 可信上游代理的 IP 或 CIDR 字符串列表，如 ["10.20.0.5/32"]。空列表按直连对端 IP 限流；仅信任列表中代理转发的客户端地址。
   # cookie_secure: true             # 是否给会话 Cookie 添加 Secure 标志。省略时随 origin 协议决定，HTTPS 为 true，HTTP 为 false。
 
-# 全栈或 GPU 端部署使用以下配置。默认下载 5 份 MiniMax H3 权重，共约 42 GB；另需预留引擎、依赖及视频磁盘空间。
+# 全栈或 GPU 端部署使用以下配置。首次准备默认 5 份 MiniMax H3 权重约需 42 GB。后续部署按 SHA-256 复用本地权重。
 engine:
-  # true 在 Docker 构建 engine 镜像时下载并校验约 21 GB 的 Ref2VA 权重，并把 h3-ref2va 加入引擎模型清单。
-  # GPU 部署时从镜像复制权重到持久模型缓存。首次使用需为镜像层和模型缓存分别预留约 21 GB，另需构建临时空间。
+  # true 将约 21 GB 的 Ref2VA 权重打入引擎镜像，并将 h3-ref2va 登记到模型清单。
+  # 构建优先使用本机权重。首次缺少权重时才下载，后续如需重新获取，部署时显式传 --refresh-weights。
+  # 启用后，持久模型缓存和镜像层各需约 21 GB 空间，另需构建临时空间。
   # false 或省略时使用普通 engine 镜像，引擎安装器按下方 models 的显式配置准备各模型。
   ref2va_in_image: false
 

@@ -134,7 +134,7 @@ def _connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, re
     }
 
 
-def _register_ref2va(engine):
+def register_ref2va(engine):
     """把镜像固定的参考模型加入安装清单，核对用户已声明的同名模型。"""
     preset = Path(__file__).resolve().parents[1] / "examples/deployment/h3-ref2va.models.yaml"
     expected = load_document(preset)["engine"]["models"]["h3-ref2va"]
@@ -145,6 +145,7 @@ def _register_ref2va(engine):
     model = models.setdefault("h3-ref2va", expected)
     if not isinstance(model, dict) or any(model.get(k) != expected[k] for k in ("path", "sha256")):
         raise ValueError("engine.models.h3-ref2va 的 path 和 sha256 须与镜像预置模型一致")
+    return model
 
 
 def read_config(
@@ -298,6 +299,12 @@ def read_config(
         **_connection_urls(mysql_auth, redis_auth, mysql_endpoint, engine_endpoint, redis_endpoint),
         "MYCOMFY_DATA_ROOT": directories["data"],
         "MYCOMFY_ENGINE_BUILD_TARGET": "engine-ref2va" if ref2va_in_image else "engine",
+        # 普通 engine 不消费附加上下文；给 Compose 一个始终可读的小目录。
+        "MYCOMFY_REF2VA_CONTEXT": str(
+            Path(directories["data"]) / "engines/build-contexts/ref2va"
+            if ref2va_in_image
+            else repo / "examples/deployment"
+        ),
         "MYCOMFY_CONFIG_DIR": directories["config"],
         "MYCOMFY_DEPLOYMENT_DIR": directories["deployment"],
         "MYCOMFY_GATEWAY_STATE_DIR": directories["gateway"],
@@ -333,5 +340,5 @@ def read_config(
         if required not in engine:
             raise ValueError(f"engine.{required} 为全栈部署必填项")
     if ref2va_in_image:
-        _register_ref2va(engine)
+        register_ref2va(engine)
     return variables, engine, single_host

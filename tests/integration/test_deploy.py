@@ -193,8 +193,124 @@ def test_image_model_installs_offline_and_reuses_persistent_cache(tmp_path, monk
     assert target.read_bytes() == b"verified-weights"
 
 
+def test_refresh_weights_verifies_origin_once_and_preserves_releases(tmp_path, monkeypatch):
+    """默认从镜像或缓存复用；显式刷新按摘要访问一次来源，失败保留共享旧对象。"""
+    payload = b"verified model"
+    digest = hashlib.sha256(payload).hexdigest()
+    models = {
+        name: deploy.ModelFile(
+            path=f"vae/{name}", source="https://example.invalid/w", sha256=digest
+        )
+        for name in ("first", "alias")
+    }
+    image = tmp_path / "image"
+    image.mkdir()
+    (image / digest).write_bytes(payload)
+    monkeypatch.setattr(deploy, "IMAGE_MODEL_OBJECTS", image)
+    calls = []
+    response = payload
+
+    def download(url, timeout):
+        """记录网络请求次数并返回本轮模拟的远端内容。"""
+        calls.append(url)
+        return io.BytesIO(response)
+
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", download)
+    root = tmp_path / "engines"
+    active = root / "releases" / "active"
+    previous = root / "releases" / "previous"
+    cached = root / "model-objects" / digest
+    deploy.install_models(models, root, previous, tmp_path)
+    deploy.install_models(models, root, active, tmp_path)
+    assert calls == []
+    original_inode = cached.stat().st_ino
+    # Host 的镜像构建可以先刷新同一摘要；后续安装仅校验已落盘的对象。
+    deploy.install_models(
+        models, root, active, tmp_path, refresh_weights=True, prepared_weight=digest
+    )
+    assert calls == []
+    deploy.install_models(models, root, active, tmp_path, refresh_weights=True)
+    assert len(calls) == 1
+    assert cached.stat().st_ino == original_inode
+    response = b"wrong data"
+    with pytest.raises(ValueError, match="摘要不符"):
+        deploy.install_models(models, root, active, tmp_path, refresh_weights=True)
+    assert len(calls) == 2
+    assert cached.read_bytes() == payload
+    assert cached.stat().st_ino == original_inode
+    assert list(cached.parent.iterdir()) == [cached]
+    # 历史版本的硬链接也指向损坏对象，修复后这两个版本都能读取完整权重。
+    cached.write_bytes(b"damaged")
+    with pytest.raises(ValueError, match="摘要不符"):
+        deploy.install_models(models, root, active, tmp_path)
+    assert len(calls) == 2
+    response = payload
+    deploy.install_models(models, root, active, tmp_path, refresh_weights=True)
+    assert len(calls) == 3
+    assert cached.read_bytes() == payload
+    for release in (active, previous):
+        for model in models.values():
+            assert (release / "models" / model.path).samefile(cached)
+
+
+def test_recover_weight_from_release_and_recheck_local_source(tmp_path):
+    """缓存路径缺失时从已有版本恢复，显式刷新则检查本地源文件的实际内容。"""
+    source = tmp_path / "source"
+    source.write_bytes(b"local")
+    model = deploy.ModelFile(path="vae/test", source=source.name, sha256=deploy.file_digest(source))
+    root = tmp_path / "engines"
+    release = root / "releases" / "active"
+    target = root / "model-objects" / model.sha256
+    deploy.install_models({"local": model}, root, release, tmp_path)
+    target.unlink()
+    source.unlink()
+    deploy.install_models({"local": model}, root, release, tmp_path)
+    assert target.samefile(release / "models" / model.path)
+    source.write_bytes(b"wrong")
+    with pytest.raises(ValueError, match="摘要不符"):
+        deploy.install_models({"local": model}, root, release, tmp_path, refresh_weights=True)
+    assert target.read_bytes() == b"local"
+
+
+def test_new_release_restores_generic_weight_from_previous_release(tmp_path, monkeypatch):
+    """新版本在缓存路径缺失时，从历史版本按摘要定位普通权重，不触发远端下载。"""
+    from mycomfy.engine.recipe import InputModel, pin_model
+
+    payload = b"generic encoder"
+    digest = hashlib.sha256(payload).hexdigest()
+    model = deploy.ModelFile(
+        path="text_encoders/sample.safetensors", source="https://example.invalid/te", sha256=digest
+    )
+    root = tmp_path / "engines"
+    # 多个版本可以使用相同文件名；只有内容正确的普通文件可以成为持久副本。
+    retained = root / "releases" / "old" / "models" / model.path
+    retained.parent.mkdir(parents=True)
+    retained.write_bytes(payload)
+    decoy = root / "releases" / "other" / "models" / model.path
+    decoy.parent.mkdir(parents=True)
+    decoy.write_bytes(b"an older encoder")
+
+    def unexpected_download(*args, **kwargs):
+        """已有任一经过验证的本地副本时，拒绝所有远端访问。"""
+        pytest.fail("恢复历史版本权重时触发了下载")
+
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", unexpected_download)
+    active = root / "releases" / "new"
+    deploy.install_models({"encoder": model}, root, active, tmp_path)
+    obj = root / "model-objects" / digest
+    assert obj.samefile(retained)
+    assert (active / "models" / model.path).samefile(retained)
+    assert not decoy.samefile(retained)
+
+    # 本地权重即使原始导入文件和缓存路径都已被移走，已知摘要仍可从旧版本恢复。
+    obj.unlink()
+    imported = InputModel(path=model.path, source="removed.bin", sha256=digest)
+    assert pin_model(imported, tmp_path, obj.parent).sha256 == digest
+    assert obj.samefile(retained)
+
+
 def test_ref2va_image_weight_matches_deployment_preset():
-    """防止镜像下载地址、校验和或模型对象路径与 GPU 部署预设发生偏移。"""
+    """确保镜像只从本地命名上下文复制已校验对象，目标路径与安装器保持一致。"""
     root = Path(__file__).resolve().parents[2]
     load_document = runpy.run_path(str(root / "scripts/config_document.py"))["load_document"]
     model = load_document(root / "examples/deployment/h3-ref2va.models.yaml")["engine"]["models"][
@@ -202,9 +318,10 @@ def test_ref2va_image_weight_matches_deployment_preset():
     ]
     dockerfile = (root / "Dockerfile").read_text().replace("\\\n", " ")
     target = dockerfile.split("FROM engine AS engine-ref2va\n", 1)[1].split("\nFROM ", 1)[0]
-    [download] = [line.split() for line in target.splitlines() if line.startswith("ADD ")]
-    assert f"--checksum=sha256:{model['sha256']}" in download
-    assert download[-2:] == [model["source"], str(deploy.IMAGE_MODEL_OBJECTS / model["sha256"])]
+    assert "ADD " not in target and "https://" not in target
+    [copy] = [line.split() for line in target.splitlines() if line.startswith("COPY ")]
+    assert "--from=ref2va_weights" in copy
+    assert copy[-2:] == ["/" + model["sha256"], str(deploy.IMAGE_MODEL_OBJECTS / model["sha256"])]
 
 
 def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, monkeypatch):
@@ -263,6 +380,28 @@ def test_recipe_keeps_tag_and_lock_but_detects_changed_local_model(tmp_path, mon
     assert original.bundled_nodes == {bundled.H3_NODE: bundled.node_digest(bundled.SOURCE)}
     assert original.models["video"].sha256 == deploy.file_digest(model)
     assert original.instances[0].id == "gpu0"
+
+    # 同一个镜像入口在显式刷新时将宿主已处理的摘要一起传给真正的安装器。
+    recipe_path = tmp_path / "input.json"
+    recipe_path.write_bytes(payload)
+    with monkeypatch.context() as patch:
+        invoked = []
+        patch.setattr(recipe, "provision", lambda *args, **kwargs: invoked.append((args, kwargs)))
+        digest = original.models["video"].sha256
+        main(
+            [
+                "deploy",
+                str(recipe_path),
+                "--base",
+                str(tmp_path),
+                "--root",
+                str(root),
+                "--refresh-weights",
+                "--prepared-weight",
+                digest,
+            ]
+        )
+        assert invoked == [((first, root), {"refresh_weights": True, "prepared_weight": digest})]
 
     # 输入标签由发布者移动。已归档的解析仍使用第一次实际部署的提交。
     subprocess.run(

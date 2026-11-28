@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from deployment_config import http_origin, read_config
+from deployment_config import http_origin, load_document, read_config, register_ref2va
 
 
 def select_config(repo, requested, *, testing):
@@ -43,6 +43,44 @@ def bind_source(service, target):
             # Compose 序列化配置时将路径内的字面量 $ 写成 $$，文件系统使用原字符。
             return Path(mount["source"].replace("$$", "$"))
     raise ValueError(f"Compose 配置中缺少目录挂载 {target}")
+
+
+def compose_builds_engine(arguments):
+    """识别显式构建 engine 的 Compose 命令，兼容不支持 build --print 的版本。"""
+    # 选项值也可能叫 engine，例如 --profile engine。仅用位置参数判断服务名。
+    common_values = {
+        "-f",
+        "-p",
+        "--file",
+        "--project-name",
+        "--project-directory",
+        "--profile",
+        "--env-file",
+        "--ansi",
+        "--progress",
+    }
+    build_values = {"--build-arg", "--builder", "--ssh", "--provenance", "--sbom", "-m", "--memory"}
+    tokens = iter(arguments)
+    services = []
+    building = False
+    for token in tokens:
+        if token in {"--dry-run", "--print", "--check", "--help", "-h"}:
+            return False
+        if token in common_values or token in (build_values if building else {"--parallel"}):
+            next(tokens, None)
+        elif not token.startswith("-"):
+            if building:
+                services.append(token)
+            elif token == "build":
+                building = True
+            else:
+                return False
+    # worker 仅在显式包含依赖时才构建 engine；单独构建其它服务无需权重。
+    return building and (
+        not services
+        or "engine" in services
+        or ("--with-dependencies" in arguments and "worker" in services)
+    )
 
 
 def prepare_gateway(services, repo, config_path, deploy_local_stack):
@@ -210,7 +248,19 @@ def main():
     parser.add_argument(
         "--no-build", action="store_true", help="直接用本地镜像启动服务，复用已安装的引擎和模型"
     )
+    parser.add_argument(
+        "--refresh-weights", action="store_true", help="部署 GPU 引擎时从配置来源重新获取权重"
+    )
     args = parser.parse_args()
+    if args.refresh_weights and (
+        args.no_build
+        or args.core_only
+        or args.db_only
+        or args.stop
+        or args.test
+        or args.compose is not None
+    ):
+        parser.error("--refresh-weights 仅用于安装 GPU 引擎，与 --no-build 及其他运维模式互斥")
     if args.no_build and (args.stop or args.test or args.compose is not None):
         parser.error("--no-build 用于启动服务，不能与 --stop、--test 或 --compose 一起使用")
     if args.stop and args.compose is not None:
@@ -250,6 +300,19 @@ def main():
             [*compose, *arguments], cwd=repo, env=process_env, check=True, **options
         )
 
+    def prepare_packaged_weight(model):
+        """为所选镜像准备独立的本地权重上下文，并使用当前部署的持久缓存。"""
+        from deployment_weights import prepare_ref2va_context
+
+        context = prepare_ref2va_context(
+            model,
+            Path(process_env["MYCOMFY_DATA_ROOT"]),
+            Path(process_env["MYCOMFY_DEPLOYMENT_DIR"]),
+            "mycomfy-engine-ref2va:local",
+            refresh=args.refresh_weights,
+        )
+        process_env["MYCOMFY_REF2VA_CONTEXT"] = str(context)
+
     if args.test:
         # 仅显式测试时加载 Tailscale 适配器，常规部署不依赖本机的隧道客户端。
         from deploy_tunnel import run_test_session
@@ -262,6 +325,10 @@ def main():
     if args.compose is not None:
         if not args.compose:
             parser.error("--compose 后需要命令，例如 ps")
+        if process_env["MYCOMFY_ENGINE_BUILD_TARGET"] == "engine-ref2va" and compose_builds_engine(
+            args.compose
+        ):
+            prepare_packaged_weight(register_ref2va(load_document(config_path)["engine"]))
         run_compose(*args.compose)
         return
 
@@ -306,8 +373,17 @@ def main():
     if deploy_local_stack:
         # 单机全栈在配置检查完成后启动数据层。显式角色仍只操作各自的服务。
         start_database()
+    install_options = ["--refresh-weights"] if args.refresh_weights else []
+    if recipe is not None and process_env["MYCOMFY_ENGINE_BUILD_TARGET"] == "engine-ref2va":
+        # 相同摘要可能在多个模板中使用；本轮已刷新的文件不在容器里重复下载。
+        model = recipe["models"]["h3-ref2va"]
+        prepare_packaged_weight(model)
+        if args.refresh_weights:
+            install_options.extend(["--prepared-weight", model["sha256"]])
     if not args.no_build:
         run_compose("build", *build)
+    else:
+        print("使用本地镜像和已安装的引擎，跳过权重下载和镜像构建。", flush=True)
 
     # 在具备 GPU 和持久卷的临时 engine 容器中安装，失败时保留已有服务和数据。
     if recipe is not None:
@@ -323,6 +399,7 @@ def main():
             "/deployment",
             "--root",
             str(Path(process_env["MYCOMFY_DATA_ROOT"]) / "engines"),
+            *install_options,
             input=json.dumps(recipe).encode("utf-8"),
         )
     # 分机时业务机已完成迁移。GPU 机同时指定 engine 和 worker，只启动这两个服务。

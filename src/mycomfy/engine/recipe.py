@@ -30,6 +30,7 @@ from .deploy import (
     write_json,
 )
 from .lockfile import generate_lock, validate_pytorch
+from .model_objects import reuse_model_object
 
 
 class VersionedRepo(Record):
@@ -90,12 +91,19 @@ def pin_model(model, base, objects):
     if urlsplit(source).scheme:
         if digest is None:
             raise ValueError(f"HTTPS 模型需要提供 SHA-256：{model.path}")
-    # 显式摘要的模型可从既有对象缓存恢复，即使原始导入文件已移走。
-    elif Path(source).exists() or digest is None or not (objects / digest).is_file():
+    elif Path(source).exists() or digest is None:
         actual = file_digest(Path(source))
         if digest is not None and digest != actual:
             raise ValueError(f"本地模型摘要不符 {model.path}")
         digest = actual
+    elif not (objects / digest).is_file():
+        # 原始导入文件已移走时，也允许从历史版本恢复已验证的本地对象。
+        if not objects.parent.is_dir():
+            raise FileNotFoundError(source)
+        with (objects.parent / "deploy.lock").open("a") as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            if not reuse_model_object(objects / digest, digest, model.path):
+                raise FileNotFoundError(source)
     return ModelFile(source=source, path=model.path, sha256=digest)
 
 
@@ -197,8 +205,15 @@ def main(argv=None):
         "--base", type=Path, default=Path("/deployment"), help="本地模型与源码的基准目录"
     )
     parser.add_argument("--root", type=Path, required=True, help="保存引擎及依赖锁的持久目录")
-    parser.add_argument("--check", action="store_true", help="解析并校验配置和依赖锁")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="解析并校验配置和依赖锁")
+    mode.add_argument(
+        "--refresh-weights", action="store_true", help="从各模型的配置来源显式刷新权重并校验"
+    )
+    parser.add_argument("--prepared-weight", metavar="SHA256", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.prepared_weight is not None and not args.refresh_weights:
+        parser.error("--prepared-weight 需要 --refresh-weights")
     raw = sys.stdin.buffer.read() if args.recipe == "-" else Path(args.recipe).read_bytes()
     manifest = materialize(Recipe.model_validate_json(raw), args.root, args.base)
     print("部署清单", manifest, flush=True)
@@ -209,4 +224,11 @@ def main(argv=None):
     )
     # 同一份生成的清单用于校验和安装，避免锁定后重新解析标签或依赖。
     if not args.check:
-        print(provision(manifest, args.root))
+        print(
+            provision(
+                manifest,
+                args.root,
+                refresh_weights=args.refresh_weights,
+                prepared_weight=args.prepared_weight,
+            )
+        )

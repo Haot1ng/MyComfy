@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +16,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import bundled
+from .model_objects import publish_verified_object, relink_model, reuse_model_object
 
 Name = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")]
 Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -115,12 +115,16 @@ def write_json(path, value):
             name.unlink(missing_ok=True)
 
 
-def copy_model(model, target, base):
-    """复用已校验的缓存，或从镜像、HTTPS、本地来源复制权重并原子发布。"""
+def copy_model(model, target, base, *, refresh=False):
+    """优先复用已校验的缓存和镜像，显式刷新时从配置的来源重新传输并校验。"""
     if target.exists():
-        if file_digest(target) != model.sha256:
+        print("校验持久权重缓存", model.path, flush=True)
+    cached = reuse_model_object(target, model.sha256, model.path)
+    if not refresh:
+        if cached:
+            return
+        if target.exists() or target.is_symlink():
             raise ValueError(f"已存在模型摘要不符，保留原文件 {model.path}")
-        return
     target.parent.mkdir(parents=True, exist_ok=True)
     source = urlsplit(model.source)
     if source.scheme and source.scheme != "https":
@@ -128,23 +132,58 @@ def copy_model(model, target, base):
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
         temporary = Path(output.name)
         try:
-            # 仅用同摘要镜像文件替代远端下载。显式指定的本地文件始终从原路径读取。
+            # 首次安装可离线使用镜像内置副本；显式刷新远端权重必须实际访问原地址。
             packaged = IMAGE_MODEL_OBJECTS / model.sha256
             if not source.scheme:
+                print("读取本地权重", model.path, flush=True)
                 stream = (base / model.source).open("rb")
-            elif packaged.is_file():
+            elif not refresh and packaged.is_file():
+                print("读取镜像内置权重", model.path, flush=True)
                 stream = packaged.open("rb")
             else:
+                print("显式重新下载权重" if refresh else "下载缺失权重", model.path, flush=True)
                 stream = urllib.request.urlopen(model.source, timeout=60)
+            digest = hashlib.sha256()
             with stream:
-                shutil.copyfileobj(stream, output, length=1024 * 1024)
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                    if not cached:
+                        output.write(chunk)
+            if digest.hexdigest() != model.sha256:
+                raise ValueError(f"模型内容摘要不符 {model.path}")
+            # 同一摘要的健康缓存继续使用原 inode，运行中的各版本仍共享同一份权重。
+            if cached:
+                return
             output.flush()
             os.fsync(output.fileno())
-            if file_digest(temporary) != model.sha256:
-                raise ValueError(f"模型内容摘要不符 {model.path}")
-            os.link(temporary, target)
+            publish_verified_object(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def install_models(models, root, release, base, *, refresh_weights=False, prepared_weight=None):
+    """按摘要准备一次模型数据，再将同一对象链接到各自的版本路径。"""
+    verified = set()
+    for model in models.values():
+        cached = root / "model-objects" / model.sha256
+        location = release / "models" / model.path
+        if location.is_symlink() or (location.exists() and not location.is_file()):
+            raise ValueError(f"模型路径存在冲突 {model.path}")
+        if model.sha256 not in verified:
+            # 宿主已刷新的镜像权重只能从持久对象交接；若对象丢失则提示重试。
+            prepared = model.sha256 == prepared_weight
+            if prepared and not cached.is_file():
+                raise ValueError(f"宿主已刷新的权重缺少持久缓存 {model.path}")
+            copy_model(model, cached, base, refresh=refresh_weights and not prepared)
+            verified.add(model.sha256)
+        location.parent.mkdir(parents=True, exist_ok=True)
+        if not location.exists():
+            os.link(cached, location)
+        elif not location.samefile(cached):
+            # 损坏缓存修复中断时，先前已修复的别名可能指向另一份同摘要文件。
+            if not refresh_weights and file_digest(location) != model.sha256:
+                raise ValueError(f"模型路径存在冲突 {model.path}")
+            relink_model(cached, location)
 
 
 def checkout(repo, target, base):
@@ -190,10 +229,15 @@ def probe_gpu(gpu):
     return {"uuid": gpu_id, "name": name, "driver": driver, "memory_mib": int(memory)}
 
 
-def provision(manifest_path, root):
+def provision(manifest_path, root, *, refresh_weights=False, prepared_weight=None):
     """安装不可变版本，生成经过 GPU 探测的实例配置。"""
     manifest_path, root = Path(manifest_path).resolve(), Path(root).resolve()
     spec = Deployment.model_validate_json(manifest_path.read_bytes())
+    if prepared_weight is not None and (
+        not refresh_weights
+        or prepared_weight not in {model.sha256 for model in spec.models.values()}
+    ):
+        raise ValueError("宿主已刷新的权重摘要必须是本次刷新清单中的模型")
     base = manifest_path.parent
     lock = (base / spec.requirements_lock).resolve()
     if file_digest(lock) != spec.requirements_sha256:
@@ -215,15 +259,14 @@ def provision(manifest_path, root):
             raise ValueError("ComfyUI 检出目录缺少 main.py")
         for name, node in spec.nodes.items():
             checkout(node, source / "custom_nodes" / name, base)
-        for model in spec.models.values():
-            cached = root / "model-objects" / model.sha256
-            copy_model(model, cached, base)
-            location = release / "models" / model.path
-            location.parent.mkdir(parents=True, exist_ok=True)
-            if not location.exists():
-                os.link(cached, location)
-            elif not location.samefile(cached):
-                raise ValueError(f"模型路径存在冲突 {model.path}")
+        install_models(
+            spec.models,
+            root,
+            release,
+            base,
+            refresh_weights=refresh_weights,
+            prepared_weight=prepared_weight,
+        )
         python = release / "venv" / "bin" / "python"
         if (
             not python.exists()

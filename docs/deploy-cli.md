@@ -7,12 +7,15 @@
 | 目的 | 在 WSL 中执行 |
 | --- | --- |
 | 首次安装或部署更新后的源码 | `python3 scripts/deploy.py --single-host` |
+| 从配置的来源重新获取全部引擎权重并部署 | `python3 scripts/deploy.py --single-host --refresh-weights` |
 | 使用本机已有镜像和已安装的引擎启动全套服务 | `python3 scripts/deploy.py --single-host --no-build` |
 | 查看所有服务的状态，包括已经退出的迁移容器 | `python3 scripts/deploy.py --compose --profile database ps -a` |
 | 临时分享已运行业务的工作台和后台 | `python3 scripts/deploy.py --test`，前台保留，按 Ctrl+C 恢复 |
 | 关闭电脑或 WSL 前优雅停机 | `python3 scripts/deploy.py --stop` |
 
 日常启动使用 `--single-host --no-build`。脚本让 Compose 跳过镜像构建和拉取，等 MySQL、Redis 健康，再按迁移依赖启动 Core、网关、引擎和 Worker。引擎直接读取上次安装生成的 `<数据目录>/engines/engines.json`，复用持久目录中的 ComfyUI 和模型。若本地镜像标签已更新，Compose 可重建对应容器。服务就绪后，脚本打印工作台和管理后台的访问地址。自定义配置示例为 `python3 scripts/deploy.py --config ./deploy.prod.yaml --single-host --no-build`。
+
+完整部署默认复用 `<paths.data>/engines/model-objects/` 中摘要匹配的文件，首次缺失才下载。换用新摘要只需获取缺少的那份。已有文件校验失败会报错，如需从来源重新获取本次配置的权重，可使用 `--refresh-weights`。
 
 更新运行中的单机部署时，先用当前检出版本运行 `python3 scripts/deploy.py --stop`，等在途任务排空并完成停机，再用 `git pull --ff-only origin main` 拉取源码，执行 `python3 scripts/deploy.py --single-host` 部署新版本。这样停机指令与现场镜像对应。首次用 YAML 接管已有部署时，先将现用数据库地址、账号、端口、目录和模型配置填入 `deploy.config.yaml`，再执行新版部署命令。
 
@@ -29,6 +32,7 @@
 | `--test-config ./share.qa.yaml` | 与 `--test` 一起指定设备和外部 HTTPS 端口。默认读取仓库的 `deploy.test.yaml`。首次无此文件时采用示例，两条转发注册成功后将实际设备名和端口保存到本机 `deploy.test.yaml`。 |
 | `--single-host` | 本次启用单机连接配置，并在本机部署数据库、业务端和 GPU 端。 |
 | `--no-build` | 使用所选配置对应的本地镜像启动，可搭配 `--single-host` 或按角色启动。启动 GPU 端时需要已安装的引擎。单机首次安装或更新引擎配方请运行 `--single-host`。 |
+| `--refresh-weights` | 在本次引擎部署中从配置的来源重新获取全部权重，下载完成后校验 SHA-256。本地来源从磁盘读取。可用于完整部署或 `--gpu-only`，与 `--no-build`、停机、测试和纯业务或数据库部署互斥。 |
 | `--db-only` | 在数据机启动项目自带的 MySQL、Redis，等待两者健康。 |
 | `--core-only` | 在业务机构建 `migrate`、`core`、`gateway`，执行迁移并启动 API、工作台和管理后台。先准备好数据库。 |
 | `--gpu-only` | 在 GPU 机构建 `engine`、`worker`，安装或校验引擎后启动两者。要求 MySQL 已完成迁移。 |
@@ -87,6 +91,7 @@ python3 scripts/deploy.py --compose --help
 | `var/deployment/` | 在 GPU 容器内只读挂载为 `/deployment`，供安装器解析 `engine` 分组引用的本地模型和 Git 仓库。可用 `paths.deployment` 指定宿主目录。 |
 | `var/data/engines/generated/` | 引擎安装器在此缓存固定版本源码，生成 `locks/<摘要>/requirements-gpu.lock` 和 `manifests/<摘要>/deployment.json`。这份锁固定 ComfyUI、节点和 PyTorch 的依赖。 |
 | `var/data/engines/model-objects/`、`var/data/engines/releases/` | 前者按 SHA-256 缓存模型；后者按版本保存 ComfyUI 源码、自定义节点、独立的 `venv`，并用硬链接引用已校验的权重。 |
+| `var/data/engines/build-contexts/ref2va/` | 为 Ref2VA 镜像构建单独提供已校验的权重文件。 |
 | `var/data/engines/engines.json` | 安装器生成的实例配置。常驻引擎管理器据此找到各实例的 Python、ComfyUI 入口、GPU 和端口。 |
 | `var/data/engines/instances/gpu0/g*/` | 每个启动代次的运行目录。模型加载或生成失败时看 `engine.log`；进程身份和退出记录分别在 `identity.json`、`ended.json`。 |
 | `var/stop/<项目名>.json` | 优雅停机期间记录待核验代次。退出凭据全部匹配后，部署脚本清除此记录。 |
@@ -114,15 +119,14 @@ python3 scripts/deploy.py --compose --help
 内置首帧模板使用 FL2VA，「角色参考与动作」模板使用 Ref2VA。两份主模型可以装在同一个引擎中。每个工作流的 `UNETLoader` 指定要加载的文件，调度器按模板要求的模型标识和 SHA-256 匹配引擎。
 
 1. 在已有 `deploy.config.yaml` 的 `engine:` 下添加 `ref2va_in_image: true`，与 `comfyui:` 同级。保留现有的模型、目录和实例配置。脚本自动登记 `h3-ref2va`。此模板还使用默认 H3 部署中的文本编码器、视频 VAE 和音频 VAE。
-2. 在 GPU 机运行下面的命令。第一条可提前构建带权重的镜像，构建阶段只需网络和支持 Dockerfile 前端 1.14 或更高版本的 BuildKit。已有任务时，第二条等待 Worker 排空并关闭旧引擎。第三条使用构建缓存，完成 GPU 探测、安装和启动。若原部署指定了 `--config`，三条命令均使用原文件。
+2. 如果 GPU 机已在运行，先等 Worker 排空并关闭旧引擎，再部署。沿用原先的 `--config`，以便脚本找到同一数据目录。分机时在 GPU 端运行以下命令。
 
    ```bash
-   python3 scripts/deploy.py --compose build engine
    python3 scripts/deploy.py --gpu-only --stop
    python3 scripts/deploy.py --gpu-only
    ```
 
-   构建器从锁定的 Hugging Face 版本下载约 **20.97 GB** 并校验 SHA-256，镜像标签为 `mycomfy-engine-ref2va:local`。首次安装时，引擎会把镜像中的文件复制到持久模型缓存并校验。镜像与数据目录各需约 21 GB，还应为 Docker 构建缓存和新的引擎虚拟环境留出空间。后续部署会复用已校验的模型缓存。[固定权重来源](../examples/deployment/h3-ref2va.models.yaml)
+   单机上的部署命令为 `python3 scripts/deploy.py --single-host`。如需提前只构建引擎镜像，可运行 `python3 scripts/deploy.py --compose build engine`。这两条入口都优先使用持久缓存。缓存缺失时，脚本可以从本机已有的 Ref2VA 镜像恢复权重。本地没有可用来源时才从锁定来源首次下载约 **20.97 GB**。Docker 从本地文件构建 `mycomfy-engine-ref2va:local`。即使清空 BuildKit 缓存，只要保留已校验的持久权重，重新构建时也可使用该文件。重新创建镜像层仍可能需要读取和写入约 21 GB 的本地数据。镜像和持久权重各需约 21 GB，另需为构建缓存与引擎虚拟环境留出空间。[固定权重来源](../examples/deployment/h3-ref2va.models.yaml)
 3. 更新 Core 和 Worker 后，在管理后台打开「工作流模板 → 打开 JSON 文件」，选择角色参考模板，点击「发布新版本」。工作台选择这个版本后，上传主图，在「场景与动作」中填写希望角色做什么。图 2 和图 3 均可留空，也可以只补其中一张。转头动作可补同一角色的侧面照，全身动作可补能看清服装和体态的照片。模板生成一个连续镜头，默认输出 640×384、24 fps、约 5.17 秒的 MP4。[角色参考模板](../examples/strategies/h3-character-reference.strategy.jsonc) · [ComfyUI 原生参考视频工作流](https://docs.comfy.org/tutorials/video/minimax/minimax-h3-native)
 4. 如需 AI 辅助，在后台选定生效的提示词服务商。工作台点击「扩写提示词」后，可预览并采用结果，也可直接提交原文。仅「场景与动作」字段参与扩写，参考图直接用于视频生成。完整编写要求位于模板的 `prompt_assist.instructions`。若这个模板系列已单独保存过扩写设置，后台设置优先。要更新指令，在「提示词扩写设置」勾选「为此模板启用提示词辅助」，将新指令粘贴到「给 AI 的编写要求」，选中「场景与动作」并保存。
 
@@ -156,7 +160,7 @@ Linux 业务机在共享局域网中部署时，建议使用 Docker Engine 28.0 
 
 1. **读取配置并准备挂载。** 脚本解析 Compose，确定端口、目录和部署用户的 UID/GID，准备维护令牌。单机模式下，宿主网络中的业务端使用回环地址和发布端口连接数据库；GPU 端使用 Compose 内网地址。
 2. **启动数据服务。** Compose 执行 `up -d --wait mysql redis`，等 MySQL、Redis 都健康后才继续。
-3. **构建应用镜像。** Compose 执行 `build migrate core gateway engine worker`，从当前 Git 检出目录读取 Dockerfile、源码和依赖锁，可复用已有构建缓存。
+3. **构建应用镜像。** Compose 执行 `build migrate core gateway engine worker`，从当前 Git 检出目录读取 Dockerfile、源码和依赖锁，可复用已有构建缓存。启用 `ref2va_in_image` 时，同时使用本机准备好的 Ref2VA 文件。
 4. **安装引擎。** 脚本用 `compose run --rm --no-deps -T` 启动临时 `engine` 容器。镜像入口 `python -m mycomfy.cli` 接收参数 `deploy - --base /deployment --root <数据目录>/engines`，其中 `-` 表示从标准输入读取引擎配方。宿主脚本从 YAML 提取 `engine` 分组，序列化为 JSON 后写入安装器的标准输入。安装器固定源码版本、生成依赖锁和清单、校验模型并验证 GPU。安装完成后临时容器退出，结果保存在宿主机挂载目录。
 5. **迁移并启动常驻服务。** Compose 执行 `up -d --wait --no-build core gateway engine worker`。依赖要求 `migrate` 成功退出，然后启动常驻进程。引擎容器启动后 Worker 即可开始核对任务。部署业务端时，脚本等服务就绪后打印工作台和管理后台地址。`--gpu-only` 只打印业务机的工作台地址。
 

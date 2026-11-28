@@ -334,6 +334,7 @@ def test_canvas_and_api_downloads_import_the_same_workflow(admin_origin, tmp_pat
             guidance = page.locator("#publish-description")
 
             def download_and_import(filename, inline_label):
+                """核对两处下载入口的示例内容，并将该文件导入模板表单。"""
                 link = dialog.locator("#example-download-json")
                 expect(link).to_be_visible()
                 expect(link).to_have_attribute("download", filename)
